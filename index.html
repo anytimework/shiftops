@@ -560,7 +560,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div id="sr-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;font-size:13px;"></div>
     <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Enter the replacement worker's details and the raised rate. The cost difference is absorbed by you as service recovery.</span></div>
     <div class="divider"></div>
-    <div class="form-row"><label>Replacement worker name</label><input type="text" id="sr-worker" placeholder="e.g. Ben T."></div>
+    <div class="form-row"><label>Replacement worker</label><select id="sr-worker"><option value="">Select replacement worker</option></select></div>
     <div class="form-grid">
       <div class="form-row"><label>Original rate ($/hr)</label><input type="number" id="sr-orig" readonly style="background:var(--bg3);color:var(--text3);"></div>
       <div class="form-row"><label>Replacement rate ($/hr)</label><input type="number" id="sr-new" step="0.50" min="1" oninput="calcSR()"></div>
@@ -986,6 +986,18 @@ function netPaymentForShift(s) {
   if (s.sr_worker) return serviceRecoveryPayment(s);
   return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s));
 }
+function isPayableShift(s) {
+  const workerName = String(s?.worker_name || '').trim().toLowerCase();
+  return workerName && workerName !== 'available' && !s?.cancelled;
+}
+function estimatedPaymentForShift(s) {
+  if (!isPayableShift(s)) return 0;
+  if (s.clock_out) return netPaymentForShift(s);
+  const estimatedEnd = s.scheduled_end?.slice(0,5);
+  if (!estimatedEnd) return 0;
+  const tempShift = { ...s, clock_out: estimatedEnd };
+  return Math.max(0, payoutForShift(tempShift) - shiftPenaltyAmount(tempShift));
+}
 function paymentDisplay(s) {
   const hours = calcShiftHours(s);
   const gross = payoutForShift(s);
@@ -995,6 +1007,10 @@ function paymentDisplay(s) {
   }
   const penalty = shiftPenaltyAmount(s);
   const pnote = payrollStartNote(s);
+  if (!s.clock_out && !s.cancelled) {
+    const est = estimatedPaymentForShift(s);
+    return `<div>${money(est)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">Pending clock-out</div><div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
+  }
   return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${money(net)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${money(penalty)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
 }
 
@@ -1054,6 +1070,7 @@ async function loadWorkers() {
   });
   const dl = document.getElementById('worker-datalist');
   dl.innerHTML = allWorkers.map(w => `<option value="${w.name}">`).join('');
+  if (document.getElementById('sr-worker')) populateSRWorkerSelect();
 }
 
 async function loadRateRules() {
@@ -1201,6 +1218,8 @@ function renderTable() {
     <tbody>
       ${rows.map(s => {
         const hours = calcShiftHours(s);
+        const workerName = String(s.worker_name || '').trim() || 'Available';
+        const isAvailable = workerName.toLowerCase() === 'available';
         const srTag = s.sr_worker ? `<div class="sr-tag">↺ SR: ${s.sr_worker}</div>` : '';
         const isCancelled = s.cancelled;
         const rowClass = isCancelled ? 'row-cancelled' : '';
@@ -1211,12 +1230,16 @@ function renderTable() {
             : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`;
           actions = `<div class="action-stack">${srAction}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`;
         } else {
+          const replacementAction = (isAvailable && !s.sr_worker)
+            ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`
+            : '';
           actions = `<div class="action-stack">
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
-            <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${s.worker_name}','${s.outlet}','${s.scheduled_start}')">Cancel</button></div>`;
+            ${replacementAction}
+            <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div class="worker-name">${s.worker_name}</div><div class="sub-text">${s.outlet}</div>${srTag}</td>
+          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div><div class="sub-text">${s.outlet}</div>${srTag}</td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -1266,7 +1289,7 @@ function renderWeeklyGrid() {
     const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${money(netPaymentForShift(s))}</div>` : '';
     const actions = s.cancelled
       ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
-      : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button><button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
+      : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button>${(isAvailable && !s.sr_worker) ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>` : ''}<button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
     return `<div class="week-shift${cls}">
       <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
       <div class="week-meta">${nameHtml}</div>
@@ -1372,17 +1395,24 @@ async function deleteCancelledShift(id) {
 
 // ── Metrics ──────────────────────────────────────────────────
 function renderMetrics() {
-  const present = allShifts.filter(s => !s.cancelled && s.clock_in).length;
-  const late = allShifts.filter(s => !s.cancelled && calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
+  const payableShifts = allShifts.filter(isPayableShift);
+  const present = payableShifts.filter(s => s.clock_in).length;
+  const pendingClockOut = payableShifts.filter(s => s.clock_in && !s.clock_out).length;
+  const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = allShifts.filter(s => s.cancelled).length;
   const srAbsorbed = allShifts.filter(s => s.sr_absorbed).reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
   const latePenalties = allShifts.reduce((a,s) => { const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)); return a + (s.cancelled ? 0 : l.penalty); }, 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   const totalPenalties = latePenalties + cancelPenalties;
+  const totalPaidOut = payableShifts.filter(s => s.clock_out).reduce((a,s) => a + netPaymentForShift(s), 0);
+  const estimatedPayout = payableShifts.filter(s => !s.clock_out).reduce((a,s) => a + estimatedPaymentForShift(s), 0);
 
   document.getElementById('metrics').innerHTML = `
     <div class="metric-card"><div class="metric-label">Shifts</div><div class="metric-val">${allShifts.length}</div></div>
     <div class="metric-card"><div class="metric-label">Clocked in</div><div class="metric-val blue">${present}</div></div>
+    <div class="metric-card"><div class="metric-label">Pending clock-out</div><div class="metric-val ${pendingClockOut>0?'amber':'green'}">${pendingClockOut}</div></div>
+    <div class="metric-card"><div class="metric-label">Total paid out</div><div class="metric-val green">$${totalPaidOut.toFixed(2)}</div></div>
+    <div class="metric-card"><div class="metric-label">Est. payout</div><div class="metric-val ${estimatedPayout>0?'amber':''}">$${estimatedPayout.toFixed(2)}</div></div>
     <div class="metric-card"><div class="metric-label">Late</div><div class="metric-val ${late>0?'red':'green'}">${late}</div></div>
     <div class="metric-card"><div class="metric-label">Cancelled</div><div class="metric-val ${cancelled>0?'red':''}">${cancelled}</div></div>
     <div class="metric-card"><div class="metric-label">Penalties</div><div class="metric-val ${totalPenalties>0?'red':'green'}">$${totalPenalties.toFixed(2)}</div></div>
@@ -1605,6 +1635,18 @@ async function confirmCancel() {
 }
 
 // ── Service recovery ──────────────────────────────────────────
+function populateSRWorkerSelect(currentWorkerName = '') {
+  const sel = document.getElementById('sr-worker');
+  if (!sel) return;
+  const current = String(currentWorkerName || '').trim().toLowerCase();
+  const availableWorkers = (allWorkers || [])
+    .filter(w => w && w.name && !isWorkerSuspended(w.name))
+    .filter(w => w.name.trim().toLowerCase() !== current)
+    .sort((a,b) => a.name.localeCompare(b.name));
+  sel.innerHTML = '<option value="">Select replacement worker</option>' +
+    availableWorkers.map(w => `<option value="${escapeAttr(w.name)}">${w.name}</option>`).join('');
+}
+
 function openSRModal(id, rate, workerName, outlet, sched) {
   pendingSRId = id;
   document.getElementById('sr-info').innerHTML =
@@ -1613,6 +1655,7 @@ function openSRModal(id, rate, workerName, outlet, sched) {
   document.getElementById('sr-orig').value = parseFloat(rate).toFixed(2);
   document.getElementById('sr-new').value = '';
   document.getElementById('sr-hours').value = '';
+  populateSRWorkerSelect(workerName);
   document.getElementById('sr-worker').value = '';
   document.getElementById('sr-preview').style.cssText = '';
   document.getElementById('sr-modal').classList.add('open');
@@ -1638,7 +1681,15 @@ async function confirmSR() {
   const hrs = parseFloat(document.getElementById('sr-hours').value);
   const orig = parseFloat(document.getElementById('sr-orig').value);
   if (!worker || isNaN(newR) || isNaN(hrs)) { toast('Please fill all fields', 'error'); return; }
-  const { error } = await supabaseClient.from('shifts').update({ sr_worker: worker, sr_rate: newR, sr_hours: hrs, sr_absorbed: (newR-orig)*hrs, updated_at: new Date().toISOString() }).eq('id', pendingSRId);
+  const { error } = await supabaseClient.from('shifts').update({
+    worker_name: worker,
+    cancelled: false,
+    sr_worker: worker,
+    sr_rate: newR,
+    sr_hours: hrs,
+    sr_absorbed: (newR-orig)*hrs,
+    updated_at: new Date().toISOString()
+  }).eq('id', pendingSRId);
   if (error) { toast('Failed to save SR', 'error'); return; }
   toast('Replacement logged!');
   closeSRModal(); await loadShifts();
