@@ -429,7 +429,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 <script>
 // ── Config ──────────────────────────────────────────────────
-let supabase = null;
+let supabaseClient = null;
 let SUPABASE_URL = "https://jpfnrsxnnbtcadsnjrpc.supabase.co";
 let SUPABASE_KEY = "sb_publishable_DhBw1EVUSl_Ik5HI3JiqUA_NCxod4ty";
 
@@ -450,7 +450,7 @@ function initSupabase() {
     return;
   }
   try {
-    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     document.getElementById('setup-page').style.display = 'none';
     document.getElementById('main-app').style.display = 'flex';
     init();
@@ -548,7 +548,7 @@ function isWorkerSuspended(workerName) {
 
 // ── Load data ─────────────────────────────────────────────────
 async function loadOutlets() {
-  const { data } = await supabase.from('outlets').select('*').order('name');
+  const { data } = await supabaseClient.from('outlets').select('*').order('name');
   allOutlets = data || [];
   const sel = document.getElementById('outlet-filter');
   const fsel = document.getElementById('f-outlet');
@@ -559,8 +559,8 @@ async function loadOutlets() {
 }
 
 async function loadWorkers() {
-  const { data: workers } = await supabase.from('workers').select('*').order('name');
-  const { data: clog } = await supabase.from('cancellation_log').select('worker_name, cancelled_at');
+  const { data: workers } = await supabaseClient.from('workers').select('*').order('name');
+  const { data: clog } = await supabaseClient.from('cancellation_log').select('worker_name, cancelled_at');
   allWorkers = (workers || []).map(w => {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
     const recent = (clog || []).filter(c => c.worker_name === w.name && new Date(c.cancelled_at) >= cutoff).length;
@@ -573,7 +573,7 @@ async function loadWorkers() {
 async function loadShifts() {
   const dateStr = formatDate(currentDate);
   const outlet = document.getElementById('outlet-filter')?.value || '';
-  let q = supabase.from('shifts').select('*').eq('shift_date', dateStr).order('scheduled_start');
+  let q = supabaseClient.from('shifts').select('*').eq('shift_date', dateStr).order('scheduled_start');
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
   allShifts = data || [];
@@ -667,7 +667,7 @@ function openEditRow(id) {
 async function saveRow(id) {
   const ci = document.getElementById('edit-ci-' + id)?.value;
   const co = document.getElementById('edit-co-' + id)?.value;
-  const { error } = await supabase.from('shifts').update({ clock_in: ci||null, clock_out: co||null, updated_at: new Date().toISOString() }).eq('id', id);
+  const { error } = await supabaseClient.from('shifts').update({ clock_in: ci||null, clock_out: co||null, updated_at: new Date().toISOString() }).eq('id', id);
   if (error) { toast('Failed to save', 'error'); return; }
   toast('Saved!');
   await loadShifts();
@@ -746,7 +746,7 @@ async function addShift() {
   if (isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
-  const { error } = await supabase.from('shifts').insert({
+  const { error } = await supabaseClient.from('shifts').insert({
     shift_date: formatDate(currentDate),
     worker_name: name,
     outlet: document.getElementById('f-outlet').value,
@@ -756,7 +756,7 @@ async function addShift() {
   });
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
   if (!allWorkers.find(x => x.name === name)) {
-    await supabase.from('workers').insert({ name, default_rate: rate });
+    await supabaseClient.from('workers').insert({ name, default_rate: rate });
     await loadWorkers();
   }
   toast('Shift added!');
@@ -802,17 +802,17 @@ function removeMc() { mcDataUrl = null; document.getElementById('mc-uploaded').c
 async function confirmCancel() {
   if (!pendingCancelId) return;
   const s = allShifts.find(x => x.id === pendingCancelId);
-  const { error } = await supabase.from('shifts').update({
+  const { error } = await supabaseClient.from('shifts').update({
     cancelled: true, clock_in: null, clock_out: null,
     cancellation_penalty: mcDataUrl ? 0 : 15,
     mc_url: mcDataUrl || null, updated_at: new Date().toISOString()
   }).eq('id', pendingCancelId);
   if (error) { toast('Failed to cancel', 'error'); return; }
-  await supabase.from('cancellation_log').insert({ worker_name: s.worker_name, shift_id: pendingCancelId, cancelled_at: formatDate(currentDate), has_mc: !!mcDataUrl });
+  await supabaseClient.from('cancellation_log').insert({ worker_name: s.worker_name, shift_id: pendingCancelId, cancelled_at: formatDate(currentDate), has_mc: !!mcDataUrl });
   const recent = getRecentCancellations(s.worker_name) + 1;
   if (recent >= 2) {
     const until = new Date(); until.setDate(until.getDate() + 30);
-    await supabase.from('workers').update({ suspended: true, suspended_until: formatDate(until) }).eq('name', s.worker_name);
+    await supabaseClient.from('workers').update({ suspended: true, suspended_until: formatDate(until) }).eq('name', s.worker_name);
     toast(`${s.worker_name} has been suspended for 1 month`, 'error');
   }
   await loadWorkers(); closeCancelModal(); await loadShifts();
@@ -853,7 +853,7 @@ async function confirmSR() {
   const hrs = parseFloat(document.getElementById('sr-hours').value);
   const orig = parseFloat(document.getElementById('sr-orig').value);
   if (!worker || isNaN(newR) || isNaN(hrs)) { toast('Please fill all fields', 'error'); return; }
-  const { error } = await supabase.from('shifts').update({ sr_worker: worker, sr_rate: newR, sr_hours: hrs, sr_absorbed: (newR-orig)*hrs, updated_at: new Date().toISOString() }).eq('id', pendingSRId);
+  const { error } = await supabaseClient.from('shifts').update({ sr_worker: worker, sr_rate: newR, sr_hours: hrs, sr_absorbed: (newR-orig)*hrs, updated_at: new Date().toISOString() }).eq('id', pendingSRId);
   if (error) { toast('Failed to save SR', 'error'); return; }
   toast('Replacement logged!');
   closeSRModal(); await loadShifts();
@@ -894,7 +894,7 @@ async function loadWorkerCards() {
 
 async function liftSuspension(name) {
   if (!confirm(`Lift suspension for ${name}? They will be able to take shifts again.`)) return;
-  await supabase.from('workers').update({ suspended: false, suspended_until: null }).eq('name', name);
+  await supabaseClient.from('workers').update({ suspended: false, suspended_until: null }).eq('name', name);
   toast(`Suspension lifted for ${name}`);
   await loadWorkerCards();
 }
@@ -905,7 +905,7 @@ async function addWorker() {
   const name = document.getElementById('wf-name').value.trim();
   const rate = parseFloat(document.getElementById('wf-rate').value);
   if (!name || isNaN(rate)) { toast('Please fill all fields', 'error'); return; }
-  const { error } = await supabase.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, default_rate: rate, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value });
+  const { error } = await supabaseClient.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, default_rate: rate, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value });
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
@@ -925,7 +925,7 @@ function openAddOutletModal() { document.getElementById('add-outlet-modal').clas
 async function addOutlet() {
   const name = document.getElementById('of-name').value.trim();
   if (!name) { toast('Enter an outlet name', 'error'); return; }
-  const { error } = await supabase.from('outlets').insert({ name });
+  const { error } = await supabaseClient.from('outlets').insert({ name });
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
