@@ -1206,9 +1206,10 @@ function renderTable() {
         const rowClass = isCancelled ? 'row-cancelled' : '';
         let actions = '';
         if (isCancelled) {
-          actions = s.sr_worker
+          const srAction = s.sr_worker
             ? `<span style="font-size:11px;color:var(--text3);">${s.sr_worker} covering</span>`
-            : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${s.worker_name}','${s.outlet}','${s.scheduled_start}')">↺ Find replacement</button>`;
+            : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`;
+          actions = `<div class="action-stack">${srAction}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`;
         } else {
           actions = `<div class="action-stack">
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
@@ -1264,7 +1265,7 @@ function renderWeeklyGrid() {
     const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong>${workerName}</strong>`;
     const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${money(netPaymentForShift(s))}</div>` : '';
     const actions = s.cancelled
-      ? (s.sr_worker ? '' : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button></div>`)
+      ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
       : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button><button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
     return `<div class="week-shift${cls}">
       <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
@@ -1325,6 +1326,32 @@ async function saveRow(id) {
   const { error } = await supabaseClient.from('shifts').update({ clock_in: ci||null, clock_out: co||null, break_mins: br, updated_at: new Date().toISOString() }).eq('id', id);
   if (error) { toast('Failed to save', 'error'); return; }
   toast('Saved!');
+  await loadShifts();
+}
+
+async function deleteCancelledShift(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) { toast('Shift not found', 'error'); return; }
+  if (!s.cancelled) {
+    toast('Only cancelled shifts can be deleted from Attendance', 'error');
+    return;
+  }
+
+  const label = `${s.outlet || 'this outlet'} · ${s.worker_name || 'Cancelled'} · ${scheduledRange(s)}`;
+  const ok = confirm(`Delete this cancelled shift permanently?\n\n${label}`);
+  if (!ok) return;
+
+  const { error } = await supabaseClient
+    .from('shifts')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    toast('Failed to delete cancelled shift: ' + error.message, 'error');
+    return;
+  }
+
+  toast('Cancelled shift deleted');
   await loadShifts();
 }
 
