@@ -6,11 +6,8 @@
 <title>ShiftOps — Payroll Management</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=xDM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-<button class="btn btn-danger btn-sm" onclick="logout()">
-  Logout
-</button>
 :root {
   --bg: #0f1117;
   --bg2: #181c27;
@@ -536,138 +533,27 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 </div>
 
 
-<!-- LOGIN PAGE -->
-<div id="login-page" style="
-display:flex;
-align-items:center;
-justify-content:center;
-height:100vh;
-background:#0f1117;
-font-family:'DM Sans',sans-serif;
-">
-  <div style="
-    width:340px;
-    background:#181c27;
-    padding:30px;
-    border-radius:12px;
-    border:1px solid rgba(255,255,255,0.08);
-  ">
-    
-    <h2 style="margin:0 0 6px 0;color:white;">ShiftOps Login</h2>
-    <p style="margin:0 0 24px 0;color:#8b90a0;font-size:13px;">
-      Internal Operations Access
-    </p>
-
-    <div style="margin-bottom:14px;">
-      <label style="font-size:12px;color:#8b90a0;">Username</label>
-      <select id="login-username" style="
-        width:100%;
-        margin-top:6px;
-        padding:10px;
-        border-radius:8px;
-        border:1px solid rgba(255,255,255,0.1);
-        background:#0f1117;
-        color:white;
-      ">
-        <option>Jon</option>
-        <option>Jayden</option>
-        <option>McBilly</option>
-        <option>Yra</option>
-        <option>Niro</option>
-      </select>
-    </div>
-
-    <div style="margin-bottom:18px;">
-      <label style="font-size:12px;color:#8b90a0;">Password</label>
-      <input 
-        type="password"
-        id="login-password"
-        placeholder="Enter password"
-        style="
-          width:100%;
-          margin-top:6px;
-          padding:10px;
-          border-radius:8px;
-          border:1px solid rgba(255,255,255,0.1);
-          background:#0f1117;
-          color:white;
-        "
-      >
-    </div>
-
-    <button onclick="login()" style="
-      width:100%;
-      padding:11px;
-      border:none;
-      border-radius:8px;
-      background:#4f8ef7;
-      color:white;
-      font-weight:600;
-      cursor:pointer;
-    ">
-      Login
-    </button>
-
-    <div style="
-      margin-top:20px;
-      font-size:11px;
-      color:#666;
-      line-height:1.6;
-    ">
-      <div>Jon → 8472915630</div>
-      <div>Jayden → 5028741936</div>
-      <div>McBilly → 9182637450</div>
-      <div>Yra → 3749501826</div>
-      <div>Niro → 6814209753</div>
-    </div>
-
+<!-- INTERNAL LOGIN MODAL -->
+<div class="modal-overlay" id="internal-login-modal">
+  <div class="modal" style="width:360px;">
+    <h3>Internal login</h3>
+    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Default passcode is 123456. You will be asked to change it after first login.</span></div>
+    <div class="form-row"><label>Username</label><select id="login-user"></select></div>
+    <div class="form-row"><label>Passcode</label><input type="password" id="login-pass" placeholder="123456"></div>
+    <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="internalLogin()">Login</button>
   </div>
 </div>
 
-<script>
-const USERS = {
-  "Jon": "8472915630",
-  "Jayden": "5028741936",
-  "McBilly": "9182637450",
-  "Yra": "3749501826",
-  "Niro": "6814209753"
-};
-
-function login() {
-  const username = document.getElementById("login-username").value;
-  const password = document.getElementById("login-password").value;
-
-  if (USERS[username] && USERS[username] === password) {
-
-    localStorage.setItem("loggedInUser", username);
-
-    document.getElementById("login-page").style.display = "none";
-    document.getElementById("main-app").style.display = "flex";
-
-  } else {
-    alert("Invalid username or password");
-  }
-}
-
-function logout() {
-  localStorage.removeItem("loggedInUser");
-  location.reload();
-}
-
-window.onload = function() {
-
-  const user = localStorage.getItem("loggedInUser");
-
-  if (user) {
-    document.getElementById("login-page").style.display = "none";
-    document.getElementById("main-app").style.display = "flex";
-  } else {
-    document.getElementById("login-page").style.display = "flex";
-    document.getElementById("main-app").style.display = "none";
-  }
-
-}
-</script>
+<!-- CHANGE PASSCODE MODAL -->
+<div class="modal-overlay" id="change-pass-modal">
+  <div class="modal" style="width:360px;">
+    <h3>Change passcode</h3>
+    <div class="alert alert-amber"><span class="alert-icon">⚠️</span><span>Please change the generic passcode before continuing.</span></div>
+    <div class="form-row"><label>New passcode</label><input type="password" id="new-pass" placeholder="Enter new passcode"></div>
+    <div class="form-row"><label>Confirm passcode</label><input type="password" id="new-pass-confirm" placeholder="Confirm new passcode"></div>
+    <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="changeInternalPasscode()">Save passcode</button>
+  </div>
+</div>
 
 <!-- ADD INCIDENT MODAL -->
 <div class="modal-overlay" id="incident-modal">
