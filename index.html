@@ -251,6 +251,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('outlets',this)">
         <span class="nav-icon">🏪</span> Outlets
       </button>
+      <button class="nav-item" onclick="switchPage('rates',this)">
+        <span class="nav-icon">💵</span> Rates
+      </button>
+      <button class="nav-item" onclick="switchPage('reports',this)">
+        <span class="nav-icon">📊</span> Reports
+      </button>
     </nav>
     <div class="sidebar-date" id="sidebar-date"></div>
   </div>
@@ -311,6 +317,59 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         </div>
       </div>
     </div>
+
+    <!-- RATES PAGE -->
+    <div id="page-rates" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>Rates</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Manage rates by outlet and job type</p></div>
+      </div>
+      <div class="content">
+        <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Select an outlet, then choose a job type. Rates are editable by day. Add Shift will auto-fill the rate based on outlet, job type and date.</span></div>
+        <div class="table-wrap" style="margin-bottom:16px;">
+          <div class="table-header"><span class="table-title">Outlets</span><span class="table-count">Click Manage rates</span></div>
+          <div id="rates-body"></div>
+        </div>
+        <div class="table-wrap" id="rate-editor-wrap" style="display:none;">
+          <div class="table-header"><span class="table-title" id="rate-editor-title">Outlet rates</span></div>
+          <div style="padding:16px 18px;">
+            <div class="form-row">
+              <label>Job type</label>
+              <select id="rate-job-type" onchange="renderRateEditor()"></select>
+            </div>
+            <div id="rate-editor-body"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- REPORTS PAGE -->
+    <div id="page-reports" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>Reports</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Generate client usage and payroll-style summaries</p></div>
+      </div>
+      <div class="content">
+        <div class="table-wrap" style="margin-bottom:16px;">
+          <div class="table-header"><span class="table-title">Usage report filters</span></div>
+          <div style="padding:16px 18px;">
+            <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr auto;align-items:end;">
+              <div class="form-row"><label>From</label><input type="date" id="report-from"></div>
+              <div class="form-row"><label>To</label><input type="date" id="report-to"></div>
+              <div class="form-row"><label>Outlet / client</label><select id="report-outlet"><option value="">All outlets</option></select></div>
+              <button class="btn btn-primary btn-sm" onclick="generateReport()">Generate</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button class="btn btn-ghost btn-sm" onclick="setReportThisMonth()">This month</button>
+              <button class="btn btn-ghost btn-sm" onclick="exportReportCsv()">Export CSV</button>
+            </div>
+          </div>
+        </div>
+        <div class="metrics" id="report-metrics"></div>
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title" id="report-title">Usage report</span><span class="table-count" id="report-count"></span></div>
+          <div id="report-body"><div class="empty-state"><div class="empty-icon">📊</div><p>Select a date range and outlet, then click Generate.</p></div></div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -325,14 +384,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <datalist id="worker-datalist"></datalist>
     </div>
     <div class="form-grid">
-      <div class="form-row"><label>Outlet</label><select id="f-outlet"></select></div>
+      <div class="form-row"><label>Outlet</label><select id="f-outlet" onchange="applySuggestedRate()"></select></div>
       <div class="form-row"><label>Role</label>
-        <select id="f-role"><option>Kitchen</option><option>Service</option><option>Cashier</option><option>Runner</option><option>Barista</option></select>
+        <select id="f-role" onchange="applySuggestedRate()"><option>F&amp;B Service Crew</option><option>Dishwasher</option><option>Kitchen Assistant</option><option>Chef De Partie</option><option>Cashier</option><option>Runner</option><option>Barista</option></select>
       </div>
     </div>
     <div class="form-grid">
-      <div class="form-row"><label>Scheduled start</label><input type="time" id="f-sched" value="09:00"></div>
-      <div class="form-row"><label>Rate ($/hr)</label><input type="number" id="f-rate" step="0.50" min="1" value="9.50"></div>
+      <div class="form-row"><label>Scheduled start</label><input type="time" id="f-sched" value="09:00" onchange="applySuggestedRate()"></div>
+      <div class="form-row"><label>Rate ($/hr)</label><input type="number" id="f-rate" step="0.50" min="1" value="12.00"></div>
     </div>
     <div class="form-row">
       <label>Clock-in time <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional)</span></label>
@@ -398,10 +457,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="modal">
     <h3>Add worker</h3>
     <div class="form-row"><label>Full name</label><input type="text" id="wf-name" placeholder="e.g. Amirah B."></div>
-    <div class="form-grid">
-      <div class="form-row"><label>Phone</label><input type="text" id="wf-phone" placeholder="+65 9xxx xxxx"></div>
-      <div class="form-row"><label>Default rate ($/hr)</label><input type="number" id="wf-rate" value="9.50" step="0.50" min="1"></div>
-    </div>
+    <div class="form-row"><label>Phone</label><input type="text" id="wf-phone" placeholder="+65 9xxx xxxx"></div>
     <div class="form-grid">
       <div class="form-row"><label>Payment method</label>
         <select id="wf-method"><option>PayNow</option><option>DBS</option><option>POSB</option><option>OCBC</option><option>Cash</option></select>
@@ -420,12 +476,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="modal" style="width:320px;">
     <h3>Add outlet</h3>
     <div class="form-row"><label>Outlet name</label><input type="text" id="of-name" placeholder="e.g. Kopitiam Sengkang"></div>
+    <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="addOutlet()">Add outlet</button>
     </div>
   </div>
 </div>
+
 
 <script>
 // ── Config ──────────────────────────────────────────────────
@@ -465,13 +523,76 @@ const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Satur
 const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
-let allShifts = [], allWorkers = [], allOutlets = [];
+let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [];
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
+
+
+const JOB_TYPES = ['F&B Service Crew', 'Dishwasher', 'Kitchen Assistant', 'Chef De Partie', 'Cashier', 'Runner', 'Barista'];
+const DAY_KEYS = ['mon','tue','wed','thu','fri','sat','sun'];
+const DAY_LABELS = { mon:'Mon', tue:'Tue', wed:'Wed', thu:'Thu', fri:'Fri', sat:'Sat', sun:'Sun' };
+let selectedRateOutlet = '';
+
+function normaliseRole(r) {
+  if (!r) return '';
+  const x = r.toLowerCase();
+  if (x === 'service' || x.includes('service')) return 'F&B Service Crew';
+  if (x.includes('dish')) return 'Dishwasher';
+  if (x.includes('kitchen')) return 'Kitchen Assistant';
+  if (x.includes('chef')) return 'Chef De Partie';
+  return r;
+}
+
+function defaultDailyRates(role) {
+  const r = normaliseRole(role);
+  if (r === 'F&B Service Crew' || r === 'Cashier' || r === 'Runner' || r === 'Barista') {
+    return { mon:12, tue:12, wed:12, thu:12, fri:15, sat:15, sun:15 };
+  }
+  if (r === 'Dishwasher' || r === 'Kitchen Assistant') {
+    return { mon:15, tue:15, wed:15, thu:15, fri:15, sat:15, sun:15 };
+  }
+  if (r === 'Chef De Partie') {
+    return { mon:18, tue:18, wed:18, thu:18, fri:18, sat:18, sun:18 };
+  }
+  return { mon:12, tue:12, wed:12, thu:12, fri:15, sat:15, sun:15 };
+}
+
+function dayKeyForDate(d) {
+  return DAY_KEYS[d.getDay() === 0 ? 6 : d.getDay() - 1];
+}
+
+function ensureOutletRates(outlet) {
+  if (!outlet) return;
+  if (!rateRules[outlet]) rateRules[outlet] = {};
+  JOB_TYPES.forEach(role => {
+    if (!rateRules[outlet][role]) rateRules[outlet][role] = defaultDailyRates(role);
+    DAY_KEYS.forEach(day => {
+      if (rateRules[outlet][role][day] === undefined || rateRules[outlet][role][day] === null || rateRules[outlet][role][day] === '') {
+        rateRules[outlet][role][day] = defaultDailyRates(role)[day];
+      }
+    });
+  });
+}
+
+function getSuggestedRate(outlet, role, dateObj) {
+  const roleName = normaliseRole(role);
+  const day = dayKeyForDate(dateObj);
+  ensureOutletRates(outlet);
+  const outletRate = rateRules[outlet]?.[roleName]?.[day];
+  if (outletRate !== undefined && outletRate !== null && outletRate !== '') return { rate: outletRate };
+  return { rate: defaultDailyRates(roleName)[day] };
+}
+
+function applySuggestedRate() {
+  const outlet = document.getElementById('f-outlet')?.value || '';
+  const role = document.getElementById('f-role')?.value || '';
+  const rule = getSuggestedRate(outlet, role, currentDate);
+  if (rule) document.getElementById('f-rate').value = parseFloat(rule.rate).toFixed(2);
+}
 
 // ── Init ─────────────────────────────────────────────────────
 async function init() {
   updateDateLabel();
-  await Promise.all([loadOutlets(), loadWorkers()]);
+  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules()]);
   await loadShifts();
   updateSidebarDate();
 }
@@ -505,6 +626,8 @@ function switchPage(name, btn) {
   btn.classList.add('active');
   if (name === 'workers') loadWorkerCards();
   if (name === 'outlets') loadOutletsList();
+  if (name === 'rates') loadRatesList();
+  if (name === 'reports') initReportsPage();
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -519,7 +642,30 @@ function toast(msg, type = 'success') {
 
 // ── Penalty logic ─────────────────────────────────────────────
 function toMins(t) { if (!t) return null; const [h,m] = t.split(':').map(Number); return h*60+m; }
-function calcHours(ci, co) { if (!ci || !co) return null; const d = toMins(co) - toMins(ci); return d > 0 ? (d/60).toFixed(1) : null; }
+function calcHours(ci, co) { if (!ci || !co) return null; const d = toMins(co) - toMins(ci); return d > 0 ? (d/60).toFixed(2).replace(/\.00$/, '').replace(/0$/, '') : null; }
+function money(n) { return '$' + Number(n || 0).toFixed(2); }
+function formatDisplayDate(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00');
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+function formatShortDate(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00');
+  return `${d.getDate()}/${d.getMonth()+1}`;
+}
+function payrollSummary(s) {
+  const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5));
+  if (!hours) return '—';
+  return `${formatShortDate(s.shift_date)} - ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${Number(s.rate || 0).toFixed(0)}/hr`;
+}
+function simplePayrollText(s) {
+  const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5));
+  if (!hours) return '—';
+  return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at ${Number(s.rate || 0).toFixed(0)}/hr`;
+}
+function payoutForShift(s) {
+  const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5)) || 0);
+  return hours * parseFloat(s.rate || 0);
+}
 
 function calcLatePenalty(sched, clockIn) {
   if (!clockIn) return { mins:0, penalty:0, status:'absent' };
@@ -550,12 +696,17 @@ function isWorkerSuspended(workerName) {
 async function loadOutlets() {
   const { data } = await supabaseClient.from('outlets').select('*').order('name');
   allOutlets = data || [];
+  allOutlets.forEach(o => ensureOutletRates(o.name));
   const sel = document.getElementById('outlet-filter');
   const fsel = document.getElementById('f-outlet');
   const existing = sel.value;
   sel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
   if (existing) sel.value = existing;
   fsel.innerHTML = allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  const rsel = document.getElementById('rf-outlet');
+  if (rsel) rsel.innerHTML = '<option value="">General / all outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  const reportSel = document.getElementById('report-outlet');
+  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
 }
 
 async function loadWorkers() {
@@ -568,6 +719,93 @@ async function loadWorkers() {
   });
   const dl = document.getElementById('worker-datalist');
   dl.innerHTML = allWorkers.map(w => `<option value="${w.name}">`).join('');
+}
+
+async function loadRateRules() {
+  const saved = localStorage.getItem('outlet_rate_rules');
+  rateRules = saved ? JSON.parse(saved) : {};
+  allOutlets.forEach(o => ensureOutletRates(o.name));
+  saveRateRules();
+}
+
+function saveRateRules() {
+  localStorage.setItem('outlet_rate_rules', JSON.stringify(rateRules));
+}
+
+function loadRatesList() {
+  const body = document.getElementById('rates-body');
+  if (!allOutlets.length) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">🏪</div><p>No outlets yet. Add outlets first, then manage rates here.</p></div>';
+    document.getElementById('rate-editor-wrap').style.display = 'none';
+    return;
+  }
+  allOutlets.forEach(o => ensureOutletRates(o.name));
+  saveRateRules();
+  body.innerHTML = `<table>
+    <thead><tr><th>Outlet</th><th>Location</th><th>Actions</th></tr></thead>
+    <tbody>${allOutlets.map(o => `<tr>
+      <td style="font-weight:500;">${o.name}</td>
+      <td>${o.location || '—'}</td>
+      <td><button class="btn btn-primary btn-sm" onclick="openOutletRates('${escapeAttr(o.name)}')">Manage rates</button></td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+function escapeAttr(v) {
+  return String(v || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function openOutletRates(outlet) {
+  selectedRateOutlet = outlet;
+  ensureOutletRates(outlet);
+  document.getElementById('rate-editor-wrap').style.display = 'block';
+  document.getElementById('rate-editor-title').textContent = `${outlet} rates`;
+  const jobSel = document.getElementById('rate-job-type');
+  jobSel.innerHTML = JOB_TYPES.map(j => `<option>${j}</option>`).join('');
+  jobSel.value = JOB_TYPES[0];
+  renderRateEditor();
+}
+
+function renderRateEditor() {
+  const outlet = selectedRateOutlet;
+  const role = document.getElementById('rate-job-type')?.value || JOB_TYPES[0];
+  if (!outlet || !role) return;
+  ensureOutletRates(outlet);
+  const rates = rateRules[outlet][role];
+  document.getElementById('rate-editor-body').innerHTML = `
+    <div class="form-grid" style="grid-template-columns:repeat(4,1fr);">
+      ${DAY_KEYS.map(day => `<div class="form-row"><label>${DAY_LABELS[day]}</label><input type="number" id="rate-${day}" value="${parseFloat(rates[day]).toFixed(2)}" step="0.50" min="1"></div>`).join('')}
+    </div>
+    <div class="modal-footer" style="margin-top:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="resetOutletJobRates()">Reset to pre-fill</button>
+      <button class="btn btn-primary btn-sm" onclick="saveOutletJobRates()">Save rates</button>
+    </div>`;
+}
+
+function saveOutletJobRates() {
+  const outlet = selectedRateOutlet;
+  const role = document.getElementById('rate-job-type')?.value;
+  if (!outlet || !role) return;
+  ensureOutletRates(outlet);
+  DAY_KEYS.forEach(day => {
+    const v = parseFloat(document.getElementById('rate-' + day).value);
+    if (!isNaN(v)) rateRules[outlet][role][day] = v;
+  });
+  saveRateRules();
+  toast('Rates saved');
+  applySuggestedRate();
+}
+
+function resetOutletJobRates() {
+  const outlet = selectedRateOutlet;
+  const role = document.getElementById('rate-job-type')?.value;
+  if (!outlet || !role) return;
+  if (!confirm(`Reset ${role} rates for ${outlet} to the standard pre-fill?`)) return;
+  ensureOutletRates(outlet);
+  rateRules[outlet][role] = defaultDailyRates(role);
+  saveRateRules();
+  renderRateEditor();
+  toast('Rates reset');
 }
 
 async function loadShifts() {
@@ -615,7 +853,7 @@ function renderTable() {
     <thead><tr>
       <th>Worker</th><th>Role</th><th>Scheduled</th>
       <th>Clock-in</th><th>Clock-out</th><th>Hours</th>
-      <th>Status</th><th>Penalty</th><th>Actions</th>
+      <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>Actions</th>
     </tr></thead>
     <tbody>
       ${rows.map(s => {
@@ -640,6 +878,8 @@ function renderTable() {
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
+          <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}</td>
+          <td style="font-family:var(--mono);font-size:12px;"><div>${money(payoutForShift(s))}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div></td>
           <td>${statusBadge(s)}</td>
           <td>${penaltyDisplay(s)}</td>
           <td>${actions}</td>
@@ -701,13 +941,13 @@ function openAddModal() {
   document.getElementById('pen-preview').classList.remove('show');
   document.getElementById('f-name').value = '';
   document.getElementById('f-clockin').value = '';
+  applySuggestedRate();
 }
 function closeAddModal() { document.getElementById('add-modal').classList.remove('open'); }
 
 function onWorkerInput() {
   const name = document.getElementById('f-name').value.trim();
   const w = allWorkers.find(x => x.name.toLowerCase() === name.toLowerCase());
-  if (w) document.getElementById('f-rate').value = w.default_rate;
   const warn = document.getElementById('add-block-warn');
   const btn = document.getElementById('add-confirm-btn');
   if (name && isWorkerSuspended(name)) {
@@ -756,7 +996,7 @@ async function addShift() {
   });
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
   if (!allWorkers.find(x => x.name === name)) {
-    await supabaseClient.from('workers').insert({ name, default_rate: rate });
+    await supabaseClient.from('workers').insert({ name });
     await loadWorkers();
   }
   toast('Shift added!');
@@ -883,11 +1123,12 @@ async function loadWorkerCards() {
             : `<span class="badge badge-green">Active</span>`}
       </div>
       <div class="worker-stats">
-        <div class="worker-stat"><div class="worker-stat-label">Default rate</div><div class="worker-stat-val">$${parseFloat(w.default_rate||0).toFixed(2)}/hr</div></div>
+        <div class="worker-stat"><div class="worker-stat-label">Phone</div><div class="worker-stat-val">${w.phone || '—'}</div></div>
         <div class="worker-stat"><div class="worker-stat-label">Cancellations (30d)</div><div class="worker-stat-val" style="color:${recent>=1?'var(--red)':'var(--green)'};">${recent}/2</div></div>
       </div>
       ${suspended && until ? `<div style="margin-top:10px;padding:8px 10px;background:var(--red-dim);border-radius:var(--radius);font-size:11px;color:var(--red);">Suspended until ${until.getDate()} ${MONTHS[until.getMonth()]} ${until.getFullYear()}</div>` : ''}
       ${suspended ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;justify-content:center;" onclick="liftSuspension('${w.name}')">Lift suspension</button>` : ''}
+      <button class="btn btn-danger btn-sm" style="width:100%;margin-top:8px;justify-content:center;" onclick="deleteWorker('${w.id}')">Delete worker</button>
     </div>`;
   }).join('');
 }
@@ -899,13 +1140,22 @@ async function liftSuspension(name) {
   await loadWorkerCards();
 }
 
+async function deleteWorker(id) {
+  const worker = allWorkers.find(w => w.id === id);
+  const name = worker?.name || 'this worker';
+  if (!confirm(`Delete worker ${name}? Existing shift records will remain for payroll history.`)) return;
+  const { error } = await supabaseClient.from('workers').delete().eq('id', id);
+  if (error) { toast('Failed to delete worker: ' + error.message, 'error'); return; }
+  toast('Worker deleted');
+  await loadWorkerCards(); await loadWorkers();
+}
+
 function openAddWorkerModal() { document.getElementById('add-worker-modal').classList.add('open'); }
 
 async function addWorker() {
   const name = document.getElementById('wf-name').value.trim();
-  const rate = parseFloat(document.getElementById('wf-rate').value);
-  if (!name || isNaN(rate)) { toast('Please fill all fields', 'error'); return; }
-  const { error } = await supabaseClient.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, default_rate: rate, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value });
+  if (!name) { toast('Please enter worker name', 'error'); return; }
+  const { error } = await supabaseClient.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value });
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
@@ -915,8 +1165,8 @@ async function addWorker() {
 // ── Outlets page ──────────────────────────────────────────────
 function loadOutletsList() {
   document.getElementById('outlets-body').innerHTML = `<table>
-    <thead><tr><th>Outlet name</th><th>Added</th></tr></thead>
-    <tbody>${allOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${new Date(o.created_at).toLocaleDateString()}</td></tr>`).join('')}</tbody>
+    <thead><tr><th>Outlet name</th><th>Location</th><th>Added</th><th>Actions</th></tr></thead>
+    <tbody>${allOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td>${o.location || '—'}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}</td><td><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></td></tr>`).join('')}</tbody>
   </table>`;
 }
 
@@ -925,11 +1175,121 @@ function openAddOutletModal() { document.getElementById('add-outlet-modal').clas
 async function addOutlet() {
   const name = document.getElementById('of-name').value.trim();
   if (!name) { toast('Enter an outlet name', 'error'); return; }
-  const { error } = await supabaseClient.from('outlets').insert({ name });
+  const { error } = await supabaseClient.from('outlets').insert({ name, location: document.getElementById('of-location').value.trim() });
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
+  document.getElementById('of-name').value = '';
+  document.getElementById('of-location').value = '';
   await loadOutlets(); loadOutletsList();
+}
+
+async function deleteOutlet(id) {
+  const outlet = allOutlets.find(o => o.id === id);
+  const name = outlet?.name || 'this outlet';
+  if (!confirm(`Delete outlet ${name}? Existing shift records will remain for payroll history.`)) return;
+  const { error } = await supabaseClient.from('outlets').delete().eq('id', id);
+  if (error) { toast('Failed to delete outlet: ' + error.message, 'error'); return; }
+  toast('Outlet deleted');
+  await loadOutlets(); loadOutletsList();
+}
+
+
+// ── Reports page ─────────────────────────────────────────────
+let currentReportRows = [];
+
+function initReportsPage() {
+  const reportSel = document.getElementById('report-outlet');
+  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  if (!document.getElementById('report-from').value || !document.getElementById('report-to').value) setReportThisMonth(false);
+}
+
+function setReportThisMonth(autoGenerate = true) {
+  const d = new Date();
+  const first = new Date(d.getFullYear(), d.getMonth(), 1);
+  const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  document.getElementById('report-from').value = formatDate(first);
+  document.getElementById('report-to').value = formatDate(last);
+  if (autoGenerate) generateReport();
+}
+
+async function generateReport() {
+  const from = document.getElementById('report-from').value;
+  const to = document.getElementById('report-to').value;
+  const outlet = document.getElementById('report-outlet').value;
+  if (!from || !to) { toast('Please select date range', 'error'); return; }
+  let q = supabaseClient.from('shifts').select('*').gte('shift_date', from).lte('shift_date', to).order('shift_date').order('scheduled_start');
+  if (outlet) q = q.eq('outlet', outlet);
+  const { data, error } = await q;
+  if (error) { toast('Failed to generate report: ' + error.message, 'error'); return; }
+  currentReportRows = (data || []).filter(s => !s.cancelled && s.clock_in && s.clock_out);
+  renderReport(from, to, outlet);
+}
+
+function renderReport(from, to, outlet) {
+  const body = document.getElementById('report-body');
+  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5)) || 0), 0);
+  const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
+  document.getElementById('report-title').textContent = `${outlet || 'All outlets'} usage: ${formatDisplayDate(from)} to ${formatDisplayDate(to)}`;
+  document.getElementById('report-count').textContent = `${currentReportRows.length} completed shift${currentReportRows.length !== 1 ? 's' : ''}`;
+  document.getElementById('report-metrics').innerHTML = `
+    <div class="metric-card"><div class="metric-label">Completed shifts</div><div class="metric-val blue">${currentReportRows.length}</div></div>
+    <div class="metric-card"><div class="metric-label">Total hours</div><div class="metric-val green">${totalHours.toFixed(2).replace(/\.00$/, '')}</div></div>
+    <div class="metric-card"><div class="metric-label">Total payout</div><div class="metric-val amber">${money(totalPayout)}</div></div>
+  `;
+  if (!currentReportRows.length) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>No completed shifts found for this report.</p></div>';
+    return;
+  }
+  body.innerHTML = `<div style="overflow-x:auto;"><table>
+    <thead><tr>
+      <th>Date</th><th>Employee</th><th>Outlet</th><th>Hours Worked</th><th>Rate</th><th>Payout</th><th>Summary</th><th>Role / Payroll Notes</th><th>In</th><th>Out</th><th>Break</th>
+    </tr></thead>
+    <tbody>
+      ${currentReportRows.map(s => {
+        const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5)) || 0);
+        return `<tr>
+          <td>${formatDisplayDate(s.shift_date)}</td>
+          <td>${s.worker_name}</td>
+          <td>${s.outlet}</td>
+          <td style="font-family:var(--mono);">${hours.toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}</td>
+          <td style="font-family:var(--mono);">${parseFloat(s.rate || 0).toFixed(0)}</td>
+          <td style="font-family:var(--mono);">${money(payoutForShift(s))}</td>
+          <td style="min-width:230px;">${payrollSummary(s)}</td>
+          <td>${s.role || ''}</td>
+          <td style="font-family:var(--mono);">${s.clock_in?.slice(0,5) || ''}</td>
+          <td style="font-family:var(--mono);">${s.clock_out?.slice(0,5) || ''}</td>
+          <td style="font-family:var(--mono);">0</td>
+        </tr>`;
+      }).join('')}
+      <tr>
+        <td style="font-weight:700;">TOTAL</td><td></td><td></td>
+        <td style="font-family:var(--mono);font-weight:700;">${totalHours.toFixed(2).replace(/\.00$/, '')}</td>
+        <td></td><td style="font-family:var(--mono);font-weight:700;">${money(totalPayout)}</td>
+        <td></td><td></td><td></td><td></td><td></td>
+      </tr>
+    </tbody>
+  </table></div>`;
+}
+
+function exportReportCsv() {
+  if (!currentReportRows.length) { toast('Generate a report first', 'error'); return; }
+  const header = ['Date','Employee','Outlet','Hours Worked','Rate','Payout','Summary','Role / Payroll Notes','In','Out','Break'];
+  const rows = currentReportRows.map(s => {
+    const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5)) || 0);
+    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours, parseFloat(s.rate || 0), payoutForShift(s).toFixed(2), payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', 0];
+  });
+  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5)) || 0), 0);
+  const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
+  rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),'','','','','']);
+  const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'usage_report.csv';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Close modals on overlay click ─────────────────────────────
