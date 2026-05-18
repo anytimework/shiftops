@@ -1288,10 +1288,9 @@ function renderWeeklyGrid() {
         ${days.map(d => {
           const dayStr = formatDate(d);
           const shifts = shiftsForDay(dayStr);
-          const blankSlots = Math.max(1, 8 - shifts.length);
           return `<div class="week-cell" onclick="if(event.target === this) openAddModalForDate('${dayStr}')">
             ${shifts.map(shiftCard).join('')}
-            ${Array.from({length: blankSlots}, () => `<div class="empty-book-slot" onclick="openAddModalForDate('${dayStr}')">+ Create shift</div>`).join('')}
+            <div class="empty-book-slot" onclick="event.stopPropagation(); openAddModalForDate('${dayStr}')">+ Create shift</div>
           </div>`;
         }).join('')}
       </div>
