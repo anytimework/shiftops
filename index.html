@@ -189,13 +189,16 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .attendance-scroll thead th:last-child { z-index:7; }
 .action-stack { display:flex; gap:6px; flex-wrap:wrap; }
 .week-grid-wrap { max-height: calc(100vh - 330px); overflow:auto; border-top:1px solid var(--border); }
-.week-grid { min-width:1100px; display:grid; grid-template-columns:190px repeat(7, minmax(150px, 1fr)); }
-.week-cell, .week-head, .week-worker { border-right:1px solid var(--border); border-bottom:1px solid var(--border); padding:10px; min-height:76px; }
-.week-head { position:sticky; top:0; background:var(--bg2); z-index:5; font-family:var(--mono); font-size:11px; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; }
-.week-worker { position:sticky; left:0; background:var(--bg2); z-index:4; font-weight:600; }
-.week-head:first-child { left:0; z-index:8; }
-.week-shift { background:var(--bg3); border:1px solid var(--border2); border-radius:var(--radius); padding:8px; margin-bottom:6px; font-size:12px; }
-.week-shift.cancelled { opacity:0.55; }
+.week-grid { min-width:1100px; display:grid; grid-template-columns:repeat(7, minmax(150px, 1fr)); }
+.week-cell, .week-head { border-right:1px solid var(--border); border-bottom:1px solid var(--border); padding:10px; }
+.week-head { position:sticky; top:0; background:var(--bg2); z-index:5; font-family:var(--mono); font-size:11px; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; text-align:center; }
+.week-cell { min-height:640px; display:flex; flex-direction:column; gap:8px; }
+.week-shift { background:var(--bg3); border:1px solid var(--border2); border-radius:var(--radius); padding:9px; font-size:12px; min-height:108px; }
+.week-shift.cancelled { opacity:0.75; border-color:rgba(232,64,64,0.55); background:rgba(232,64,64,0.10); }
+.week-shift.available { border-color:rgba(52,199,123,0.55); background:rgba(52,199,123,0.09); }
+.available-name { color:var(--green); font-weight:700; }
+.empty-book-slot { border:1px dashed rgba(79,142,247,0.35); border-radius:var(--radius); min-height:84px; display:flex; align-items:center; justify-content:center; color:var(--accent); font-size:12px; cursor:pointer; background:rgba(79,142,247,0.035); }
+.empty-book-slot:hover { border-color:var(--accent); background:var(--accent-dim); }
 .week-shift-top { display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:4px; }
 .week-time { font-family:var(--mono); color:var(--text); font-size:11px; }
 .week-meta { color:var(--text2); font-size:11px; line-height:1.4; }
@@ -327,6 +330,13 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         </div>
         <div class="topbar-right attendance-toolbar">
           <input id="attendance-search" class="attendance-search" type="search" placeholder="Search worker / outlet" oninput="renderTable()">
+          <select id="week-status-filter" onchange="renderTable()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;">
+            <option value="active" selected>Active only</option>
+            <option value="confirmed">Confirmed only</option>
+            <option value="available">Available only</option>
+            <option value="cancelled">Cancelled only</option>
+            <option value="all">All incl. cancelled</option>
+          </select>
           <div class="view-toggle">
             <button id="view-day-btn" class="active" onclick="setAttendanceView('day')">Day</button>
             <button id="view-week-btn" onclick="setAttendanceView('week')">Week grid</button>
@@ -473,10 +483,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <div class="modal-overlay" id="add-modal">
   <div class="modal">
     <h3>Add shift</h3>
+    <div id="add-date-hint" class="alert alert-blue" style="display:none;"><span class="alert-icon">📅</span><span id="add-date-hint-text"></span></div>
     <div id="add-block-warn" class="alert alert-red" style="display:none;"><span class="alert-icon">🚫</span><span id="add-block-text"></span></div>
     <div class="form-row">
-      <label>Worker name</label>
-      <input type="text" id="f-name" placeholder="Start typing a name..." list="worker-datalist" oninput="onWorkerInput()">
+      <label>Worker name <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional — leave blank for Available)</span></label>
+      <input type="text" id="f-name" placeholder="Start typing a name, or leave blank for Available" list="worker-datalist" oninput="onWorkerInput()">
       <datalist id="worker-datalist"></datalist>
     </div>
     <div class="form-grid">
@@ -511,8 +522,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <h3>Cancel shift</h3>
     <div id="cancel-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;font-size:13px;"></div>
     <div id="cancel-susp-warn" class="alert" style="display:none;"></div>
-    <div class="alert alert-red"><span class="alert-icon">⚠️</span><div><strong>$15 cancellation penalty</strong> applies. Waived with MC, but cancellation still counts toward suspension. <strong>2 cancellations in 30 days = 1-month suspension.</strong></div></div>
+    <div class="alert alert-red"><span class="alert-icon">⚠️</span><div><strong>$15 cancellation penalty</strong> applies for worker-side cancellations. MC or outlet-side cancellation can bypass the penalty.</div></div>
+    <div class="form-row" style="margin-top:10px;">
+      <label>Cancellation type</label>
+      <select id="cancel-type" onchange="updateCancelTypeUI()">
+        <option value="worker_penalty">Worker cancellation - apply $15 penalty</option>
+        <option value="worker_mc">Worker cancellation with MC - waive penalty</option>
+        <option value="outlet_bypass">Outlet cancelled shift - no penalty / no suspension count</option>
+      </select>
+      <div id="cancel-type-note" class="sub-text" style="margin-top:6px;line-height:1.5;">Penalty applies and counts toward worker suspension.</div>
+    </div>
     <div class="divider"></div>
+    <div id="mc-upload-section">
     <div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-family:var(--mono);">Upload MC to waive $15 penalty</div>
     <div class="upload-zone" onclick="document.getElementById('mc-file').click()">
       <div style="font-size:20px;margin-bottom:4px;">📄</div>
@@ -523,6 +544,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <img id="mc-thumb" class="mc-thumb" src="" alt="MC">
       <div style="flex:1;"><div style="font-weight:600;font-size:13px;color:var(--green);">MC uploaded — penalty waived</div><div style="font-size:11px;color:var(--text3);margin-top:2px;">Cancellation still counts toward suspension</div></div>
       <button onclick="removeMc()" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:12px;">✕</button>
+    </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="closeCancelModal()">Back</button>
@@ -1154,44 +1176,71 @@ function renderWeeklyGrid() {
   const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
   const start = startOfWeek(currentDate);
   const days = Array.from({length:7}, (_,i) => addDays(start, i));
-  const filtered = allShifts.filter(s => !search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search)));
-  document.getElementById('shift-count').textContent = filtered.length ? `${filtered.length} shift${filtered.length !== 1 ? 's' : ''}` : '';
-  if (!filtered.length) {
-    document.getElementById('table-body-wrap').innerHTML = '<div class="empty-state"><div class="empty-icon">📅</div><p>No shifts for this week.</p></div>';
-    return;
-  }
-  const workers = [...new Set(filtered.map(s => s.worker_name))].sort((a,b)=>a.localeCompare(b));
-  const cellFor = (worker, dayStr) => filtered.filter(s => s.worker_name === worker && s.shift_date === dayStr);
+  const statusFilter = document.getElementById('week-status-filter')?.value || 'active';
+  const matchesStatus = (s) => {
+    const workerName = String(s.worker_name || '').trim() || 'Available';
+    const isAvailable = workerName.toLowerCase() === 'available';
+    if (statusFilter === 'active') return !s.cancelled;
+    if (statusFilter === 'confirmed') return !s.cancelled && !isAvailable;
+    if (statusFilter === 'available') return !s.cancelled && isAvailable;
+    if (statusFilter === 'cancelled') return !!s.cancelled;
+    return true;
+  };
+  const filtered = allShifts.filter(s => matchesStatus(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  const labelMap = { active:'active', confirmed:'confirmed', available:'available', cancelled:'cancelled', all:'total' };
+  document.getElementById('shift-count').textContent = filtered.length ? `${filtered.length} ${labelMap[statusFilter] || ''} shift${filtered.length !== 1 ? 's' : ''}` : '0 shifts';
+
+  const shiftsForDay = (dayStr) => filtered
+    .filter(s => s.shift_date === dayStr)
+    .sort((a,b) => String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')) || String(a.outlet || '').localeCompare(String(b.outlet || '')));
+
+  const shiftCard = (s) => {
+    const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+    const workerName = String(s.worker_name || '').trim() || 'Available';
+    const isAvailable = workerName.toLowerCase() === 'available';
+    const cls = s.cancelled ? ' cancelled' : (isAvailable ? ' available' : '');
+    const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong>${workerName}</strong>`;
+    const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${money(netPaymentForShift(s))}</div>` : '';
+    const actions = s.cancelled
+      ? (s.sr_worker ? '' : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button></div>`)
+      : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button><button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
+    return `<div class="week-shift${cls}">
+      <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
+      <div class="week-meta">${nameHtml}</div>
+      <div class="week-time">${scheduledRange(s)}</div>
+      <div class="week-meta">${s.role || '—'}${hours ? ' · '+hours+'h' : ''}</div>
+      ${isAvailable ? '' : `<div class="week-meta">Net: ${money(netPaymentForShift(s))}</div>`}
+      <div style="margin-top:4px;">${statusBadge(s)}</div>
+      ${replacement}${actions}
+    </div>`;
+  };
+
   const html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-top:1px solid var(--border);color:var(--text3);font-size:12px;">
+      <span>Showing: ${labelMap[statusFilter] || 'filtered'} shifts</span>
+      <span>Cancelled shifts are hidden by default. Use the filter above to show them.</span>
+    </div>
     <div class="week-grid-wrap">
       <div class="week-grid">
-        <div class="week-head">Worker</div>
         ${days.map(d => `<div class="week-head">${DAYS_SHORT[d.getDay()]}<br>${d.getDate()} ${MONTHS[d.getMonth()]}</div>`).join('')}
-        ${workers.map(w => `
-          <div class="week-worker">${w}</div>
-          ${days.map(d => {
-            const dayStr = formatDate(d);
-            const shifts = cellFor(w, dayStr);
-            return `<div class="week-cell">${shifts.map(s => {
-              const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
-              const cls = s.cancelled ? ' cancelled' : '';
-              const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${money(netPaymentForShift(s))}</div>` : '';
-              const actions = s.cancelled
-                ? (s.sr_worker ? '' : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button></div>`)
-                : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">Edit</button><button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
-              return `<div class="week-shift${cls}">
-                <div class="week-shift-top"><span class="week-time">${scheduledRange(s)}</span>${statusBadge(s)}</div>
-                <div class="week-meta">${s.outlet}</div>
-                <div class="week-meta">${s.role} · ${hours ? hours+'h' : 'not clocked'}</div>
-                <div class="week-meta">Net: ${money(netPaymentForShift(s))}</div>
-                ${replacement}${actions}
-              </div>`;
-            }).join('')}</div>`;
-          }).join('')}
-        `).join('')}
+        ${days.map(d => {
+          const dayStr = formatDate(d);
+          const shifts = shiftsForDay(dayStr);
+          const blankSlots = Math.max(1, 8 - shifts.length);
+          return `<div class="week-cell" onclick="if(event.target === this) openAddModalForDate('${dayStr}')">
+            ${shifts.map(shiftCard).join('')}
+            ${Array.from({length: blankSlots}, () => `<div class="empty-book-slot" onclick="openAddModalForDate('${dayStr}')">+ Create shift</div>`).join('')}
+          </div>`;
+        }).join('')}
       </div>
     </div>`;
   document.getElementById('table-body-wrap').innerHTML = html;
+}
+
+function openAddModalForDate(dateStr) {
+  currentDate = new Date(dateStr + 'T00:00:00');
+  updateDateLabel();
+  openAddModal();
 }
 
 function renderTimeCell(s, field) {
@@ -1225,7 +1274,7 @@ function renderMetrics() {
   const cancelled = allShifts.filter(s => s.cancelled).length;
   const srAbsorbed = allShifts.filter(s => s.sr_absorbed).reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
   const latePenalties = allShifts.reduce((a,s) => { const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)); return a + (s.cancelled ? 0 : l.penalty); }, 0);
-  const cancelPenalties = allShifts.filter(s => s.cancelled && !s.mc_url).length * 15;
+  const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   const totalPenalties = latePenalties + cancelPenalties;
 
   document.getElementById('metrics').innerHTML = `
@@ -1240,6 +1289,12 @@ function renderMetrics() {
 
 // ── Add shift ─────────────────────────────────────────────────
 function openAddModal() {
+  const hint = document.getElementById('add-date-hint');
+  const hintText = document.getElementById('add-date-hint-text');
+  if (hint && hintText) {
+    hintText.textContent = `Creating shift for ${DAYS[currentDate.getDay()]}, ${currentDate.getDate()} ${MONTHS[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
+    hint.style.display = 'flex';
+  }
   document.getElementById('add-modal').classList.add('open');
   document.getElementById('add-block-warn').style.display = 'none';
   document.getElementById('add-confirm-btn').disabled = false;
@@ -1253,7 +1308,8 @@ function openAddModal() {
 function closeAddModal() { document.getElementById('add-modal').classList.remove('open'); }
 
 function onWorkerInput() {
-  const name = document.getElementById('f-name').value.trim();
+  const rawName = document.getElementById('f-name').value.trim();
+  const name = rawName || 'Available';
   const w = allWorkers.find(x => x.name.toLowerCase() === name.toLowerCase());
   const warn = document.getElementById('add-block-warn');
   const btn = document.getElementById('add-confirm-btn');
@@ -1295,13 +1351,14 @@ function previewPenalty() {
 }
 
 async function addShift() {
-  const name = document.getElementById('f-name').value.trim();
+  const rawName = document.getElementById('f-name').value.trim();
+  const name = rawName || 'Available';
   const sched = document.getElementById('f-sched').value;
   const schedEnd = document.getElementById('f-sched-end').value;
   const breakMins = parseInt(document.getElementById('f-break').value || 0, 10);
   const rate = parseFloat(document.getElementById('f-rate').value);
-  if (!name || !sched || isNaN(rate)) { toast('Please fill all required fields', 'error'); return; }
-  if (isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
+  if (!sched || isNaN(rate)) { toast('Please fill schedule and rate', 'error'); return; }
+  if (name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
   const { error } = await supabaseClient.from('shifts').insert({
@@ -1313,7 +1370,7 @@ async function addShift() {
     rate, break_mins: breakMins, clock_in: ci || null, late_penalty: lp
   });
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
-  if (!allWorkers.find(x => x.name === name)) {
+  if (name !== 'Available' && !allWorkers.find(x => x.name === name)) {
     await supabaseClient.from('workers').insert({ name });
     await loadWorkers();
   }
@@ -1339,9 +1396,25 @@ function openCancelModal(id, workerName, outlet, sched) {
   } else { warn.style.display = 'none'; }
   document.getElementById('mc-uploaded').classList.remove('show');
   document.getElementById('mc-file').value = '';
+  const cancelType = document.getElementById('cancel-type');
+  if (cancelType) cancelType.value = 'worker_penalty';
+  updateCancelTypeUI();
   document.getElementById('cancel-modal').classList.add('open');
 }
 function closeCancelModal() { document.getElementById('cancel-modal').classList.remove('open'); pendingCancelId = null; mcDataUrl = null; }
+
+function updateCancelTypeUI() {
+  const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
+  const mc = document.getElementById('mc-upload-section');
+  const note = document.getElementById('cancel-type-note');
+  if (mc) mc.style.display = type === 'worker_mc' ? 'block' : 'none';
+  if (type !== 'worker_mc') removeMc();
+  if (note) {
+    if (type === 'worker_penalty') note.textContent = 'Penalty applies and counts toward worker suspension.';
+    if (type === 'worker_mc') note.textContent = 'Penalty is waived with MC, but it still counts toward worker suspension.';
+    if (type === 'outlet_bypass') note.textContent = 'Use this when the client/outlet cancelled. No penalty and it will not count toward worker suspension.';
+  }
+}
 
 function handleMcUpload(e) {
   const file = e.target.files[0]; if (!file) return;
@@ -1360,21 +1433,30 @@ function removeMc() { mcDataUrl = null; document.getElementById('mc-uploaded').c
 async function confirmCancel() {
   if (!pendingCancelId) return;
   const s = allShifts.find(x => x.id === pendingCancelId);
+  const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
+  const isOutletBypass = type === 'outlet_bypass';
+  const isMcWaiver = type === 'worker_mc';
+  if (isMcWaiver && !mcDataUrl) { toast('Please upload MC, or choose outlet cancellation / penalty option', 'error'); return; }
+
   const { error } = await supabaseClient.from('shifts').update({
     cancelled: true, clock_in: null, clock_out: null,
-    cancellation_penalty: mcDataUrl ? 0 : 15,
-    mc_url: mcDataUrl || null, updated_at: new Date().toISOString()
+    cancellation_penalty: (isOutletBypass || isMcWaiver) ? 0 : 15,
+    mc_url: isMcWaiver ? (mcDataUrl || null) : null,
+    updated_at: new Date().toISOString()
   }).eq('id', pendingCancelId);
   if (error) { toast('Failed to cancel', 'error'); return; }
-  await supabaseClient.from('cancellation_log').insert({ worker_name: s.worker_name, shift_id: pendingCancelId, cancelled_at: formatDate(currentDate), has_mc: !!mcDataUrl });
-  const recent = getRecentCancellations(s.worker_name) + 1;
-  if (recent >= 2) {
-    const until = new Date(); until.setDate(until.getDate() + 30);
-    await supabaseClient.from('workers').update({ suspended: true, suspended_until: formatDate(until) }).eq('name', s.worker_name);
-    toast(`${s.worker_name} has been suspended for 1 month`, 'error');
+
+  if (!isOutletBypass && s.worker_name && String(s.worker_name).toLowerCase() !== 'available') {
+    await supabaseClient.from('cancellation_log').insert({ worker_name: s.worker_name, shift_id: pendingCancelId, cancelled_at: formatDate(currentDate), has_mc: isMcWaiver });
+    const recent = getRecentCancellations(s.worker_name) + 1;
+    if (recent >= 2) {
+      const until = new Date(); until.setDate(until.getDate() + 30);
+      await supabaseClient.from('workers').update({ suspended: true, suspended_until: formatDate(until) }).eq('name', s.worker_name);
+      toast(`${s.worker_name} has been suspended for 1 month`, 'error');
+    }
   }
   await loadWorkers(); closeCancelModal(); await loadShifts();
-  toast('Shift cancelled');
+  toast(isOutletBypass ? 'Shift cancelled without worker penalty' : 'Shift cancelled');
 }
 
 // ── Service recovery ──────────────────────────────────────────
