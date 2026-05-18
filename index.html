@@ -587,6 +587,23 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- UPDATE INCIDENT MODAL -->
+<div class="modal-overlay" id="incident-update-modal">
+  <div class="modal" style="width:560px;">
+    <h3>Update incident</h3>
+    <div id="incident-update-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;font-size:13px;"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Status</label><select id="incident-update-status"><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option></select></div>
+      <div class="form-row"><label>Assign to</label><select id="incident-update-assignee"></select></div>
+    </div>
+    <div class="form-row"><label>Comment / update</label><input type="text" id="incident-update-comment" placeholder="What changed or what action was taken?"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="closeIncidentUpdateModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveIncidentUpdate()">Save update</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── Config ──────────────────────────────────────────────────
 let supabaseClient = null;
@@ -626,7 +643,7 @@ const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [];
-let allIncidents = [], allMessages = [], currentInternalUser = null, messagePollTimer = null;
+let allIncidents = [], allIncidentUpdates = [], allMessages = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 const INTERNAL_USER_ACCOUNTS = [
   { username:'Jon', passcode:'8472915630' },
@@ -810,6 +827,30 @@ function simplePayrollText(s) {
 function payoutForShift(s) {
   const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0);
   return hours * parseFloat(s.rate || 0);
+}
+function shiftPenaltyAmount(s) {
+  if (s.cancelled) return s.mc_url ? 0 : parseFloat(s.cancellation_penalty ?? 15) || 0;
+  const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
+  return parseFloat(l.penalty || 0);
+}
+function serviceRecoveryPayment(s) {
+  const hrs = parseFloat(s.sr_hours || 0);
+  const rate = parseFloat(s.sr_rate || 0);
+  return hrs * rate;
+}
+function netPaymentForShift(s) {
+  if (s.sr_worker) return serviceRecoveryPayment(s);
+  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s));
+}
+function paymentDisplay(s) {
+  const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+  const gross = payoutForShift(s);
+  const net = netPaymentForShift(s);
+  if (s.sr_worker) {
+    return `<div>${money(gross)}</div><div class="sub-text">Original: ${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${money(net)}</div><div class="sub-text">SR: ${parseFloat(s.sr_hours||0)}h × $${parseFloat(s.sr_rate||0).toFixed(2)}</div><div class="sub-text">Paid to: ${s.sr_worker}</div>`;
+  }
+  const penalty = shiftPenaltyAmount(s);
+  return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${money(net)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${money(penalty)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
 }
 
 function calcLatePenalty(sched, clockIn) {
@@ -1025,7 +1066,7 @@ function renderTable() {
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
           <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}</td>
-          <td style="font-family:var(--mono);font-size:12px;"><div>${money(payoutForShift(s))}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div class="sub-text">${workerPaymentInfo(s.worker_name)}</div></td>
+          <td style="font-family:var(--mono);font-size:12px;min-width:170px;">${paymentDisplay(s)}</td>
           <td>${statusBadge(s)}</td>
           <td>${penaltyDisplay(s)}</td>
           <td>${actions}</td>
@@ -1470,13 +1511,55 @@ async function saveIncident() {
 async function loadIncidents() {
   fillInternalUserSelects();
   const { data, error } = await supabaseClient.from('incidents').select('*').order('created_at', { ascending:false }).limit(100);
+  const { data: updates, error: updatesError } = await supabaseClient.from('incident_updates').select('*').order('created_at', { ascending:true }).limit(500);
   if (error) { document.getElementById('incidents-body').innerHTML = `<div class="empty-state"><p>${error.message}</p><p class="sub-text">Run the SQL patch if the incidents table is not created yet.</p></div>`; return; }
+  if (updatesError) { console.warn('Incident updates not loaded:', updatesError.message); }
   allIncidents = data || [];
+  allIncidentUpdates = updates || [];
   document.getElementById('incident-count').textContent = `${allIncidents.length} incident${allIncidents.length!==1?'s':''}`;
   const msgIncident = document.getElementById('msg-incident');
   if (msgIncident) msgIncident.innerHTML = '<option value="">None</option>' + allIncidents.map(i => `<option value="${i.id}">${i.title}</option>`).join('');
   if (!allIncidents.length) { document.getElementById('incidents-body').innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><p>No incidents logged yet.</p></div>'; return; }
-  document.getElementById('incidents-body').innerHTML = `<table><thead><tr><th>Created</th><th>Incident</th><th>Outlet</th><th>Worker</th><th>Assigned</th><th>Status</th><th>Notes</th></tr></thead><tbody>${allIncidents.map(i => `<tr><td style="font-family:var(--mono);font-size:12px;">${new Date(i.created_at).toLocaleDateString()}</td><td style="font-weight:600;">${i.title}<div class="sub-text">By ${i.created_by || '-'}</div></td><td>${i.outlet || '—'}</td><td>${i.worker_name || '—'}</td><td><span class="badge badge-blue">${i.assigned_to || '—'}</span></td><td><span class="badge ${i.status==='Resolved'||i.status==='Closed'?'badge-green':'badge-amber'}">${i.status || 'Open'}</span></td><td style="min-width:220px;">${i.notes || ''}</td></tr>`).join('')}</tbody></table>`;
+  document.getElementById('incidents-body').innerHTML = `<table><thead><tr><th>Created</th><th>Incident</th><th>Outlet</th><th>Worker</th><th>Assigned</th><th>Status</th><th>Notes / Updates</th><th>Actions</th></tr></thead><tbody>${allIncidents.map(i => {
+    const logs = allIncidentUpdates.filter(u => u.incident_id === i.id);
+    const logHtml = logs.length ? `<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">${logs.map(u => `<div style="margin-bottom:6px;"><strong>${u.created_by || '-'}</strong> <span class="sub-text">${new Date(u.created_at).toLocaleString()}</span><br><span class="sub-text">${u.old_status && u.new_status && u.old_status !== u.new_status ? `Status: ${u.old_status} → ${u.new_status}<br>` : ''}${u.comment || ''}</span></div>`).join('')}</div>` : '';
+    return `<tr><td style="font-family:var(--mono);font-size:12px;">${new Date(i.created_at).toLocaleDateString()}</td><td style="font-weight:600;">${i.title}<div class="sub-text">By ${i.created_by || '-'}</div>${i.updated_by ? `<div class="sub-text">Last updated by ${i.updated_by}</div>` : ''}</td><td>${i.outlet || '—'}</td><td>${i.worker_name || '—'}</td><td><span class="badge badge-blue">${i.assigned_to || '—'}</span></td><td><span class="badge ${i.status==='Resolved'||i.status==='Closed'?'badge-green':'badge-amber'}">${i.status || 'Open'}</span></td><td style="min-width:260px;">${i.notes || ''}${logHtml}</td><td><button class="btn btn-primary btn-sm" onclick="openIncidentUpdateModal('${i.id}')">Update</button></td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+
+function openIncidentUpdateModal(id) {
+  const incident = allIncidents.find(i => i.id === id);
+  if (!incident) return;
+  pendingIncidentId = id;
+  fillInternalUserSelects();
+  const assignee = document.getElementById('incident-update-assignee');
+  assignee.innerHTML = INTERNAL_USERS.map(u => `<option>${u}</option>`).join('');
+  assignee.value = incident.assigned_to || currentInternalUser || 'Jon';
+  document.getElementById('incident-update-status').value = incident.status || 'Open';
+  document.getElementById('incident-update-comment').value = '';
+  document.getElementById('incident-update-info').innerHTML = `<div style="font-weight:600;">${incident.title}</div><div class="sub-text">Current status: ${incident.status || 'Open'} · Assigned to: ${incident.assigned_to || '—'}</div>`;
+  document.getElementById('incident-update-modal').classList.add('open');
+}
+function closeIncidentUpdateModal() {
+  pendingIncidentId = null;
+  document.getElementById('incident-update-modal').classList.remove('open');
+}
+async function saveIncidentUpdate() {
+  const incident = allIncidents.find(i => i.id === pendingIncidentId);
+  if (!incident) return;
+  const newStatus = document.getElementById('incident-update-status').value;
+  const newAssignee = document.getElementById('incident-update-assignee').value;
+  const comment = document.getElementById('incident-update-comment').value.trim();
+  const by = currentInternalUser || 'Jon';
+  if (!comment && newStatus === incident.status && newAssignee === incident.assigned_to) { toast('Add a comment or change status/assignee', 'error'); return; }
+  const { error } = await supabaseClient.from('incidents').update({ status:newStatus, assigned_to:newAssignee, updated_by:by, updated_at:new Date().toISOString() }).eq('id', pendingIncidentId);
+  if (error) { toast('Failed to update incident: ' + error.message, 'error'); return; }
+  const updatePayload = { incident_id: pendingIncidentId, comment: comment || 'Status / assignee updated', old_status: incident.status || 'Open', new_status: newStatus, old_assigned_to: incident.assigned_to || null, new_assigned_to: newAssignee || null, created_by: by };
+  const { error: logError } = await supabaseClient.from('incident_updates').insert(updatePayload);
+  if (logError) { toast('Incident updated, but comment log failed: ' + logError.message, 'error'); }
+  closeIncidentUpdateModal();
+  toast('Incident updated');
+  await loadIncidents();
 }
 
 // ── Messages ────────────────────────────────────────────────
@@ -1566,12 +1649,14 @@ function renderReport(from, to, outlet) {
   const body = document.getElementById('report-body');
   const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0), 0);
   const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
+  const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   document.getElementById('report-title').textContent = `${outlet || 'All outlets'} usage: ${formatDisplayDate(from)} to ${formatDisplayDate(to)}`;
   document.getElementById('report-count').textContent = `${currentReportRows.length} completed shift${currentReportRows.length !== 1 ? 's' : ''}`;
   document.getElementById('report-metrics').innerHTML = `
     <div class="metric-card"><div class="metric-label">Completed shifts</div><div class="metric-val blue">${currentReportRows.length}</div></div>
     <div class="metric-card"><div class="metric-label">Total hours</div><div class="metric-val green">${totalHours.toFixed(2).replace(/\.00$/, '')}</div></div>
     <div class="metric-card"><div class="metric-label">Total payout</div><div class="metric-val amber">${money(totalPayout)}</div></div>
+    <div class="metric-card"><div class="metric-label">Net payout</div><div class="metric-val green">${money(totalNetPayout)}</div></div>
   `;
   if (!currentReportRows.length) {
     body.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>No completed shifts found for this report.</p></div>';
@@ -1579,7 +1664,7 @@ function renderReport(from, to, outlet) {
   }
   body.innerHTML = `<div style="overflow-x:auto;"><table>
     <thead><tr>
-      <th>Date</th><th>Employee</th><th>Outlet</th><th>Hours Worked</th><th>Rate</th><th>Payout</th><th>Summary</th><th>Role / Payroll Notes</th><th>In</th><th>Out</th><th>Break</th>
+      <th>Date</th><th>Employee</th><th>Outlet</th><th>Hours Worked</th><th>Rate</th><th>Payout</th><th>Net Payout</th><th>Summary</th><th>Role / Payroll Notes</th><th>In</th><th>Out</th><th>Break</th>
     </tr></thead>
     <tbody>
       ${currentReportRows.map(s => {
@@ -1591,6 +1676,7 @@ function renderReport(from, to, outlet) {
           <td style="font-family:var(--mono);">${hours.toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}</td>
           <td style="font-family:var(--mono);">${parseFloat(s.rate || 0).toFixed(0)}</td>
           <td style="font-family:var(--mono);">${money(payoutForShift(s))}</td>
+          <td style="font-family:var(--mono);font-weight:600;">${money(netPaymentForShift(s))}</td>
           <td style="min-width:230px;">${payrollSummary(s)}</td>
           <td>${s.role || ''}</td>
           <td style="font-family:var(--mono);">${s.clock_in?.slice(0,5) || ''}</td>
@@ -1602,6 +1688,7 @@ function renderReport(from, to, outlet) {
         <td style="font-weight:700;">TOTAL</td><td></td><td></td>
         <td style="font-family:var(--mono);font-weight:700;">${totalHours.toFixed(2).replace(/\.00$/, '')}</td>
         <td></td><td style="font-family:var(--mono);font-weight:700;">${money(totalPayout)}</td>
+        <td style="font-family:var(--mono);font-weight:700;">${money(totalNetPayout)}</td>
         <td></td><td></td><td></td><td></td><td></td>
       </tr>
     </tbody>
@@ -1610,14 +1697,15 @@ function renderReport(from, to, outlet) {
 
 function exportReportCsv() {
   if (!currentReportRows.length) { toast('Generate a report first', 'error'); return; }
-  const header = ['Date','Employee','Outlet','Hours Worked','Rate','Payout','Summary','Role / Payroll Notes','In','Out','Break'];
+  const header = ['Date','Employee','Outlet','Hours Worked','Rate','Payout','Net Payout','Summary','Role / Payroll Notes','In','Out','Break'];
   const rows = currentReportRows.map(s => {
     const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0);
-    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours, parseFloat(s.rate || 0), payoutForShift(s).toFixed(2), payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
+    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours, parseFloat(s.rate || 0), payoutForShift(s).toFixed(2), netPaymentForShift(s).toFixed(2), payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
   });
   const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0), 0);
   const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
-  rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),'','','','','']);
+  const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
+  rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalNetPayout.toFixed(2),'','','','','']);
   const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
