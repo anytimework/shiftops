@@ -1329,6 +1329,24 @@ async function saveRow(id) {
   await loadShifts();
 }
 
+async function hardDeleteShift(id) {
+  // cancellation_log has a foreign-key reference to shifts.id.
+  // Delete the child log first so old/past cancelled bookings can be removed cleanly.
+  const { error: logError } = await supabaseClient
+    .from('cancellation_log')
+    .delete()
+    .eq('shift_id', id);
+
+  if (logError) return { error: logError };
+
+  const { error: shiftError } = await supabaseClient
+    .from('shifts')
+    .delete()
+    .eq('id', id);
+
+  return { error: shiftError };
+}
+
 async function deleteCancelledShift(id) {
   const s = allShifts.find(x => x.id === id);
   if (!s) { toast('Shift not found', 'error'); return; }
@@ -1341,10 +1359,7 @@ async function deleteCancelledShift(id) {
   const ok = confirm(`Delete this cancelled shift permanently?\n\n${label}`);
   if (!ok) return;
 
-  const { error } = await supabaseClient
-    .from('shifts')
-    .delete()
-    .eq('id', id);
+  const { error } = await hardDeleteShift(id);
 
   if (error) {
     toast('Failed to delete cancelled shift: ' + error.message, 'error');
@@ -1535,7 +1550,7 @@ async function confirmCancel() {
 
   // Outlet/client cancellation = remove the slot entirely from the booking grid.
   if (isOutletBypass) {
-    const { error } = await supabaseClient.from('shifts').delete().eq('id', pendingCancelId);
+    const { error } = await hardDeleteShift(pendingCancelId);
     if (error) { toast('Failed to delete outlet-cancelled shift: ' + error.message, 'error'); return; }
     closeCancelModal();
     await loadShifts();
