@@ -171,6 +171,42 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .pen-row { display: flex; justify-content: space-between; padding: 3px 0; color: var(--text2); }
 .pen-row.total { font-weight: 600; border-top: 1px solid var(--border); margin-top: 6px; padding-top: 8px; color: var(--text); font-family: var(--mono); }
 
+
+
+/* Attendance enhanced view */
+.attendance-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.attendance-search { width:190px; font-family:var(--font); font-size:13px; padding:7px 10px; border-radius:var(--radius); border:1px solid var(--border2); background:var(--bg3); color:var(--text); }
+.attendance-search:focus { outline:none; border-color:var(--accent); }
+.view-toggle { display:inline-flex; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; background:var(--bg3); }
+.view-toggle button { border:0; background:transparent; color:var(--text2); padding:7px 10px; font-size:12px; cursor:pointer; }
+.view-toggle button.active { background:var(--accent-dim); color:var(--accent); }
+.attendance-scroll { max-height: calc(100vh - 330px); overflow:auto; min-height:280px; }
+.attendance-scroll table { min-width:1280px; }
+.attendance-scroll thead th { position:sticky; top:0; background:var(--bg2); z-index:5; }
+.attendance-scroll th:first-child, .attendance-scroll td:first-child { position:sticky; left:0; background:var(--bg2); z-index:4; min-width:160px; }
+.attendance-scroll thead th:first-child { z-index:7; }
+.attendance-scroll th:last-child, .attendance-scroll td:last-child { position:sticky; right:0; background:var(--bg2); z-index:4; min-width:150px; box-shadow:-8px 0 12px rgba(0,0,0,0.18); }
+.attendance-scroll thead th:last-child { z-index:7; }
+.action-stack { display:flex; gap:6px; flex-wrap:wrap; }
+.week-grid-wrap { max-height: calc(100vh - 330px); overflow:auto; border-top:1px solid var(--border); }
+.week-grid { min-width:1100px; display:grid; grid-template-columns:190px repeat(7, minmax(150px, 1fr)); }
+.week-cell, .week-head, .week-worker { border-right:1px solid var(--border); border-bottom:1px solid var(--border); padding:10px; min-height:76px; }
+.week-head { position:sticky; top:0; background:var(--bg2); z-index:5; font-family:var(--mono); font-size:11px; color:var(--text3); text-transform:uppercase; letter-spacing:0.06em; }
+.week-worker { position:sticky; left:0; background:var(--bg2); z-index:4; font-weight:600; }
+.week-head:first-child { left:0; z-index:8; }
+.week-shift { background:var(--bg3); border:1px solid var(--border2); border-radius:var(--radius); padding:8px; margin-bottom:6px; font-size:12px; }
+.week-shift.cancelled { opacity:0.55; }
+.week-shift-top { display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:4px; }
+.week-time { font-family:var(--mono); color:var(--text); font-size:11px; }
+.week-meta { color:var(--text2); font-size:11px; line-height:1.4; }
+.week-actions { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
+.week-actions .btn { padding:4px 7px; font-size:10px; }
+@media (max-width: 900px) {
+  .topbar { align-items:flex-start; gap:12px; flex-direction:column; }
+  .attendance-toolbar { width:100%; }
+  .attendance-search { width:100%; }
+}
+
 /* Workers panel */
 .worker-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .worker-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 18px; }
@@ -289,7 +325,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
             <button onclick="changeDay(1)">→</button>
           </div>
         </div>
-        <div class="topbar-right">
+        <div class="topbar-right attendance-toolbar">
+          <input id="attendance-search" class="attendance-search" type="search" placeholder="Search worker / outlet" oninput="renderTable()">
+          <div class="view-toggle">
+            <button id="view-day-btn" class="active" onclick="setAttendanceView('day')">Day</button>
+            <button id="view-week-btn" onclick="setAttendanceView('week')">Week grid</button>
+          </div>
           <select id="outlet-filter" onchange="loadShifts()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;">
             <option value="">All outlets</option>
           </select>
@@ -643,6 +684,7 @@ const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [];
+let attendanceView = 'day';
 let allIncidents = [], allIncidentUpdates = [], allMessages = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 const INTERNAL_USER_ACCOUNTS = [
@@ -738,12 +780,35 @@ function formatDate(d) {
 }
 
 function updateDateLabel() {
+  if (attendanceView === 'week') {
+    const start = startOfWeek(currentDate);
+    const end = addDays(start, 6);
+    document.getElementById('date-label').textContent =
+      `${start.getDate()} ${MONTHS[start.getMonth()]} – ${end.getDate()} ${MONTHS[end.getMonth()]} ${end.getFullYear()}`;
+    return;
+  }
   document.getElementById('date-label').textContent =
     `${DAYS_SHORT[currentDate.getDay()]}, ${currentDate.getDate()} ${MONTHS[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
 }
 
 function changeDay(dir) {
-  currentDate.setDate(currentDate.getDate() + dir);
+  currentDate.setDate(currentDate.getDate() + (attendanceView === 'week' ? dir * 7 : dir));
+  updateDateLabel();
+  loadShifts();
+}
+
+function startOfWeek(d) {
+  const x = new Date(d); x.setHours(0,0,0,0);
+  const day = x.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  x.setDate(x.getDate() + diff);
+  return x;
+}
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function setAttendanceView(view) {
+  attendanceView = view;
+  document.getElementById('view-day-btn')?.classList.toggle('active', view === 'day');
+  document.getElementById('view-week-btn')?.classList.toggle('active', view === 'week');
   updateDateLabel();
   loadShifts();
 }
@@ -995,9 +1060,15 @@ function resetOutletJobRates() {
 }
 
 async function loadShifts() {
-  const dateStr = formatDate(currentDate);
   const outlet = document.getElementById('outlet-filter')?.value || '';
-  let q = supabaseClient.from('shifts').select('*').eq('shift_date', dateStr).order('scheduled_start');
+  let q = supabaseClient.from('shifts').select('*').order('shift_date').order('scheduled_start');
+  if (attendanceView === 'week') {
+    const start = startOfWeek(currentDate);
+    const endExclusive = addDays(start, 7);
+    q = q.gte('shift_date', formatDate(start)).lt('shift_date', formatDate(endExclusive));
+  } else {
+    q = q.eq('shift_date', formatDate(currentDate));
+  }
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
   allShifts = data || [];
@@ -1029,7 +1100,9 @@ function penaltyDisplay(s) {
 }
 
 function renderTable() {
-  const rows = allShifts;
+  if (attendanceView === 'week') { renderWeeklyGrid(); return; }
+  const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
+  const rows = allShifts.filter(s => !search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search)));
   document.getElementById('shift-count').textContent = rows.length ? `${rows.length} shift${rows.length !== 1 ? 's' : ''}` : '';
   if (!rows.length) {
     document.getElementById('table-body-wrap').innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div><p>No shifts for this day.<br>Click <strong>+ Add shift</strong> to get started.</p></div>';
@@ -1053,9 +1126,9 @@ function renderTable() {
             ? `<span style="font-size:11px;color:var(--text3);">${s.sr_worker} covering</span>`
             : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${s.worker_name}','${s.outlet}','${s.scheduled_start}')">↺ Find replacement</button>`;
         } else {
-          actions = `
-            <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')" style="margin-right:4px;">Edit</button>
-            <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${s.worker_name}','${s.outlet}','${s.scheduled_start}')">Cancel</button>`;
+          actions = `<div class="action-stack">
+            <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+            <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${s.worker_name}','${s.outlet}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
           <td><div class="worker-name">${s.worker_name}</div><div class="sub-text">${s.outlet}</div>${srTag}</td>
@@ -1074,7 +1147,51 @@ function renderTable() {
       }).join('')}
     </tbody>
   </table>`;
-  document.getElementById('table-body-wrap').innerHTML = tbody;
+  document.getElementById('table-body-wrap').innerHTML = `<div class="attendance-scroll">${tbody}</div>`;
+}
+
+function renderWeeklyGrid() {
+  const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
+  const start = startOfWeek(currentDate);
+  const days = Array.from({length:7}, (_,i) => addDays(start, i));
+  const filtered = allShifts.filter(s => !search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search)));
+  document.getElementById('shift-count').textContent = filtered.length ? `${filtered.length} shift${filtered.length !== 1 ? 's' : ''}` : '';
+  if (!filtered.length) {
+    document.getElementById('table-body-wrap').innerHTML = '<div class="empty-state"><div class="empty-icon">📅</div><p>No shifts for this week.</p></div>';
+    return;
+  }
+  const workers = [...new Set(filtered.map(s => s.worker_name))].sort((a,b)=>a.localeCompare(b));
+  const cellFor = (worker, dayStr) => filtered.filter(s => s.worker_name === worker && s.shift_date === dayStr);
+  const html = `
+    <div class="week-grid-wrap">
+      <div class="week-grid">
+        <div class="week-head">Worker</div>
+        ${days.map(d => `<div class="week-head">${DAYS_SHORT[d.getDay()]}<br>${d.getDate()} ${MONTHS[d.getMonth()]}</div>`).join('')}
+        ${workers.map(w => `
+          <div class="week-worker">${w}</div>
+          ${days.map(d => {
+            const dayStr = formatDate(d);
+            const shifts = cellFor(w, dayStr);
+            return `<div class="week-cell">${shifts.map(s => {
+              const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+              const cls = s.cancelled ? ' cancelled' : '';
+              const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${money(netPaymentForShift(s))}</div>` : '';
+              const actions = s.cancelled
+                ? (s.sr_worker ? '' : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button></div>`)
+                : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">Edit</button><button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
+              return `<div class="week-shift${cls}">
+                <div class="week-shift-top"><span class="week-time">${scheduledRange(s)}</span>${statusBadge(s)}</div>
+                <div class="week-meta">${s.outlet}</div>
+                <div class="week-meta">${s.role} · ${hours ? hours+'h' : 'not clocked'}</div>
+                <div class="week-meta">Net: ${money(netPaymentForShift(s))}</div>
+                ${replacement}${actions}
+              </div>`;
+            }).join('')}</div>`;
+          }).join('')}
+        `).join('')}
+      </div>
+    </div>`;
+  document.getElementById('table-body-wrap').innerHTML = html;
 }
 
 function renderTimeCell(s, field) {
