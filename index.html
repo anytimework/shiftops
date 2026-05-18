@@ -522,13 +522,13 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <h3>Cancel shift</h3>
     <div id="cancel-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;font-size:13px;"></div>
     <div id="cancel-susp-warn" class="alert" style="display:none;"></div>
-    <div class="alert alert-red"><span class="alert-icon">⚠️</span><div><strong>$15 cancellation penalty</strong> applies for worker-side cancellations. MC or outlet-side cancellation can bypass the penalty.</div></div>
+    <div class="alert alert-red"><span class="alert-icon">⚠️</span><div><strong>Worker cancellation</strong> returns the shift slot to <strong>Available</strong>. <strong>Outlet cancellation</strong> deletes the shift slot completely.</div></div>
     <div class="form-row" style="margin-top:10px;">
       <label>Cancellation type</label>
       <select id="cancel-type" onchange="updateCancelTypeUI()">
         <option value="worker_penalty">Worker cancellation - apply $15 penalty</option>
         <option value="worker_mc">Worker cancellation with MC - waive penalty</option>
-        <option value="outlet_bypass">Outlet cancelled shift - no penalty / no suspension count</option>
+        <option value="outlet_bypass">Outlet cancelled shift - delete slot completely</option>
       </select>
       <div id="cancel-type-note" class="sub-text" style="margin-top:6px;line-height:1.5;">Penalty applies and counts toward worker suspension.</div>
     </div>
@@ -861,13 +861,70 @@ function toast(msg, type = 'success') {
 
 // ── Penalty logic ─────────────────────────────────────────────
 function toMins(t) { if (!t) return null; const [h,m] = t.split(':').map(Number); return h*60+m; }
-function rawDurationHours(start, end) { if (!start || !end) return null; const d = toMins(end) - toMins(start); return d > 0 ? d / 60 : null; }
+function rawDurationHours(start, end) {
+  if (!start || !end) return null;
+  let startM = toMins(start);
+  let endM = toMins(end);
+  // Support overnight shifts, e.g. 21:00 to 00:00 = 3 hours.
+  // If clock-out is earlier than or equal to clock-in, treat it as next-day clock-out.
+  if (endM <= startM) endM += 1440;
+  const d = endM - startM;
+  return d > 0 ? d / 60 : null;
+}
+function quantizeClockOutTime(start, end) {
+  if (!start || !end) return end || null;
+  let startM = toMins(start);
+  let endM = toMins(end);
+  // Overnight support: 21:00 to 23:59 stays same day, 21:00 to 00:00 becomes next day.
+  if (endM <= startM) endM += 1440;
+  // Payroll can only be counted in 15-minute blocks, so 23:59 is counted as 00:00.
+  return minsToTime(Math.ceil(endM / 15) * 15);
+}
+function rawDurationHoursQuantized(start, end) {
+  if (!start || !end) return null;
+  let startM = toMins(start);
+  let endM = toMins(end);
+  if (endM <= startM) endM += 1440;
+  endM = Math.ceil(endM / 15) * 15;
+  const d = endM - startM;
+  return d > 0 ? d / 60 : null;
+}
 function breakMinsForShift(s) { return parseInt(s?.break_mins ?? 0, 10) || 0; }
 function calcHours(ci, co, breakMins = 0) {
-  const raw = rawDurationHours(ci, co);
+  const raw = rawDurationHoursQuantized(ci, co);
   if (raw === null) return null;
   const worked = Math.max(0, raw - ((parseInt(breakMins, 10) || 0) / 60));
   return worked.toFixed(2).replace(/\.00$/, '').replace(/0$/, '');
+}
+function minsToTime(mins) {
+  mins = ((parseInt(mins, 10) || 0) + 1440) % 1440;
+  return `${String(Math.floor(mins / 60)).padStart(2,'0')}:${String(mins % 60).padStart(2,'0')}`;
+}
+function payrollStartTime(s) {
+  const sched = s?.scheduled_start?.slice(0,5);
+  const ci = s?.clock_in?.slice(0,5);
+  if (!sched || !ci) return ci || null;
+  let schedM = toMins(sched);
+  let ciM = toMins(ci);
+  // If a shift starts late night and clock-in is after midnight, compare as next day.
+  if (ciM < schedM - 720) ciM += 1440;
+  if (ciM - schedM <= 5) return sched;
+  // Payroll is counted in 15-minute blocks. After grace, round clock-in up to the next 15-minute mark.
+  return minsToTime(Math.ceil(ciM / 15) * 15);
+}
+function calcShiftHours(s) {
+  if (!s) return null;
+  return calcHours(payrollStartTime(s), s.clock_out?.slice(0,5), breakMinsForShift(s));
+}
+function payrollStartNote(s) {
+  const actual = s?.clock_in?.slice(0,5);
+  const counted = payrollStartTime(s);
+  const actualOut = s?.clock_out?.slice(0,5);
+  const countedOut = counted && actualOut ? quantizeClockOutTime(counted, actualOut) : null;
+  const notes = [];
+  if (actual && counted && actual !== counted) notes.push(`start counted ${counted}`);
+  if (actualOut && countedOut && actualOut !== countedOut) notes.push(`end counted ${countedOut}`);
+  return notes.length ? `Payroll ${notes.join(', ')}` : '';
 }
 function breakLabel(mins) {
   mins = parseInt(mins || 0, 10);
@@ -902,17 +959,17 @@ function formatShortDate(dateStr) {
   return `${d.getDate()}/${d.getMonth()+1}`;
 }
 function payrollSummary(s) {
-  const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+  const hours = calcShiftHours(s);
   if (!hours) return '—';
   return `${formatShortDate(s.shift_date)} - ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${Number(s.rate || 0).toFixed(0)}/hr`;
 }
 function simplePayrollText(s) {
-  const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+  const hours = calcShiftHours(s);
   if (!hours) return '—';
   return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at ${Number(s.rate || 0).toFixed(0)}/hr`;
 }
 function payoutForShift(s) {
-  const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0);
+  const hours = parseFloat(calcShiftHours(s) || 0);
   return hours * parseFloat(s.rate || 0);
 }
 function shiftPenaltyAmount(s) {
@@ -930,19 +987,24 @@ function netPaymentForShift(s) {
   return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s));
 }
 function paymentDisplay(s) {
-  const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+  const hours = calcShiftHours(s);
   const gross = payoutForShift(s);
   const net = netPaymentForShift(s);
   if (s.sr_worker) {
     return `<div>${money(gross)}</div><div class="sub-text">Original: ${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${money(net)}</div><div class="sub-text">SR: ${parseFloat(s.sr_hours||0)}h × $${parseFloat(s.sr_rate||0).toFixed(2)}</div><div class="sub-text">Paid to: ${s.sr_worker}</div>`;
   }
   const penalty = shiftPenaltyAmount(s);
-  return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${money(net)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${money(penalty)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
+  const pnote = payrollStartNote(s);
+  return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${money(net)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${money(penalty)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
 }
 
 function calcLatePenalty(sched, clockIn) {
   if (!clockIn) return { mins:0, penalty:0, status:'absent' };
-  const diff = toMins(clockIn) - toMins(sched);
+  let schedM = toMins(sched);
+  let ciM = toMins(clockIn);
+  // If a shift starts late night and clock-in is after midnight, compare as next day.
+  if (ciM < schedM - 720) ciM += 1440;
+  const diff = ciM - schedM;
   if (diff <= 5) return { mins: Math.max(0,diff), penalty:0, status: diff <= 0 ? 'on-time' : 'grace' };
   const blocks = Math.ceil((diff - 5) / 15);
   return { mins: diff, penalty: Math.min(blocks * 2.5, 10), status: 'late' };
@@ -1138,7 +1200,7 @@ function renderTable() {
     </tr></thead>
     <tbody>
       ${rows.map(s => {
-        const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+        const hours = calcShiftHours(s);
         const srTag = s.sr_worker ? `<div class="sr-tag">↺ SR: ${s.sr_worker}</div>` : '';
         const isCancelled = s.cancelled;
         const rowClass = isCancelled ? 'row-cancelled' : '';
@@ -1195,7 +1257,7 @@ function renderWeeklyGrid() {
     .sort((a,b) => String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')) || String(a.outlet || '').localeCompare(String(b.outlet || '')));
 
   const shiftCard = (s) => {
-    const hours = calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s));
+    const hours = calcShiftHours(s);
     const workerName = String(s.worker_name || '').trim() || 'Available';
     const isAvailable = workerName.toLowerCase() === 'available';
     const cls = s.cancelled ? ' cancelled' : (isAvailable ? ' available' : '');
@@ -1226,9 +1288,10 @@ function renderWeeklyGrid() {
         ${days.map(d => {
           const dayStr = formatDate(d);
           const shifts = shiftsForDay(dayStr);
+          const blankSlots = Math.max(1, 8 - shifts.length);
           return `<div class="week-cell" onclick="if(event.target === this) openAddModalForDate('${dayStr}')">
             ${shifts.map(shiftCard).join('')}
-            <div class="empty-book-slot" onclick="openAddModalForDate('${dayStr}')">+ Create shift</div>
+            ${Array.from({length: blankSlots}, () => `<div class="empty-book-slot" onclick="openAddModalForDate('${dayStr}')">+ Create shift</div>`).join('')}
           </div>`;
         }).join('')}
       </div>
@@ -1337,12 +1400,14 @@ function previewPenalty() {
   const info = calcLatePenalty(sched, ci);
   const diff = toMins(ci) - toMins(sched);
   let html = '';
-  if (info.status === 'on-time') html = `<div class="pen-row"><span style="color:var(--green);">✓ On time — no penalty</span></div>`;
-  else if (info.status === 'grace') html = `<div class="pen-row"><span style="color:var(--amber);">${diff}m late — within 5-min grace period, no penalty</span></div>`;
+  if (info.status === 'on-time') html = `<div class="pen-row"><span style="color:var(--green);">✓ On time — payroll starts at scheduled time</span></div>`;
+  else if (info.status === 'grace') html = `<div class="pen-row"><span style="color:var(--amber);">${diff}m late — within 5-min grace, payroll still starts at ${sched}</span></div>`;
   else {
     const blocks = Math.ceil((diff-5)/15); const capped = info.penalty >= 10;
+    const countedStart = minsToTime(Math.ceil(toMins(ci) / 15) * 15);
     html = `<div class="pen-row"><span>Late by</span><span style="color:var(--red);font-weight:600;">${diff} mins</span></div>
-      <div class="pen-row"><span>Billable blocks (after grace)</span><span>${Math.min(blocks,4)} × 15 min</span></div>
+      <div class="pen-row"><span>Payroll start time</span><span>${countedStart}</span></div>
+      <div class="pen-row"><span>Penalty blocks</span><span>${Math.min(blocks,4)} × 15 min</span></div>
       ${capped ? '<div class="pen-row"><span style="color:var(--text3);">Penalty capped at max</span><span>$10.00</span></div>' : ''}
       <div class="pen-row total"><span>Penalty deduction</span><span style="color:var(--red);">−$${info.penalty.toFixed(2)}</span></div>`;
   }
@@ -1409,9 +1474,9 @@ function updateCancelTypeUI() {
   if (mc) mc.style.display = type === 'worker_mc' ? 'block' : 'none';
   if (type !== 'worker_mc') removeMc();
   if (note) {
-    if (type === 'worker_penalty') note.textContent = 'Penalty applies and counts toward worker suspension.';
-    if (type === 'worker_mc') note.textContent = 'Penalty is waived with MC, but it still counts toward worker suspension.';
-    if (type === 'outlet_bypass') note.textContent = 'Use this when the client/outlet cancelled. No penalty and it will not count toward worker suspension.';
+    if (type === 'worker_penalty') note.textContent = 'Worker cancellation: records cancellation, counts toward suspension, and returns the slot to Available.';
+    if (type === 'worker_mc') note.textContent = 'Worker cancellation with MC: penalty waived, still counts toward suspension, and returns the slot to Available.';
+    if (type === 'outlet_bypass') note.textContent = 'Outlet/client cancellation: deletes the whole shift slot and does not count against the worker.';
   }
 }
 
@@ -1432,30 +1497,70 @@ function removeMc() { mcDataUrl = null; document.getElementById('mc-uploaded').c
 async function confirmCancel() {
   if (!pendingCancelId) return;
   const s = allShifts.find(x => x.id === pendingCancelId);
+  if (!s) { toast('Shift not found', 'error'); return; }
+
   const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
   const isOutletBypass = type === 'outlet_bypass';
   const isMcWaiver = type === 'worker_mc';
-  if (isMcWaiver && !mcDataUrl) { toast('Please upload MC, or choose outlet cancellation / penalty option', 'error'); return; }
+  if (isMcWaiver && !mcDataUrl) {
+    toast('Please upload MC, or choose worker penalty / outlet cancellation', 'error');
+    return;
+  }
 
-  const { error } = await supabaseClient.from('shifts').update({
-    cancelled: true, clock_in: null, clock_out: null,
-    cancellation_penalty: (isOutletBypass || isMcWaiver) ? 0 : 15,
-    mc_url: isMcWaiver ? (mcDataUrl || null) : null,
-    updated_at: new Date().toISOString()
-  }).eq('id', pendingCancelId);
-  if (error) { toast('Failed to cancel', 'error'); return; }
+  // Outlet/client cancellation = remove the slot entirely from the booking grid.
+  if (isOutletBypass) {
+    const { error } = await supabaseClient.from('shifts').delete().eq('id', pendingCancelId);
+    if (error) { toast('Failed to delete outlet-cancelled shift: ' + error.message, 'error'); return; }
+    closeCancelModal();
+    await loadShifts();
+    toast('Outlet-cancelled shift removed from schedule');
+    return;
+  }
 
-  if (!isOutletBypass && s.worker_name && String(s.worker_name).toLowerCase() !== 'available') {
-    await supabaseClient.from('cancellation_log').insert({ worker_name: s.worker_name, shift_id: pendingCancelId, cancelled_at: formatDate(currentDate), has_mc: isMcWaiver });
-    const recent = getRecentCancellations(s.worker_name) + 1;
+  // Worker cancellation = keep the booking slot, but return it to Available.
+  // This allows Ops to re-fill the same outlet/date/time/role slot.
+  const originalWorker = s.worker_name;
+  const shouldCountWorkerCancellation = originalWorker && String(originalWorker).toLowerCase() !== 'available';
+
+  if (shouldCountWorkerCancellation) {
+    await supabaseClient.from('cancellation_log').insert({
+      worker_name: originalWorker,
+      shift_id: pendingCancelId,
+      cancelled_at: formatDate(currentDate),
+      has_mc: isMcWaiver
+    });
+
+    const recent = getRecentCancellations(originalWorker) + 1;
     if (recent >= 2) {
       const until = new Date(); until.setDate(until.getDate() + 30);
-      await supabaseClient.from('workers').update({ suspended: true, suspended_until: formatDate(until) }).eq('name', s.worker_name);
-      toast(`${s.worker_name} has been suspended for 1 month`, 'error');
+      await supabaseClient.from('workers').update({
+        suspended: true,
+        suspended_until: formatDate(until)
+      }).eq('name', originalWorker);
+      toast(`${originalWorker} has been suspended for 1 month`, 'error');
     }
   }
-  await loadWorkers(); closeCancelModal(); await loadShifts();
-  toast(isOutletBypass ? 'Shift cancelled without worker penalty' : 'Shift cancelled');
+
+  const { error } = await supabaseClient.from('shifts').update({
+    worker_name: 'Available',
+    cancelled: false,
+    clock_in: null,
+    clock_out: null,
+    late_penalty: 0,
+    cancellation_penalty: 0,
+    mc_url: null,
+    sr_worker: null,
+    sr_rate: null,
+    sr_absorbed: null,
+    updated_at: new Date().toISOString()
+  }).eq('id', pendingCancelId);
+
+  if (error) { toast('Failed to return slot to Available: ' + error.message, 'error'); return; }
+
+  await loadWorkers();
+  closeCancelModal();
+  await loadShifts();
+  toast(isMcWaiver ? 'Worker cancellation recorded; slot returned to Available' : 'Worker cancellation recorded; slot returned to Available');
 }
 
 // ── Service recovery ──────────────────────────────────────────
@@ -1845,7 +1950,7 @@ async function generateReport() {
 
 function renderReport(from, to, outlet) {
   const body = document.getElementById('report-body');
-  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0), 0);
+  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
   const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   document.getElementById('report-title').textContent = `${outlet || 'All outlets'} usage: ${formatDisplayDate(from)} to ${formatDisplayDate(to)}`;
@@ -1866,7 +1971,7 @@ function renderReport(from, to, outlet) {
     </tr></thead>
     <tbody>
       ${currentReportRows.map(s => {
-        const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0);
+        const hours = parseFloat(calcShiftHours(s) || 0);
         return `<tr>
           <td>${formatDisplayDate(s.shift_date)}</td>
           <td>${s.worker_name}</td>
@@ -1897,10 +2002,10 @@ function exportReportCsv() {
   if (!currentReportRows.length) { toast('Generate a report first', 'error'); return; }
   const header = ['Date','Employee','Outlet','Hours Worked','Rate','Payout','Net Payout','Summary','Role / Payroll Notes','In','Out','Break'];
   const rows = currentReportRows.map(s => {
-    const hours = parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0);
+    const hours = parseFloat(calcShiftHours(s) || 0);
     return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours, parseFloat(s.rate || 0), payoutForShift(s).toFixed(2), netPaymentForShift(s).toFixed(2), payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
   });
-  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcHours(s.clock_in?.slice(0,5), s.clock_out?.slice(0,5), breakMinsForShift(s)) || 0), 0);
+  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
   const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalNetPayout.toFixed(2),'','','','','']);
