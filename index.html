@@ -46,7 +46,12 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .nav-item:hover { background: var(--bg3); color: var(--text); }
 .nav-item.active { background: var(--accent-dim); color: var(--accent); }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; }
-.sidebar-date { padding: 16px 20px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text3); font-family: var(--mono); }
+.sidebar-user { padding: 12px 14px; border-top: 1px solid var(--border); }
+.sidebar-user-label { font-size: 10px; color: var(--text3); font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.sidebar-user-name { font-size: 13px; color: var(--text); font-weight: 600; margin-bottom: 8px; }
+.logout-pill { background: var(--red-dim); border: 1px solid rgba(232,64,64,0.28); color: var(--red); }
+.logout-pill:hover { background: rgba(232,64,64,0.20); color: #ff8a8a; }
+.sidebar-date { padding: 16px 20px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text3); font-family: var(--mono); white-space: pre-line; }
 
 .main { flex: 1; overflow-x: hidden; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: var(--bg2); }
@@ -240,6 +245,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div class="sidebar-logo">
       <h1>ShiftOps</h1>
       <p>F&amp;B Payroll Manager</p>
+      <button class="btn btn-danger btn-sm" style="width:100%;justify-content:center;margin-top:12px;" onclick="internalLogout()">Log out</button>
     </div>
     <nav class="sidebar-nav">
       <button class="nav-item active" onclick="switchPage('attendance',this)">
@@ -264,6 +270,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <span class="nav-icon">💬</span> Messages
       </button>
     </nav>
+    <div class="sidebar-user">
+      <div class="sidebar-user-label">Logged in as</div>
+      <div class="sidebar-user-name" id="current-user-name">—</div>
+      <button class="btn btn-danger btn-sm" style="width:100%;justify-content:center;" onclick="internalLogout()">Log out</button>
+    </div>
     <div class="sidebar-date" id="sidebar-date"></div>
   </div>
 
@@ -537,9 +548,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <div class="modal-overlay" id="internal-login-modal">
   <div class="modal" style="width:360px;">
     <h3>Internal login</h3>
-    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Default passcode is 123456. You will be asked to change it after first login.</span></div>
+    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Use your dedicated internal passcode to access ShiftOps.</span></div>
     <div class="form-row"><label>Username</label><select id="login-user"></select></div>
-    <div class="form-row"><label>Passcode</label><input type="password" id="login-pass" placeholder="123456"></div>
+    <div class="form-row"><label>Passcode</label><input type="password" id="login-pass" placeholder="Enter passcode"></div>
     <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="internalLogin()">Login</button>
   </div>
 </div>
@@ -617,7 +628,14 @@ let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [];
 let allIncidents = [], allMessages = [], currentInternalUser = null, messagePollTimer = null;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
-const INTERNAL_USERS = ['Jon','Jayden','McBilly','Yra','Niro'];
+const INTERNAL_USER_ACCOUNTS = [
+  { username:'Jon', passcode:'8472915630' },
+  { username:'Jayden', passcode:'5028741936' },
+  { username:'McBilly', passcode:'9182637450' },
+  { username:'Yra', passcode:'3749501826' },
+  { username:'Niro', passcode:'6839172045' }
+];
+const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
 
 
 const JOB_TYPES = ['F&B Service Crew', 'Dishwasher', 'Kitchen Assistant', 'Chef De Partie', 'Cashier', 'Runner', 'Barista'];
@@ -1341,33 +1359,65 @@ async function deleteOutlet(id) {
 // ── Internal users / login ───────────────────────────────────
 function seedInternalUsers() {
   const saved = JSON.parse(localStorage.getItem('internal_users') || '{}');
-  INTERNAL_USERS.forEach(u => {
-    if (!saved[u]) saved[u] = { passcode:'123456', mustChange:true };
+  INTERNAL_USER_ACCOUNTS.forEach(acc => {
+    const existing = saved[acc.username];
+    // Repair missing, blank, or old generic passcodes with each user's dedicated passcode.
+    if (!existing || !existing.passcode || existing.passcode === '123456') {
+      saved[acc.username] = { passcode: acc.passcode, mustChange: false };
+    }
   });
+  Object.keys(saved).forEach(u => { if (!INTERNAL_USERS.includes(u)) delete saved[u]; });
   localStorage.setItem('internal_users', JSON.stringify(saved));
+  localStorage.removeItem('current_internal_user'); // always require passcode after refresh/open
   const sel = document.getElementById('login-user');
   if (sel) sel.innerHTML = INTERNAL_USERS.map(u => `<option>${u}</option>`).join('');
 }
+function setLoggedInUserLabel() {
+  const el = document.getElementById('current-user-name');
+  if (el) el.textContent = currentInternalUser || '—';
+  const msgLabel = document.getElementById('message-user-label');
+  if (msgLabel) msgLabel.textContent = currentInternalUser ? `Signed in: ${currentInternalUser}` : '';
+}
 function requireInternalLogin() {
-  const u = localStorage.getItem('current_internal_user');
-  if (u && INTERNAL_USERS.includes(u)) {
-    currentInternalUser = u;
-    startMessagePolling();
-    return;
-  }
+  currentInternalUser = null;
+  localStorage.removeItem('current_internal_user');
+  setLoggedInUserLabel();
+  document.getElementById('main-app').style.display = 'none';
   document.getElementById('internal-login-modal').classList.add('open');
+  setTimeout(() => document.getElementById('login-pass')?.focus(), 50);
 }
 function internalLogin() {
   const user = document.getElementById('login-user').value;
   const pass = document.getElementById('login-pass').value;
   const users = JSON.parse(localStorage.getItem('internal_users') || '{}');
-  if (!users[user] || users[user].passcode !== pass) { toast('Wrong passcode', 'error'); return; }
+  if (!user || !pass || !users[user] || users[user].passcode !== pass) {
+    localStorage.removeItem('current_internal_user');
+    currentInternalUser = null;
+    document.getElementById('main-app').style.display = 'none';
+    document.getElementById('internal-login-modal').classList.add('open');
+    toast('Wrong passcode', 'error');
+    return;
+  }
   currentInternalUser = user;
   localStorage.setItem('current_internal_user', user);
+  document.getElementById('main-app').style.display = 'flex';
   document.getElementById('internal-login-modal').classList.remove('open');
   document.getElementById('login-pass').value = '';
+  setLoggedInUserLabel();
   startMessagePolling();
-  if (users[user].mustChange || pass === '123456') document.getElementById('change-pass-modal').classList.add('open');
+  toast(`Welcome, ${user}`);
+  if (users[user].mustChange) document.getElementById('change-pass-modal').classList.add('open');
+}
+function internalLogout() {
+  if (messagePollTimer) clearInterval(messagePollTimer);
+  messagePollTimer = null;
+  currentInternalUser = null;
+  localStorage.removeItem('current_internal_user');
+  setLoggedInUserLabel();
+  document.getElementById('main-app').style.display = 'none';
+  document.getElementById('internal-login-modal').classList.add('open');
+  setTimeout(() => document.getElementById('login-pass')?.focus(), 50);
+  toast('Logged out');
 }
 function changeInternalPasscode() {
   const p1 = document.getElementById('new-pass').value;
@@ -1570,7 +1620,7 @@ function exportReportCsv() {
   rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),'','','','','']);
   const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);  
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = 'usage_report.csv';
