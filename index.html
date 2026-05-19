@@ -865,7 +865,7 @@ const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Satur
 const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
-let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [];
+let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [];
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
 let importRows = [];
@@ -1716,6 +1716,36 @@ function promoteStandbyToShift(id) {
   }, 50);
 }
 
+
+async function loadCancellationLogsForCurrentView() {
+  try {
+    let q = supabaseClient.from('cancellation_log').select('worker_name, shift_id, cancelled_at, has_mc');
+    if (attendanceView === 'week') {
+      const start = startOfWeek(currentDate);
+      const endExclusive = addDays(start, 7);
+      q = q.gte('cancelled_at', formatDate(start)).lt('cancelled_at', formatDate(endExclusive));
+    } else {
+      q = q.eq('cancelled_at', formatDate(currentDate));
+    }
+    const { data, error } = await q;
+    if (error) throw error;
+    allCancellations = data || [];
+  } catch (e) {
+    allCancellations = [];
+  }
+}
+
+function cancellationCountForLoadedShifts() {
+  const shiftIds = new Set((allShifts || []).map(s => String(s.id)));
+  const workerCancellationLogs = (allCancellations || []).filter(c => {
+    if (!c) return false;
+    if (c.shift_id && shiftIds.has(String(c.shift_id))) return true;
+    return !c.shift_id;
+  }).length;
+  const directlyCancelledShifts = (allShifts || []).filter(s => s.cancelled).length;
+  return workerCancellationLogs + directlyCancelledShifts;
+}
+
 async function loadShifts() {
   const outlet = document.getElementById('outlet-filter')?.value || '';
   let q = supabaseClient.from('shifts').select('*').order('shift_date').order('scheduled_start');
@@ -1729,6 +1759,7 @@ async function loadShifts() {
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
   allShifts = data || [];
+  await loadCancellationLogsForCurrentView();
   await loadStandbyList();
   renderTable();
   renderMetrics();
@@ -1998,6 +2029,8 @@ async function saveRow(id) {
   const br = parseInt(document.getElementById('edit-break-' + id)?.value || 0, 10);
   const { error } = await supabaseClient.from('shifts').update({ clock_in: ci||null, clock_out: co||null, break_mins: br, updated_at: new Date().toISOString() }).eq('id', id);
   if (error) { toast('Failed to save', 'error'); return; }
+  const s = allShifts.find(x => x.id === id);
+  await logActivity('Attendance updated', `${s?.worker_name || 'Available'} at ${s?.outlet || '—'} clock-in ${ci || '—'}, clock-out ${co || '—'}, break ${br} mins`, 'shift', id);
   toast('Saved!');
   await loadShifts();
 }
@@ -2054,7 +2087,7 @@ function renderMetrics() {
   const pendingClockOut = pendingClockOutRows.length;
   const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
-  const cancelled = allShifts.filter(s => s.cancelled).length;
+  const cancelled = cancellationCountForLoadedShifts();
   const srAbsorbed = allShifts.filter(s => s.sr_absorbed).reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
   const latePenalties = allShifts.reduce((a,s) => { const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)); return a + (s.cancelled ? 0 : l.penalty); }, 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
@@ -2212,6 +2245,7 @@ async function addShift() {
     await supabaseClient.from('workers').insert({ name, country: selectedCountry });
     await loadWorkers();
   }
+  await logActivity('Shift added', `${name} at ${outletName} on ${formatDate(currentDate)} ${sched}${schedEnd ? '–' + schedEnd : ''}`, 'shift', '');
   toast('Shift added!');
   closeAddModal();
   await loadShifts();
@@ -2285,6 +2319,7 @@ async function confirmCancel() {
   if (isOutletBypass) {
     const { error } = await hardDeleteShift(pendingCancelId);
     if (error) { toast('Failed to delete outlet-cancelled shift: ' + error.message, 'error'); return; }
+    await logActivity('Outlet cancellation', `${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${s.shift_date || formatDate(currentDate)} removed from schedule`, 'shift', pendingCancelId);
     closeCancelModal();
     await loadShifts();
     toast('Outlet-cancelled shift removed from schedule');
@@ -2330,6 +2365,8 @@ async function confirmCancel() {
   }).eq('id', pendingCancelId);
 
   if (error) { toast('Failed to return slot to Available: ' + error.message, 'error'); return; }
+
+  await logActivity('Worker cancellation', `${originalWorker || 'Worker'} cancelled ${s.outlet || '—'} on ${s.shift_date || formatDate(currentDate)} ${s.scheduled_start?.slice(0,5) || ''}${isMcWaiver ? ' (MC uploaded, penalty waived)' : ' ($15 penalty)'}; slot returned to Available`, 'shift', pendingCancelId);
 
   await loadWorkers();
   closeCancelModal();
