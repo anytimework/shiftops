@@ -490,6 +490,19 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <input type="text" id="f-name" placeholder="Start typing a name, or leave blank for Available" list="worker-datalist" oninput="onWorkerInput()">
       <datalist id="worker-datalist"></datalist>
     </div>
+    <div class="form-row" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;text-transform:none;letter-spacing:0;font-family:var(--font);font-size:13px;color:var(--text);cursor:pointer;">
+        <input type="checkbox" id="f-third-party" onchange="toggleThirdPartyBooking()" style="width:auto;">
+        3rd party booking / non-member worker
+      </label>
+      <div id="third-party-fields" style="display:none;margin-top:10px;">
+        <div class="form-grid">
+          <div class="form-row" style="margin-bottom:0;"><label>3rd party worker name</label><input type="text" id="f-third-party-name" placeholder="Key in name manually"></div>
+          <div class="form-row" style="margin-bottom:0;"><label>Extra platform cost ($)</label><input type="number" id="f-third-party-fee" step="0.50" min="0" value="10.00"></div>
+        </div>
+        <div class="sub-text" style="margin-top:8px;line-height:1.5;">This worker will not be saved as a member. The $10 fee is added under SR absorbed.</div>
+      </div>
+    </div>
     <div class="form-grid">
       <div class="form-row"><label>Outlet</label><select id="f-outlet" onchange="applySuggestedRate()"></select></div>
       <div class="form-row"><label>Role</label>
@@ -986,7 +999,9 @@ function shiftPenaltyAmount(s) {
 }
 function serviceRecoveryPayment(s) {
   const hrs = parseFloat(s.sr_hours || 0);
-  const rate = parseFloat(s.sr_rate || 0);
+  const rate = parseFloat(s.sr_rate || s.rate || 0);
+  // For 3rd party bookings created directly, sr_hours is intentionally blank so payout follows actual/estimated clocked hours.
+  if (!hrs) return payoutForShift(s);
   return hrs * rate;
 }
 function netPaymentForShift(s) {
@@ -1003,20 +1018,22 @@ function estimatedPaymentForShift(s) {
   const estimatedEnd = s.scheduled_end?.slice(0,5);
   if (!estimatedEnd) return 0;
   const tempShift = { ...s, clock_out: estimatedEnd };
+  if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(tempShift) - shiftPenaltyAmount(tempShift));
   return Math.max(0, payoutForShift(tempShift) - shiftPenaltyAmount(tempShift));
 }
 function paymentDisplay(s) {
   const hours = calcShiftHours(s);
   const gross = payoutForShift(s);
   const net = netPaymentForShift(s);
-  if (s.sr_worker) {
-    return `<div>${money(gross)}</div><div class="sub-text">Original: ${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${money(net)}</div><div class="sub-text">SR: ${parseFloat(s.sr_hours||0)}h × $${parseFloat(s.sr_rate||0).toFixed(2)}</div><div class="sub-text">Paid to: ${s.sr_worker}</div>`;
-  }
   const penalty = shiftPenaltyAmount(s);
   const pnote = payrollStartNote(s);
+  const srFee = parseFloat(s.sr_absorbed || 0);
   if (!s.clock_out && !s.cancelled) {
     const est = estimatedPaymentForShift(s);
-    return `<div>${money(est)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">Pending clock-out</div><div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
+    return `<div>${money(est)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">Pending clock-out</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${srFee?` · Extra fee ${money(srFee)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
+  }
+  if (s.sr_worker) {
+    return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${money(net)}</div>${srFee?`<div class="sub-text">3rd party fee absorbed: ${money(srFee)}</div>`:''}<div class="sub-text">Paid to: ${s.sr_worker}</div>`;
   }
   return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${money(net)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${money(penalty)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
 }
@@ -1227,7 +1244,7 @@ function renderTable() {
         const hours = calcShiftHours(s);
         const workerName = String(s.worker_name || '').trim() || 'Available';
         const isAvailable = workerName.toLowerCase() === 'available';
-        const srTag = s.sr_worker ? `<div class="sr-tag">↺ SR: ${s.sr_worker}</div>` : '';
+        const srTag = s.sr_worker ? `<div class="sr-tag">↺ ${parseFloat(s.sr_absorbed||0)>0?'3rd party':'SR'}: ${s.sr_worker}</div>` : '';
         const isCancelled = s.cancelled;
         const rowClass = isCancelled ? 'row-cancelled' : '';
         let actions = '';
@@ -1428,6 +1445,26 @@ function renderMetrics() {
 }
 
 // ── Add shift ─────────────────────────────────────────────────
+function toggleThirdPartyBooking() {
+  const checked = document.getElementById('f-third-party')?.checked;
+  const fields = document.getElementById('third-party-fields');
+  const nameInput = document.getElementById('f-name');
+  if (fields) fields.style.display = checked ? 'block' : 'none';
+  if (nameInput) {
+    if (checked) {
+      nameInput.value = '';
+      nameInput.disabled = true;
+      nameInput.placeholder = 'Use 3rd party worker name below';
+      nameInput.removeAttribute('list');
+    } else {
+      nameInput.disabled = false;
+      nameInput.placeholder = 'Start typing a name, or leave blank for Available';
+      nameInput.setAttribute('list', 'worker-datalist');
+    }
+  }
+  onWorkerInput();
+}
+
 function openAddModal() {
   const hint = document.getElementById('add-date-hint');
   const hintText = document.getElementById('add-date-hint-text');
@@ -1443,6 +1480,10 @@ function openAddModal() {
   document.getElementById('f-clockin').value = '';
   document.getElementById('f-sched-end').value = '17:00';
   document.getElementById('f-break').value = '60';
+  document.getElementById('f-third-party').checked = false;
+  document.getElementById('f-third-party-name').value = '';
+  document.getElementById('f-third-party-fee').value = '10.00';
+  toggleThirdPartyBooking();
   applySuggestedRate();
 }
 function closeAddModal() { document.getElementById('add-modal').classList.remove('open'); }
@@ -1493,26 +1534,33 @@ function previewPenalty() {
 }
 
 async function addShift() {
-  const rawName = document.getElementById('f-name').value.trim();
+  const isThirdParty = !!document.getElementById('f-third-party')?.checked;
+  const rawName = isThirdParty ? document.getElementById('f-third-party-name').value.trim() : document.getElementById('f-name').value.trim();
   const name = rawName || 'Available';
   const sched = document.getElementById('f-sched').value;
   const schedEnd = document.getElementById('f-sched-end').value;
   const breakMins = parseInt(document.getElementById('f-break').value || 0, 10);
   const rate = parseFloat(document.getElementById('f-rate').value);
   if (!sched || isNaN(rate)) { toast('Please fill schedule and rate', 'error'); return; }
-  if (name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
+  if (isThirdParty && !rawName) { toast('Please key in 3rd party worker name', 'error'); return; }
+  if (!isThirdParty && name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
+  const thirdPartyFee = isThirdParty ? (parseFloat(document.getElementById('f-third-party-fee').value) || 10) : null;
   const { error } = await supabaseClient.from('shifts').insert({
     shift_date: formatDate(currentDate),
     worker_name: name,
     outlet: document.getElementById('f-outlet').value,
     role: document.getElementById('f-role').value,
     scheduled_start: sched, scheduled_end: schedEnd || null,
-    rate, break_mins: breakMins, clock_in: ci || null, late_penalty: lp
+    rate, break_mins: breakMins, clock_in: ci || null, late_penalty: lp,
+    sr_worker: isThirdParty ? name : null,
+    sr_rate: isThirdParty ? rate : null,
+    sr_hours: null,
+    sr_absorbed: isThirdParty ? thirdPartyFee : null
   });
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
-  if (name !== 'Available' && !allWorkers.find(x => x.name === name)) {
+  if (!isThirdParty && name !== 'Available' && !allWorkers.find(x => x.name === name)) {
     await supabaseClient.from('workers').insert({ name });
     await loadWorkers();
   }
