@@ -215,6 +215,19 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .week-meta { color:var(--text2); font-size:11px; line-height:1.4; }
 .week-actions { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
 .week-actions .btn { padding:4px 7px; font-size:10px; }
+
+/* Standby list */
+.nav-pill-new { margin-left:auto; font-size:9px; padding:2px 6px; border-radius:999px; background:var(--purple-dim); color:var(--purple); border:1px solid rgba(167,139,250,0.25); font-family:var(--mono); font-weight:700; }
+.standby-card { background:rgba(167,139,250,0.08); border:1px solid rgba(167,139,250,0.32); border-radius:var(--radius); padding:9px; font-size:12px; min-height:78px; }
+.standby-card-top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+.standby-name { color:var(--purple); font-weight:700; }
+.standby-label { display:inline-flex; align-items:center; gap:4px; font-size:9px; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.06em; color:var(--purple); background:var(--purple-dim); border:1px solid rgba(167,139,250,0.25); border-radius:999px; padding:2px 6px; }
+.standby-meta { color:var(--text2); font-size:11px; line-height:1.4; margin-top:3px; }
+.standby-actions { display:flex; gap:4px; flex-wrap:wrap; margin-top:7px; }
+.standby-actions .btn { padding:4px 7px; font-size:10px; }
+.standby-panel { margin-bottom:16px; }
+.standby-panel-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; padding:14px 18px; }
+
 @media (max-width: 900px) {
   .topbar { align-items:flex-start; gap:12px; flex-direction:column; }
   .attendance-toolbar { width:100%; }
@@ -312,6 +325,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('rates',this)">
         <span class="nav-icon">💵</span> Rates
       </button>
+      <button class="nav-item" onclick="switchPage('standby',this)">
+        <span class="nav-icon">🧾</span><span class="nav-label">Standby List</span><span class="nav-pill-new">NEW</span>
+      </button>
       <button class="nav-item" onclick="switchPage('reports',this)">
         <span class="nav-icon">📊</span> Reports
       </button>
@@ -359,10 +375,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
             <option value="">All outlets</option>
           </select>
           <button class="btn btn-primary btn-sm" onclick="openAddModal()">+ Add shift</button>
+          <button class="btn btn-ghost btn-sm" onclick="openStandbyModalForDate(formatDate(currentDate))">+ Standby</button>
         </div>
       </div>
       <div class="content">
         <div class="metrics" id="metrics"></div>
+        <div id="standby-day-panel"></div>
         <div class="table-wrap">
           <div class="table-header">
             <span class="table-title">Attendance log</span>
@@ -420,6 +438,20 @@ tr:hover td { background: rgba(255,255,255,0.02); }
             </div>
             <div id="rate-editor-body"></div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STANDBY PAGE -->
+    <div id="page-standby" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>Standby List</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Workers available on specific dates when no slots are open yet</p></div>
+        <div class="topbar-right"><button class="btn btn-primary btn-sm" onclick="openStandbyModalForDate(formatDate(currentDate))">+ Add standby</button></div>
+      </div>
+      <div class="content">
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">Standby workers</span><span class="table-count" id="standby-count"></span></div>
+          <div id="standby-body"><div class="empty-state"><div class="spinner"></div></div></div>
         </div>
       </div>
     </div>
@@ -641,6 +673,28 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 </div>
 
 
+<!-- ADD STANDBY MODAL -->
+<div class="modal-overlay" id="standby-modal">
+  <div class="modal" style="width:460px;">
+    <h3>Add standby worker</h3>
+    <div class="alert alert-blue"><span class="alert-icon">🧾</span><span>Use this when a worker is available on a date, but there is no open slot yet. They will appear inside the week grid for that day.</span></div>
+    <div class="form-row"><label>Worker name</label><input type="text" id="standby-name" list="worker-datalist" placeholder="Start typing worker name"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Available date</label><input type="date" id="standby-date"></div>
+      <div class="form-row"><label>Preferred time</label><select id="standby-time"><option value="Any time">Any time</option><option value="Morning">Morning</option><option value="Afternoon">Afternoon</option><option value="Evening">Evening</option><option value="Full day">Full day</option></select></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Preferred role</label><select id="standby-role"><option>F&amp;B Service Crew</option><option>Dishwasher</option><option>Kitchen Assistant</option><option>Chef De Partie</option><option>Cashier</option><option>Runner</option><option>Barista</option><option>Any role</option></select></div>
+      <div class="form-row"><label>Area / outlet</label><input type="text" id="standby-area" placeholder="Optional e.g. East / Siglap"></div>
+    </div>
+    <div class="form-row"><label>Notes</label><input type="text" id="standby-notes" placeholder="Optional e.g. can start after 5pm"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="closeStandbyModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveStandbyWorker()">Save standby</button>
+    </div>
+  </div>
+</div>
+
 <!-- INTERNAL LOGIN MODAL -->
 <div class="modal-overlay" id="internal-login-modal">
   <div class="modal" style="width:360px;">
@@ -739,7 +793,7 @@ const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Satur
 const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
-let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [];
+let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [];
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
 let allIncidents = [], allIncidentUpdates = [], allMessages = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
@@ -821,7 +875,7 @@ function applySuggestedRate() {
 async function init() {
   seedInternalUsers();
   updateDateLabel();
-  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules()]);
+  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList()]);
   await loadShifts();
   updateSidebarDate();
   requireInternalLogin();
@@ -880,6 +934,7 @@ function switchPage(name, btn) {
   if (name === 'workers') loadWorkerCards();
   if (name === 'outlets') loadOutletsList();
   if (name === 'rates') loadRatesList();
+  if (name === 'standby') renderStandbyPage();
   if (name === 'reports') initReportsPage();
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
@@ -1039,12 +1094,32 @@ function isPendingClockIn(s) {
   const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
   return toMins(sched) <= nowMins;
 }
-function pendingClockInTimeLabel(rows) {
+function formatTimeFriendly(t) {
+  if (!t) return '—';
+  const [hh, mm] = String(t).slice(0,5).split(':').map(Number);
+  const suffix = hh >= 12 ? 'PM' : 'AM';
+  const h12 = ((hh + 11) % 12) + 1;
+  return `${h12}:${String(mm || 0).padStart(2,'0')} ${suffix}`;
+}
+function nextClockInTimeLabel(allRows) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
+  const times = allRows
+    .filter(s => isPayableShift(s) && !s.clock_in && s.shift_date && s.scheduled_start)
+    .map(s => ({ day: new Date(s.shift_date + 'T00:00:00').getTime(), time: s.scheduled_start.slice(0,5), mins: toMins(s.scheduled_start.slice(0,5)) }))
+    .filter(x => x.day > today.getTime() || (x.day === today.getTime() && x.mins > nowMins))
+    .sort((a,b) => a.day - b.day || a.mins - b.mins);
+  return times[0]?.time || '';
+}
+function pendingClockInTimeLabel(rows, allRows = []) {
   const times = rows.map(s => s.scheduled_start?.slice(0,5)).filter(Boolean).sort();
-  if (!times.length) return 'No one due now';
+  const next = nextClockInTimeLabel(allRows);
+  const nextLine = next ? `<br>Next due at ${formatTimeFriendly(next)}` : '';
+  if (!times.length) return `No one due now${nextLine}`;
   const first = times[0];
   const same = times.filter(t => t === first).length;
-  return same === times.length ? `${same} due at ${first}` : `Earliest ${first}`;
+  const dueLine = same === times.length ? `${same} due at ${formatTimeFriendly(first)}` : `Earliest due at ${formatTimeFriendly(first)}`;
+  return `${dueLine}${nextLine}`;
 }
 
 function isPendingClockOut(s) {
@@ -1064,12 +1139,33 @@ function isPendingClockOut(s) {
   if (startMins !== null && endMins <= startMins) endMins += 1440;
   return endMins <= nowMins;
 }
-function pendingClockOutTimeLabel(rows) {
+function nextClockOutTimeLabel(allRows) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const nowMinsRaw = new Date().getHours() * 60 + new Date().getMinutes();
+  const times = allRows
+    .filter(s => isPayableShift(s) && s.clock_in && !s.clock_out && s.shift_date && s.scheduled_end)
+    .map(s => {
+      const day = new Date(s.shift_date + 'T00:00:00').getTime();
+      const startMins = toMins(s.scheduled_start?.slice(0,5));
+      let endMins = toMins(s.scheduled_end.slice(0,5));
+      let nowMins = nowMinsRaw;
+      if (startMins !== null && endMins <= startMins && nowMins < startMins) nowMins += 1440;
+      if (startMins !== null && endMins <= startMins) endMins += 1440;
+      return { day, time: s.scheduled_end.slice(0,5), mins: endMins, nowMins };
+    })
+    .filter(x => x.day > today.getTime() || (x.day === today.getTime() && x.mins > x.nowMins))
+    .sort((a,b) => a.day - b.day || a.mins - b.mins);
+  return times[0]?.time || '';
+}
+function pendingClockOutTimeLabel(rows, allRows = []) {
   const times = rows.map(s => s.scheduled_end?.slice(0,5)).filter(Boolean).sort();
-  if (!times.length) return 'No one due now';
+  const next = nextClockOutTimeLabel(allRows);
+  const nextLine = next ? `<br>Next due at ${formatTimeFriendly(next)}` : '';
+  if (!times.length) return `No one due now${nextLine}`;
   const first = times[0];
   const same = times.filter(t => t === first).length;
-  return same === times.length ? `${same} due at ${first}` : `Earliest ${first}`;
+  const dueLine = same === times.length ? `${same} due at ${formatTimeFriendly(first)}` : `Earliest due at ${formatTimeFriendly(first)}`;
+  return `${dueLine}${nextLine}`;
 }
 function badgeText(count) { return count > 99 ? '99+' : String(count || 0); }
 function setBadge(el, count) {
@@ -1272,6 +1368,143 @@ function resetOutletJobRates() {
   toast('Rates reset');
 }
 
+
+async function loadStandbyList() {
+  // Uses Supabase table "standby_workers" when available. If the SQL table has not been created yet,
+  // it falls back to browser storage so the feature still works in the preview build.
+  try {
+    const { data, error } = await supabaseClient.from('standby_workers').select('*').order('available_date', { ascending:true }).order('created_at', { ascending:false });
+    if (error) throw error;
+    allStandby = data || [];
+  } catch (e) {
+    allStandby = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
+  }
+}
+
+function saveStandbyLocal(record) {
+  const rows = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
+  rows.unshift(record);
+  localStorage.setItem('standby_workers_local', JSON.stringify(rows));
+  allStandby = rows;
+}
+
+async function deleteStandbyWorker(id) {
+  if (!confirm('Remove this worker from standby?')) return;
+  let removed = false;
+  try {
+    const { error } = await supabaseClient.from('standby_workers').delete().eq('id', id);
+    if (error) throw error;
+    removed = true;
+  } catch (e) {
+    const rows = JSON.parse(localStorage.getItem('standby_workers_local') || '[]').filter(x => String(x.id) !== String(id));
+    localStorage.setItem('standby_workers_local', JSON.stringify(rows));
+    allStandby = rows;
+    removed = true;
+  }
+  if (removed) {
+    toast('Standby worker removed');
+    await loadStandbyList();
+    renderTable();
+    renderStandbyPage();
+  }
+}
+
+function standbyForDay(dayStr) {
+  return allStandby
+    .filter(x => x.available_date === dayStr)
+    .sort((a,b) => String(a.worker_name || '').localeCompare(String(b.worker_name || '')));
+}
+
+function standbyCard(x, compact=false) {
+  const name = escapeHtml(x.worker_name || 'Unnamed');
+  const dateText = x.available_date ? formatDisplayDate(x.available_date) : '—';
+  const time = escapeHtml(x.preferred_time || 'Any time');
+  const role = escapeHtml(x.preferred_role || 'Any role');
+  const area = x.area ? ` · ${escapeHtml(x.area)}` : '';
+  const notes = x.notes ? `<div class="standby-meta">${escapeHtml(x.notes)}</div>` : '';
+  return `<div class="standby-card">
+    <div class="standby-card-top"><div><span class="standby-label">Standby</span><div class="standby-name" style="margin-top:5px;">${name}</div></div><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); deleteStandbyWorker('${escapeAttr(x.id)}')">×</button></div>
+    <div class="standby-meta">${dateText} · ${time}</div>
+    <div class="standby-meta">${role}${area}</div>
+    ${notes}
+    <div class="standby-actions"><button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); promoteStandbyToShift('${escapeAttr(x.id)}')">Use for shift</button></div>
+  </div>`;
+}
+
+function renderStandbyDayPanel() {
+  const panel = document.getElementById('standby-day-panel');
+  if (!panel || attendanceView !== 'day') { if (panel) panel.innerHTML = ''; return; }
+  const dayStr = formatDate(currentDate);
+  const rows = standbyForDay(dayStr);
+  if (!rows.length) { panel.innerHTML = ''; return; }
+  panel.innerHTML = `<div class="table-wrap standby-panel"><div class="table-header"><span class="table-title">Standby list for ${formatDisplayDate(dayStr)}</span><span class="table-count">${rows.length} worker${rows.length!==1?'s':''}</span></div><div class="standby-panel-grid">${rows.map(x => standbyCard(x)).join('')}</div></div>`;
+}
+
+function renderStandbyPage() {
+  const body = document.getElementById('standby-body');
+  if (!body) return;
+  const count = document.getElementById('standby-count');
+  if (count) count.textContent = `${allStandby.length} standby worker${allStandby.length!==1?'s':''}`;
+  if (!allStandby.length) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">🧾</div><p>No standby workers yet.</p></div>'; return; }
+  body.innerHTML = `<table><thead><tr><th>Worker</th><th>Available date</th><th>Time</th><th>Role</th><th>Area / outlet</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${allStandby.map(x => `<tr><td style="font-weight:600;">${escapeHtml(x.worker_name || '')}</td><td>${x.available_date ? formatDisplayDate(x.available_date) : '—'}</td><td>${escapeHtml(x.preferred_time || 'Any time')}</td><td>${escapeHtml(x.preferred_role || 'Any role')}</td><td>${escapeHtml(x.area || '—')}</td><td>${escapeHtml(x.notes || '—')}</td><td><div class="action-stack"><button class="btn btn-primary btn-sm" onclick="promoteStandbyToShift('${escapeAttr(x.id)}')">Use for shift</button><button class="btn btn-danger btn-sm" onclick="deleteStandbyWorker('${escapeAttr(x.id)}')">Remove</button></div></td></tr>`).join('')}</tbody></table>`;
+}
+
+function openStandbyModalForDate(dateStr) {
+  document.getElementById('standby-date').value = dateStr || formatDate(currentDate);
+  document.getElementById('standby-name').value = '';
+  document.getElementById('standby-time').value = 'Any time';
+  document.getElementById('standby-role').value = 'F&B Service Crew';
+  document.getElementById('standby-area').value = '';
+  document.getElementById('standby-notes').value = '';
+  document.getElementById('standby-modal').classList.add('open');
+}
+function closeStandbyModal() { document.getElementById('standby-modal').classList.remove('open'); }
+
+async function saveStandbyWorker() {
+  const workerName = document.getElementById('standby-name').value.trim();
+  const availableDate = document.getElementById('standby-date').value;
+  if (!workerName || !availableDate) { toast('Please enter worker name and available date', 'error'); return; }
+  const record = {
+    id: (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now())),
+    worker_name: workerName,
+    available_date: availableDate,
+    preferred_time: document.getElementById('standby-time').value || 'Any time',
+    preferred_role: document.getElementById('standby-role').value || 'Any role',
+    area: document.getElementById('standby-area').value.trim() || null,
+    notes: document.getElementById('standby-notes').value.trim() || null,
+    created_by: currentInternalUser || 'Jon',
+    created_at: new Date().toISOString()
+  };
+  try {
+    const { error } = await supabaseClient.from('standby_workers').insert(record);
+    if (error) throw error;
+  } catch (e) {
+    saveStandbyLocal(record);
+  }
+  if (!allWorkers.find(x => String(x.name).toLowerCase() === workerName.toLowerCase())) {
+    try { await supabaseClient.from('workers').insert({ name: workerName }); await loadWorkers(); } catch(e) {}
+  }
+  closeStandbyModal();
+  toast('Standby worker added');
+  await loadStandbyList();
+  renderTable();
+  renderStandbyPage();
+}
+
+function promoteStandbyToShift(id) {
+  const x = allStandby.find(r => String(r.id) === String(id));
+  if (!x) return;
+  currentDate = new Date(x.available_date + 'T00:00:00');
+  updateDateLabel();
+  openAddModal();
+  setTimeout(() => {
+    const name = document.getElementById('f-name'); if (name) name.value = x.worker_name || '';
+    const role = document.getElementById('f-role'); if (role && x.preferred_role && x.preferred_role !== 'Any role') role.value = x.preferred_role;
+    applySuggestedRate();
+    toast('Standby worker loaded into Add Shift');
+  }, 50);
+}
+
 async function loadShifts() {
   const outlet = document.getElementById('outlet-filter')?.value || '';
   let q = supabaseClient.from('shifts').select('*').order('shift_date').order('scheduled_start');
@@ -1285,6 +1518,7 @@ async function loadShifts() {
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
   allShifts = data || [];
+  await loadStandbyList();
   renderTable();
   renderMetrics();
 }
@@ -1362,6 +1596,7 @@ function srDisplay(s) {
 }
 
 function renderTable() {
+  renderStandbyDayPanel();
   if (attendanceView === 'week') { renderWeeklyGrid(); return; }
   const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
   const rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
@@ -1436,7 +1671,8 @@ function renderWeeklyGrid() {
   };
   const filtered = allShifts.filter(s => matchesStatus(s) && matchesMetricFilter(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
   const labelMap = { active:'active', confirmed:'confirmed', available:'available', cancelled:'cancelled', all:'total' };
-  document.getElementById('shift-count').textContent = filtered.length ? `${filtered.length} ${labelMap[statusFilter] || ''} shift${filtered.length !== 1 ? 's' : ''}` : '0 shifts';
+  const standbyInWeek = days.reduce((a,d) => a + standbyForDay(formatDate(d)).length, 0);
+  document.getElementById('shift-count').textContent = `${filtered.length} ${labelMap[statusFilter] || ''} shift${filtered.length !== 1 ? 's' : ''}${standbyInWeek ? ` · ${standbyInWeek} standby` : ''}`;
 
   const shiftsForDay = (dayStr) => filtered
     .filter(s => s.shift_date === dayStr)
@@ -1474,9 +1710,12 @@ function renderWeeklyGrid() {
         ${days.map(d => {
           const dayStr = formatDate(d);
           const shifts = shiftsForDay(dayStr);
+          const standby = standbyForDay(dayStr);
           return `<div class="week-cell" onclick="if(event.target === this) openAddModalForDate('${dayStr}')">
             ${shifts.map(shiftCard).join('')}
+            ${standby.map(x => standbyCard(x, true)).join('')}
             <div class="empty-book-slot" onclick="event.stopPropagation(); openAddModalForDate('${dayStr}')">+ Create shift</div>
+            <div class="empty-book-slot" style="min-height:48px;border-color:rgba(167,139,250,0.35);color:var(--purple);" onclick="event.stopPropagation(); openStandbyModalForDate('${dayStr}')">+ Add standby</div>
           </div>`;
         }).join('')}
       </div>
@@ -1561,10 +1800,10 @@ function renderMetrics() {
   const present = payableShifts.filter(s => s.clock_in).length;
   const pendingClockInRows = payableShifts.filter(isPendingClockIn);
   const pendingClockIn = pendingClockInRows.length;
-  const pendingClockInLabel = pendingClockInTimeLabel(pendingClockInRows);
+  const pendingClockInLabel = pendingClockInTimeLabel(pendingClockInRows, payableShifts);
   const pendingClockOutRows = payableShifts.filter(isPendingClockOut);
   const pendingClockOut = pendingClockOutRows.length;
-  const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows);
+  const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = allShifts.filter(s => s.cancelled).length;
   const srAbsorbed = allShifts.filter(s => s.sr_absorbed).reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
