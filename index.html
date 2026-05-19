@@ -544,13 +544,13 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div id="third-party-fields" style="display:none;margin-top:10px;">
         <div class="form-grid">
           <div class="form-row" style="margin-bottom:0;"><label>3rd party worker name</label><input type="text" id="f-third-party-name" placeholder="Key in name manually"></div>
-          <div class="form-row" style="margin-bottom:0;"><label>Extra platform cost ($)</label><input type="number" id="f-third-party-fee" step="0.50" min="0" value="10.00"></div>
+          <div class="form-row" style="margin-bottom:0;"><label id="f-third-party-fee-label">Extra platform cost ($)</label><input type="number" id="f-third-party-fee" step="0.50" min="0" value="10.00"></div>
         </div>
         <div class="sub-text" style="margin-top:8px;line-height:1.5;">This worker will not be saved as a member. The $10 fee is added under SR absorbed.</div>
       </div>
     </div>
     <div class="form-grid">
-      <div class="form-row"><label>Outlet</label><select id="f-outlet" onchange="applySuggestedRate()"></select></div>
+      <div class="form-row"><label>Outlet</label><select id="f-outlet" onchange="onShiftOutletChange()"></select></div>
       <div class="form-row"><label>Role</label>
         <select id="f-role" onchange="applySuggestedRate()"><option>F&amp;B Service Crew</option><option>Dishwasher</option><option>Kitchen Assistant</option><option>Chef De Partie</option><option>Cashier</option><option>Runner</option><option>Barista</option></select>
       </div>
@@ -560,7 +560,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div class="form-row"><label>Scheduled end</label><input type="time" id="f-sched-end" value="17:00" onchange="autoBreakForAddShift();"></div>
     </div>
     <div class="form-grid">
-      <div class="form-row"><label>Rate ($/hr)</label><input type="number" id="f-rate" step="0.50" min="1" value="12.00"></div>
+      <div class="form-row"><label id="f-rate-label">Rate ($/hr)</label><input type="number" id="f-rate" step="0.50" min="1" value="12.00"></div>
       <div class="form-row"><label>Unpaid break</label><select id="f-break"><option value="0">0 min</option><option value="30">30 min</option><option value="60">1 hour</option><option value="90">1 hour 30 min</option><option value="120">2 hours</option><option value="150">2 hours 30 min</option><option value="180">3 hours</option></select></div>
     </div>
     <div class="form-row">
@@ -645,6 +645,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="modal">
     <h3>Add worker</h3>
     <div class="form-row"><label>Full name</label><input type="text" id="wf-name" placeholder="e.g. Amirah B."></div>
+    <div class="form-row"><label>Country</label><select id="wf-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
     <div class="form-row"><label>Phone</label><input type="text" id="wf-phone" placeholder="+65 9xxx xxxx"></div>
     <div class="form-grid">
       <div class="form-row"><label>Payment method</label>
@@ -664,6 +665,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="modal" style="width:320px;">
     <h3>Add outlet</h3>
     <div class="form-row"><label>Outlet name</label><input type="text" id="of-name" placeholder="e.g. Kopitiam Sengkang"></div>
+    <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
@@ -1028,6 +1030,50 @@ function breakSelectHtml(id, value = 0) {
   const options = [[0,'0 min'],[30,'30 min'],[60,'1 hour'],[90,'1 hour 30 min'],[120,'2 hours'],[150,'2 hours 30 min'],[180,'3 hours']];
   return `<select class="time-inp" id="${id}" style="width:110px;">${options.map(([v,l]) => `<option value="${v}" ${Number(value)===v?'selected':''}>${l}</option>`).join('')}</select>`;
 }
+
+function normaliseCountry(country) {
+  const c = String(country || '').trim().toLowerCase();
+  return c === 'malaysia' || c === 'my' ? 'Malaysia' : 'Singapore';
+}
+function outletCountry(outletName) {
+  const outlet = allOutlets.find(o => o.name === outletName);
+  return normaliseCountry(outlet?.country);
+}
+function workerCountry(workerName) {
+  const worker = allWorkers.find(w => String(w.name || '').toLowerCase() === String(workerName || '').toLowerCase());
+  return normaliseCountry(worker?.country);
+}
+function currencySymbolForCountry(country) { return normaliseCountry(country) === 'Malaysia' ? 'RM' : '$'; }
+function currencySymbolForOutlet(outletName) { return currencySymbolForCountry(outletCountry(outletName)); }
+function moneyForCountry(n, country) { return currencySymbolForCountry(country) + Number(n || 0).toFixed(2); }
+function moneyForShift(n, s) { return moneyForCountry(n, s?.country || outletCountry(s?.outlet)); }
+function updateCurrencyLabels() {
+  const outlet = document.getElementById('f-outlet')?.value || '';
+  const sym = currencySymbolForOutlet(outlet);
+  const rateLabel = document.getElementById('f-rate-label');
+  const feeLabel = document.getElementById('f-third-party-fee-label');
+  if (rateLabel) rateLabel.textContent = `Rate (${sym}/hr)`;
+  if (feeLabel) feeLabel.textContent = `Extra platform cost (${sym})`;
+}
+function workersForSelectedOutlet() {
+  const outlet = document.getElementById('f-outlet')?.value || '';
+  const country = outletCountry(outlet);
+  return allWorkers.filter(w => normaliseCountry(w.country) === country);
+}
+function updateWorkerDatalist() {
+  const dl = document.getElementById('worker-datalist');
+  if (!dl) return;
+  const selectedOutlet = document.getElementById('f-outlet')?.value;
+  const list = selectedOutlet ? workersForSelectedOutlet() : allWorkers;
+  dl.innerHTML = list.map(w => `<option value="${escapeAttr(w.name)}">`).join('');
+}
+function onShiftOutletChange() {
+  applySuggestedRate();
+  updateCurrencyLabels();
+  updateWorkerDatalist();
+  onWorkerInput();
+}
+
 function money(n) { return '$' + Number(n || 0).toFixed(2); }
 function workerPaymentInfo(workerName) {
   const w = allWorkers.find(x => x.name === workerName);
@@ -1049,15 +1095,37 @@ function formatShortDate(dateStr) {
   const d = new Date(dateStr + 'T00:00:00');
   return `${d.getDate()}/${d.getMonth()+1}`;
 }
+function cleanHourText(hours) {
+  const h = Number(hours || 0);
+  if (Number.isInteger(h)) return `${h}hrs`;
+  const whole = Math.floor(h);
+  const mins = Math.round((h - whole) * 60);
+  if (!whole) return `${mins}mins`;
+  return `${whole}hrs${mins}mins`;
+}
+function malaysiaSafeDate(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00');
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+}
 function payrollSummary(s) {
   const hours = calcShiftHours(s);
   if (!hours) return '—';
-  return `${formatShortDate(s.shift_date)} - ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${Number(s.rate || 0).toFixed(0)}/hr`;
+  const country = normaliseCountry(s?.country || outletCountry(s.outlet));
+  const rate = Number(s.rate || 0).toFixed(0);
+  const total = Number(payoutForShift(s) || 0).toFixed(0);
+  if (country === 'Malaysia') {
+    // Malaysia payroll summary uses only letters, numbers and spaces.
+    return `${malaysiaSafeDate(s.shift_date)} ${s.worker_name} ${cleanHourText(hours)} work at RM${rate} per hr total RM${total}`;
+  }
+  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at $${rate}/hr = $${total}`;
 }
 function simplePayrollText(s) {
   const hours = calcShiftHours(s);
   if (!hours) return '—';
-  return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at ${Number(s.rate || 0).toFixed(0)}/hr`;
+  const country = normaliseCountry(s?.country || outletCountry(s.outlet));
+  const rate = Number(s.rate || 0).toFixed(0);
+  if (country === 'Malaysia') return `${cleanHourText(hours)} work on ${malaysiaSafeDate(s.shift_date)} at RM${rate} per hr`;
+  return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at $${rate}/hr`;
 }
 function payoutForShift(s) {
   const hours = parseFloat(calcShiftHours(s) || 0);
@@ -1208,12 +1276,12 @@ function paymentDisplay(s) {
   const srFee = parseFloat(s.sr_absorbed || 0);
   if (!s.clock_out && !s.cancelled) {
     const est = estimatedPaymentForShift(s);
-    return `<div>${money(est)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">${isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing'}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${srFee?` · Extra fee ${money(srFee)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
+    return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">${isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing'}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${srFee?` · Extra fee ${moneyForShift(srFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
   }
   if (s.sr_worker) {
-    return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${money(net)}</div>${srFee?`<div class="sub-text">3rd party fee absorbed: ${money(srFee)}</div>`:''}<div class="sub-text">Paid to: ${s.sr_worker}</div>`;
+    return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${moneyForShift(net, s)}</div>${srFee?`<div class="sub-text">3rd party fee absorbed: ${moneyForShift(srFee, s)}</div>`:''}<div class="sub-text">Paid to: ${s.sr_worker}</div>`;
   }
-  return `<div>${money(gross)}</div><div class="sub-text">${hours || 0}h × $${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${money(net)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${money(penalty)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
+  return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${moneyForShift(net, s)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${moneyForShift(penalty, s)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
 }
 
 function calcLatePenalty(sched, clockIn) {
@@ -1253,13 +1321,13 @@ async function loadOutlets() {
   const sel = document.getElementById('outlet-filter');
   const fsel = document.getElementById('f-outlet');
   const existing = sel.value;
-  sel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  sel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
   if (existing) sel.value = existing;
-  fsel.innerHTML = allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  fsel.innerHTML = allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join(''); updateCurrencyLabels(); updateWorkerDatalist();
   const rsel = document.getElementById('rf-outlet');
-  if (rsel) rsel.innerHTML = '<option value="">General / all outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  if (rsel) rsel.innerHTML = '<option value="">General / all outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
   const reportSel = document.getElementById('report-outlet');
-  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
 }
 
 async function loadWorkers() {
@@ -1271,7 +1339,7 @@ async function loadWorkers() {
     return { ...w, _recent_cancellations: recent };
   });
   const dl = document.getElementById('worker-datalist');
-  dl.innerHTML = allWorkers.map(w => `<option value="${w.name}">`).join('');
+  updateWorkerDatalist();
   if (document.getElementById('sr-worker')) populateSRWorkerSelect();
 }
 
@@ -1540,11 +1608,11 @@ function statusBadge(s) {
 
 function penaltyDisplay(s) {
   if (s.cancelled) {
-    if (s.mc_url) return '<span class="penalty-amber">$0 (MC)</span>';
-    return '<span class="penalty-red">−$15.00</span>';
+    if (s.mc_url) return `<span class="penalty-amber">${moneyForShift(0, s)} (MC)</span>`;
+    return `<span class="penalty-red">-${moneyForShift(15, s)}</span>`;
   }
   const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
-  if (l.penalty > 0) return `<span class="penalty-red">−$${l.penalty.toFixed(2)}</span>`;
+  if (l.penalty > 0) return `<span class="penalty-red">-${moneyForShift(l.penalty, s)}</span>`;
   return '<span class="penalty-none">—</span>';
 }
 
@@ -1591,7 +1659,7 @@ function srDisplay(s) {
   const fee = parseFloat(s.sr_absorbed || 0);
   if (!s.sr_worker && !fee) return '<span class="penalty-none">—</span>';
   const label = s.sr_worker ? escapeHtml(s.sr_worker) : 'SR';
-  const feeLine = fee ? `<div style="color:var(--amber);font-weight:700;">${money(fee)}</div>` : '<div class="sub-text">No extra fee</div>';
+  const feeLine = fee ? `<div style="color:var(--amber);font-weight:700;">${moneyForShift(fee, s)}</div>` : '<div class="sub-text">No extra fee</div>';
   return `${feeLine}<div class="sub-text">${label}</div>`;
 }
 
@@ -1684,7 +1752,7 @@ function renderWeeklyGrid() {
     const isAvailable = workerName.toLowerCase() === 'available';
     const cls = s.cancelled ? ' cancelled' : (isAvailable ? ' available' : '');
     const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong>${workerName}</strong>`;
-    const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${money(netPaymentForShift(s))}</div>` : '';
+    const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${moneyForShift(netPaymentForShift(s), s)}</div>` : '';
     const actions = s.cancelled
       ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
       : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button>${(isAvailable && !s.sr_worker) ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>` : ''}<button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
@@ -1693,7 +1761,7 @@ function renderWeeklyGrid() {
       <div class="week-meta">${nameHtml}</div>
       <div class="week-time">${scheduledRange(s)}</div>
       <div class="week-meta">${s.role || '—'}${hours ? ' · '+hours+'h' : ''}</div>
-      ${isAvailable ? '' : `<div class="week-meta">Net: ${money(netPaymentForShift(s))}</div>`}
+      ${isAvailable ? '' : `<div class="week-meta">Net: ${moneyForShift(netPaymentForShift(s), s)}</div>`}
       <div style="margin-top:4px;">${statusBadge(s)}</div>
       ${replacement}${actions}
     </div>`;
@@ -1870,7 +1938,7 @@ function openAddModal() {
   document.getElementById('f-third-party-name').value = '';
   document.getElementById('f-third-party-fee').value = '10.00';
   toggleThirdPartyBooking();
-  applySuggestedRate();
+  onShiftOutletChange();
 }
 function closeAddModal() { document.getElementById('add-modal').classList.remove('open'); }
 
@@ -1880,7 +1948,12 @@ function onWorkerInput() {
   const w = allWorkers.find(x => x.name.toLowerCase() === name.toLowerCase());
   const warn = document.getElementById('add-block-warn');
   const btn = document.getElementById('add-confirm-btn');
-  if (name && isWorkerSuspended(name)) {
+  const selectedOutlet = document.getElementById('f-outlet')?.value || '';
+  const selectedCountry = outletCountry(selectedOutlet);
+  if (rawName && w && normaliseCountry(w.country) !== selectedCountry) {
+    document.getElementById('add-block-text').textContent = `${w.name} is registered under ${normaliseCountry(w.country)}, but this outlet is under ${selectedCountry}.`;
+    warn.style.display = 'flex'; btn.disabled = true; btn.style.opacity = '0.4';
+  } else if (name && isWorkerSuspended(name)) {
     const worker = allWorkers.find(x => x.name === name);
     const until = worker?.suspended_until ? ` until ${new Date(worker.suspended_until).getDate()} ${MONTHS[new Date(worker.suspended_until).getMonth()]}` : '';
     document.getElementById('add-block-text').textContent = `${name} is suspended${until}. Cannot be assigned shifts.`;
@@ -1913,8 +1986,8 @@ function previewPenalty() {
     html = `<div class="pen-row"><span>Late by</span><span style="color:var(--red);font-weight:600;">${diff} mins</span></div>
       <div class="pen-row"><span>Payroll start time</span><span>${countedStart}</span></div>
       <div class="pen-row"><span>Penalty blocks</span><span>${Math.min(blocks,4)} × 15 min</span></div>
-      ${capped ? '<div class="pen-row"><span style="color:var(--text3);">Penalty capped at max</span><span>$10.00</span></div>' : ''}
-      <div class="pen-row total"><span>Penalty deduction</span><span style="color:var(--red);">−$${info.penalty.toFixed(2)}</span></div>`;
+      ${capped ? `<div class="pen-row"><span style="color:var(--text3);">Penalty capped at max</span><span>${moneyForCountry(10, outletCountry(document.getElementById('f-outlet')?.value))}</span></div>` : ''}
+      <div class="pen-row total"><span>Penalty deduction</span><span style="color:var(--red);">-${moneyForCountry(info.penalty, outletCountry(document.getElementById('f-outlet')?.value))}</span></div>`;
   }
   prev.innerHTML = html; prev.classList.add('show');
 }
@@ -1929,14 +2002,19 @@ async function addShift() {
   const rate = parseFloat(document.getElementById('f-rate').value);
   if (!sched || isNaN(rate)) { toast('Please fill schedule and rate', 'error'); return; }
   if (isThirdParty && !rawName) { toast('Please key in 3rd party worker name', 'error'); return; }
+  const outletName = document.getElementById('f-outlet').value;
+  const selectedCountry = outletCountry(outletName);
   if (!isThirdParty && name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
+  const selectedWorker = allWorkers.find(x => String(x.name || '').toLowerCase() === String(name || '').toLowerCase());
+  if (!isThirdParty && selectedWorker && normaliseCountry(selectedWorker.country) !== selectedCountry) { toast(`${name} is registered under ${normaliseCountry(selectedWorker.country)}, not ${selectedCountry}`, 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
   const thirdPartyFee = isThirdParty ? (parseFloat(document.getElementById('f-third-party-fee').value) || 10) : null;
   const { error } = await supabaseClient.from('shifts').insert({
     shift_date: formatDate(currentDate),
     worker_name: name,
-    outlet: document.getElementById('f-outlet').value,
+    outlet: outletName,
+    country: selectedCountry,
     role: document.getElementById('f-role').value,
     scheduled_start: sched, scheduled_end: schedEnd || null,
     rate, break_mins: breakMins, clock_in: ci || null, late_penalty: lp,
@@ -1947,7 +2025,7 @@ async function addShift() {
   });
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
   if (!isThirdParty && name !== 'Available' && !allWorkers.find(x => x.name === name)) {
-    await supabaseClient.from('workers').insert({ name });
+    await supabaseClient.from('workers').insert({ name, country: selectedCountry });
     await loadWorkers();
   }
   toast('Shift added!');
@@ -2198,6 +2276,7 @@ async function loadWorkerCards() {
             : `<span class="badge badge-green">Active</span>`}
       </div>
       <div class="worker-stats">
+        <div class="worker-stat"><div class="worker-stat-label">Country</div><div class="worker-stat-val">${normaliseCountry(w.country)}</div></div>
         <div class="worker-stat"><div class="worker-stat-label">Phone</div><div class="worker-stat-val">${w.phone || '—'}</div></div>
         <div class="worker-stat"><div class="worker-stat-label">Cancellations (30d)</div><div class="worker-stat-val" style="color:${recent>=1?'var(--red)':'var(--green)'};">${recent}/2</div></div>
       </div>
@@ -2225,12 +2304,12 @@ async function deleteWorker(id) {
   await loadWorkerCards(); await loadWorkers();
 }
 
-function openAddWorkerModal() { document.getElementById('add-worker-modal').classList.add('open'); }
+function openAddWorkerModal() { document.getElementById('wf-country').value = 'Singapore'; document.getElementById('add-worker-modal').classList.add('open'); }
 
 async function addWorker() {
   const name = document.getElementById('wf-name').value.trim();
   if (!name) { toast('Please enter worker name', 'error'); return; }
-  const { error } = await supabaseClient.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value });
+  const { error } = await supabaseClient.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value, country: document.getElementById('wf-country').value });
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
@@ -2240,8 +2319,8 @@ async function addWorker() {
 // ── Outlets page ──────────────────────────────────────────────
 function loadOutletsList() {
   document.getElementById('outlets-body').innerHTML = `<table>
-    <thead><tr><th>Outlet name</th><th>Location</th><th>Added</th><th>Actions</th></tr></thead>
-    <tbody>${allOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td>${o.location || '—'}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}</td><td><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></td></tr>`).join('')}</tbody>
+    <thead><tr><th>Outlet name</th><th>Country</th><th>Location</th><th>Added</th><th>Actions</th></tr></thead>
+    <tbody>${allOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${o.location || '—'}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}</td><td><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></td></tr>`).join('')}</tbody>
   </table>`;
 }
 
@@ -2250,12 +2329,13 @@ function openAddOutletModal() { document.getElementById('add-outlet-modal').clas
 async function addOutlet() {
   const name = document.getElementById('of-name').value.trim();
   if (!name) { toast('Enter an outlet name', 'error'); return; }
-  const { error } = await supabaseClient.from('outlets').insert({ name, location: document.getElementById('of-location').value.trim() });
+  const { error } = await supabaseClient.from('outlets').insert({ name, location: document.getElementById('of-location').value.trim(), country: document.getElementById('of-country').value });
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
   document.getElementById('of-name').value = '';
   document.getElementById('of-location').value = '';
+  document.getElementById('of-country').value = 'Singapore';
   await loadOutlets(); loadOutletsList();
 }
 
@@ -2507,7 +2587,7 @@ let currentReportRows = [];
 
 function initReportsPage() {
   const reportSel = document.getElementById('report-outlet');
-  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option>${o.name}</option>`).join('');
+  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
   if (!document.getElementById('report-from').value || !document.getElementById('report-to').value) setReportThisMonth(false);
 }
 
@@ -2533,6 +2613,12 @@ async function generateReport() {
   renderReport(from, to, outlet);
 }
 
+function reportMoney(n, outlet) {
+  if (outlet) return moneyForCountry(n, outletCountry(outlet));
+  const countries = [...new Set(currentReportRows.map(s => normaliseCountry(s?.country || outletCountry(s.outlet))))];
+  if (countries.length === 1) return moneyForCountry(n, countries[0]);
+  return Number(n || 0).toFixed(2);
+}
 function renderReport(from, to, outlet) {
   const body = document.getElementById('report-body');
   const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
@@ -2543,8 +2629,8 @@ function renderReport(from, to, outlet) {
   document.getElementById('report-metrics').innerHTML = `
     <div class="metric-card"><div class="metric-label">Completed shifts</div><div class="metric-val blue">${currentReportRows.length}</div></div>
     <div class="metric-card"><div class="metric-label">Total hours</div><div class="metric-val green">${totalHours.toFixed(2).replace(/\.00$/, '')}</div></div>
-    <div class="metric-card"><div class="metric-label">Total payout</div><div class="metric-val amber">${money(totalPayout)}</div></div>
-    <div class="metric-card"><div class="metric-label">Net payout</div><div class="metric-val green">${money(totalNetPayout)}</div></div>
+    <div class="metric-card"><div class="metric-label">Total payout</div><div class="metric-val amber">${reportMoney(totalPayout, outlet)}</div></div>
+    <div class="metric-card"><div class="metric-label">Net payout</div><div class="metric-val green">${reportMoney(totalNetPayout, outlet)}</div></div>
   `;
   if (!currentReportRows.length) {
     body.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>No completed shifts found for this report.</p></div>';
@@ -2563,8 +2649,8 @@ function renderReport(from, to, outlet) {
           <td>${s.outlet}</td>
           <td style="font-family:var(--mono);">${hours.toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}</td>
           <td style="font-family:var(--mono);">${parseFloat(s.rate || 0).toFixed(0)}</td>
-          <td style="font-family:var(--mono);">${money(payoutForShift(s))}</td>
-          <td style="font-family:var(--mono);font-weight:600;">${money(netPaymentForShift(s))}</td>
+          <td style="font-family:var(--mono);">${moneyForShift(payoutForShift(s), s)}</td>
+          <td style="font-family:var(--mono);font-weight:600;">${moneyForShift(netPaymentForShift(s), s)}</td>
           <td style="min-width:230px;">${payrollSummary(s)}</td>
           <td>${s.role || ''}</td>
           <td style="font-family:var(--mono);">${s.clock_in?.slice(0,5) || ''}</td>
@@ -2575,8 +2661,8 @@ function renderReport(from, to, outlet) {
       <tr>
         <td style="font-weight:700;">TOTAL</td><td></td><td></td>
         <td style="font-family:var(--mono);font-weight:700;">${totalHours.toFixed(2).replace(/\.00$/, '')}</td>
-        <td></td><td style="font-family:var(--mono);font-weight:700;">${money(totalPayout)}</td>
-        <td style="font-family:var(--mono);font-weight:700;">${money(totalNetPayout)}</td>
+        <td></td><td style="font-family:var(--mono);font-weight:700;">${reportMoney(totalPayout, outlet)}</td>
+        <td style="font-family:var(--mono);font-weight:700;">${reportMoney(totalNetPayout, outlet)}</td>
         <td></td><td></td><td></td><td></td><td></td>
       </tr>
     </tbody>
