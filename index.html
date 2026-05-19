@@ -77,6 +77,12 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .metric-card.clickable { cursor:pointer; transition: transform 0.12s, border-color 0.12s, background 0.12s; }
 .metric-card.clickable:hover { transform: translateY(-1px); border-color: var(--accent); background: var(--bg3); }
 .metric-card.active-filter { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79,142,247,0.25) inset; }
+.notification-wrap { position:relative; display:inline-flex; align-items:center; gap:6px; }
+.notification-badge { display:none; min-width:18px; height:18px; padding:0 5px; border-radius:999px; background:var(--red); color:#fff; font-size:10px; font-weight:800; line-height:18px; text-align:center; font-family:var(--mono); box-shadow:0 0 0 2px var(--bg2); }
+.notification-badge.show { display:inline-block; }
+.notification-badge.nav-badge { margin-left:auto; box-shadow:none; }
+.notification-bell { font-size:13px; color:var(--amber); }
+.metric-label.with-alert { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .metric-sub { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-top: 6px; line-height: 1.35; }
 .metric-label { font-size: 11px; color: var(--text3); font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
 .metric-val { font-size: 26px; font-weight: 600; letter-spacing: -0.5px; }
@@ -309,8 +315,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('incidents',this)">
         <span class="nav-icon">⚠️</span> Incidents
       </button>
-      <button class="nav-item" onclick="switchPage('messages',this)">
-        <span class="nav-icon">💬</span> Messages
+      <button class="nav-item" id="nav-messages" onclick="switchPage('messages',this)">
+        <span class="nav-icon">📣</span> Announcements <span id="messages-badge" class="notification-badge nav-badge"></span>
       </button>
     </nav>
     <div class="sidebar-user">
@@ -460,22 +466,22 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <!-- MESSAGES PAGE -->
     <div id="page-messages" style="display:none;">
       <div class="topbar">
-        <div class="topbar-left"><h2>Messages</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Group and direct internal messages</p></div>
+        <div class="topbar-left"><h2>Announcements</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Group and direct internal announcements</p></div>
       </div>
       <div class="content">
         <div class="table-wrap" style="margin-bottom:16px;">
-          <div class="table-header"><span class="table-title">Send message</span><span class="table-count" id="message-user-label"></span></div>
+          <div class="table-header"><span class="table-title">Send announcement</span><span class="table-count" id="message-user-label"></span></div>
           <div style="padding:16px 18px;">
             <div class="form-grid" style="grid-template-columns:1fr 1fr;">
               <div class="form-row"><label>Send to</label><select id="msg-to"><option value="GROUP">Group message - everyone</option></select></div>
               <div class="form-row"><label>Regarding incident</label><select id="msg-incident"><option value="">None</option></select></div>
             </div>
-            <div class="form-row"><label>Message</label><input type="text" id="msg-body" placeholder="Type your message..."></div>
-            <button class="btn btn-primary btn-sm" onclick="sendInternalMessage()">Send message</button>
+            <div class="form-row"><label>Announcement</label><input type="text" id="msg-body" placeholder="Type your announcement..."></div>
+            <button class="btn btn-primary btn-sm" onclick="sendInternalMessage()">Send announcement</button>
           </div>
         </div>
         <div class="table-wrap">
-          <div class="table-header"><span class="table-title">Inbox / group thread</span><span class="table-count" id="message-count"></span></div>
+          <div class="table-header"><span class="table-title">Announcement inbox</span><span class="table-count" id="message-count"></span></div>
           <div id="messages-body"><div class="empty-state"><div class="spinner"></div></div></div>
         </div>
       </div>
@@ -1495,6 +1501,27 @@ async function deleteCancelledShift(id) {
   await loadShifts();
 }
 
+// ── Notification badges ─────────────────────────────────────
+function setNotificationBadge(id, count) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const n = parseInt(count || 0, 10);
+  el.textContent = n > 99 ? '99+' : String(n);
+  el.classList.toggle('show', n > 0);
+}
+function updatePendingClockInBadge(count) {
+  setNotificationBadge('pending-clockin-badge', count);
+}
+async function loadMessageBadge() {
+  if (!supabaseClient || !currentInternalUser) { setNotificationBadge('messages-badge', 0); return; }
+  const me = currentInternalUser || 'Jon';
+  const { data, error } = await supabaseClient.from('internal_messages').select('*').order('created_at', { ascending:false }).limit(100);
+  if (error) { setNotificationBadge('messages-badge', 0); return; }
+  const relevant = (data || []).filter(m => m.recipient === 'GROUP' || m.recipient === me || m.sender === me);
+  const unread = relevant.filter(m => !(m.seen_by || []).includes(me) && m.sender !== me).length;
+  setNotificationBadge('messages-badge', unread);
+}
+
 // ── Metrics ──────────────────────────────────────────────────
 function renderMetrics() {
   const payableShifts = allShifts.filter(isPayableShift);
@@ -1512,7 +1539,14 @@ function renderMetrics() {
   const totalPaidOut = payableShifts.filter(s => s.clock_out).reduce((a,s) => a + netPaymentForShift(s), 0);
   const estimatedPayout = payableShifts.filter(s => !s.clock_out).reduce((a,s) => a + estimatedPaymentForShift(s), 0);
 
-  const card = (filter, label, value, cls = '', sub = '') => `<div class="metric-card clickable ${activeMetricFilter===filter?'active-filter':''}" onclick="setMetricFilter('${filter}')"><div class="metric-label">${label}</div><div class="metric-val ${cls}">${value}</div>${sub ? `<div class="metric-sub">${sub}</div>` : ''}</div>`;
+  updatePendingClockInBadge(pendingClockIn);
+  const labelHtml = (filter, label) => {
+    if (filter === 'pending_clock_in') {
+      return `<div class="metric-label with-alert"><span>${label}</span><span class="notification-wrap"><span class="notification-bell">🔔</span><span id="pending-clockin-badge" class="notification-badge ${pendingClockIn > 0 ? 'show' : ''}">${pendingClockIn}</span></span></div>`;
+    }
+    return `<div class="metric-label">${label}</div>`;
+  };
+  const card = (filter, label, value, cls = '', sub = '') => `<div class="metric-card clickable ${activeMetricFilter===filter?'active-filter':''}" onclick="setMetricFilter('${filter}')">${labelHtml(filter, label)}<div class="metric-val ${cls}">${value}</div>${sub ? `<div class="metric-sub">${sub}</div>` : ''}</div>`;
   document.getElementById('metrics').innerHTML = `
     ${card('all','Shifts', allShifts.length, '')}
     ${card('clocked_in','Clocked in', present, 'blue')}
@@ -1994,6 +2028,7 @@ function requireInternalLogin() {
   currentInternalUser = null;
   localStorage.removeItem('current_internal_user');
   setLoggedInUserLabel();
+  setNotificationBadge('messages-badge', 0);
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('internal-login-modal').classList.add('open');
   setTimeout(() => document.getElementById('login-pass')?.focus(), 50);
@@ -2017,6 +2052,7 @@ function internalLogin() {
   document.getElementById('login-pass').value = '';
   setLoggedInUserLabel();
   startMessagePolling();
+  loadMessageBadge();
   toast(`Welcome, ${user}`);
   if (users[user].mustChange) document.getElementById('change-pass-modal').classList.add('open');
 }
@@ -2142,7 +2178,7 @@ async function loadMessagesPage() {
 }
 async function sendInternalMessage() {
   const body = document.getElementById('msg-body').value.trim();
-  if (!body) { toast('Type a message first', 'error'); return; }
+  if (!body) { toast('Type an announcement first', 'error'); return; }
   const payload = {
     sender: currentInternalUser || 'Jon',
     recipient: document.getElementById('msg-to').value,
@@ -2151,9 +2187,9 @@ async function sendInternalMessage() {
     seen_by: [currentInternalUser || 'Jon']
   };
   const { error } = await supabaseClient.from('internal_messages').insert(payload);
-  if (error) { toast('Failed to send message: ' + error.message, 'error'); return; }
+  if (error) { toast('Failed to send announcement: ' + error.message, 'error'); return; }
   document.getElementById('msg-body').value = '';
-  toast('Message sent');
+  toast('Announcement sent');
   await loadMessages();
 }
 async function loadMessages() {
@@ -2162,10 +2198,11 @@ async function loadMessages() {
   const me = currentInternalUser || 'Jon';
   allMessages = (data || []).filter(m => m.recipient === 'GROUP' || m.recipient === me || m.sender === me);
   const unread = allMessages.filter(m => !(m.seen_by || []).includes(me) && m.sender !== me).length;
-  const countEl = document.getElementById('message-count'); if (countEl) countEl.textContent = `${allMessages.length} message${allMessages.length!==1?'s':''}${unread?` · ${unread} unread`:''}`;
+  const countEl = document.getElementById('message-count'); if (countEl) countEl.textContent = `${allMessages.length} announcement${allMessages.length!==1?'s':''}${unread?` · ${unread} unread`:''}`;
   const body = document.getElementById('messages-body'); if (!body) return;
-  if (!allMessages.length) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">💬</div><p>No messages yet.</p></div>'; return; }
-  body.innerHTML = `<table><thead><tr><th>Time</th><th>From</th><th>To</th><th>Message</th></tr></thead><tbody>${allMessages.map(m => { const unreadRow = !(m.seen_by || []).includes(me) && m.sender !== me; return `<tr style="${unreadRow?'background:rgba(79,142,247,0.06);':''}"><td style="font-family:var(--mono);font-size:12px;">${new Date(m.created_at).toLocaleString()}</td><td>${m.sender}</td><td>${m.recipient==='GROUP'?'Group':m.recipient}</td><td style="min-width:320px;">${m.body}${m.incident_id?'<div class="sr-tag">Incident linked</div>':''}</td></tr>`; }).join('')}</tbody></table>`;
+  if (!allMessages.length) { setNotificationBadge('messages-badge', 0); body.innerHTML = '<div class="empty-state"><div class="empty-icon">📣</div><p>No announcements yet.</p></div>'; return; }
+  setNotificationBadge('messages-badge', unread);
+  body.innerHTML = `<table><thead><tr><th>Time</th><th>From</th><th>To</th><th>Announcement</th></tr></thead><tbody>${allMessages.map(m => { const unreadRow = !(m.seen_by || []).includes(me) && m.sender !== me; return `<tr style="${unreadRow?'background:rgba(79,142,247,0.06);':''}"><td style="font-family:var(--mono);font-size:12px;">${new Date(m.created_at).toLocaleString()}</td><td>${m.sender}</td><td>${m.recipient==='GROUP'?'Group':m.recipient}</td><td style="min-width:320px;">${m.body}${m.incident_id?'<div class="sr-tag">Incident linked</div>':''}</td></tr>`; }).join('')}</tbody></table>`;
   markMessagesSeen();
 }
 async function markMessagesSeen() {
@@ -2175,6 +2212,8 @@ async function markMessagesSeen() {
     const seen = [...(m.seen_by || []), me];
     await supabaseClient.from('internal_messages').update({ seen_by: seen }).eq('id', m.id);
   }
+  if (toMark.length) setNotificationBadge('messages-badge', 0);
+}
 }
 function startMessagePolling() {
   if (messagePollTimer) clearInterval(messagePollTimer);
@@ -2182,6 +2221,7 @@ function startMessagePolling() {
     if (!currentInternalUser) return;
     const active = document.getElementById('page-messages')?.style.display !== 'none';
     if (active) await loadMessages();
+    else await loadMessageBadge();
   }, 15000);
 }
 
