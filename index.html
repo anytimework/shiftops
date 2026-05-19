@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -344,6 +345,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('standby',this)">
         <span class="nav-icon">🧾</span><span class="nav-label">Standby List</span><span class="nav-pill-new">NEW</span>
       </button>
+
+      <button class="nav-item" onclick="switchPage('import',this)">
+        <span class="nav-icon">⬆️</span> Import Bookings
+      </button>
       <button class="nav-item" onclick="switchPage('reports',this)">
         <span class="nav-icon">📊</span> Reports
       </button>
@@ -471,6 +476,38 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <div class="table-wrap">
           <div class="table-header"><span class="table-title">Standby workers</span><span class="table-count" id="standby-count"></span></div>
           <div id="standby-body"><div class="empty-state"><div class="spinner"></div></div></div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- IMPORT BOOKINGS PAGE -->
+    <div id="page-import" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>Import Bookings</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Paste payroll text or upload Excel/CSV, then reconcile workers and outlets before saving</p></div>
+        <div class="topbar-right"><button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button></div>
+      </div>
+      <div class="content">
+        <div class="table-wrap" style="margin-bottom:16px;">
+          <div class="table-header"><span class="table-title">Paste or upload booking data</span><span class="table-count">Preview first — nothing is saved until you confirm</span></div>
+          <div style="padding:16px 18px;">
+            <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Recommended: copy from Google Sheets/Excel including headers, then paste below. Excel/CSV upload is also supported. Unmatched workers/outlets will be highlighted for mapping.</span></div>
+            <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;">
+              <div class="form-row"><label>Import mode</label><select id="import-mode"><option value="auto">Auto: past with Out = clocked-out</option><option value="completed">Force clocked-out/completed</option><option value="scheduled">Force confirmed/scheduled</option></select></div>
+              <div class="form-row"><label>Default country</label><select id="import-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
+              <div class="form-row"><label>For unmatched records</label><select id="import-unmatched-mode"><option value="create">Create new worker/outlet if selected</option><option value="skip">Skip rows with unresolved mapping</option></select></div>
+            </div>
+            <div class="form-row"><label>Paste data here</label><textarea id="import-paste" placeholder="Paste copied rows from Excel / Google Sheets here..." style="width:100%;min-height:180px;font-family:var(--mono);font-size:12px;padding:10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);"></textarea></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="btn btn-primary btn-sm" onclick="parseImportPaste()">Preview pasted data</button>
+              <label class="btn btn-ghost btn-sm" style="cursor:pointer;">Upload Excel/CSV<input type="file" id="import-file" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleImportFile(event)"></label>
+            </div>
+          </div>
+        </div>
+        <div class="metrics" id="import-metrics"></div>
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">Import preview & reconciliation</span><span class="table-count" id="import-count"></span></div>
+          <div id="import-preview-body"><div class="empty-state"><div class="empty-icon">⬆️</div><p>Paste data or upload an Excel/CSV file to preview bookings.</p></div></div>
         </div>
       </div>
     </div>
@@ -831,6 +868,7 @@ let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [];
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
+let importRows = [];
 let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLogs = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
@@ -971,6 +1009,7 @@ function switchPage(name, btn) {
   if (name === 'outlets') loadOutletsList();
   if (name === 'rates') loadRatesList();
   if (name === 'standby') renderStandbyPage();
+  if (name === 'import') renderImportPreview();
   if (name === 'reports') initReportsPage();
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
