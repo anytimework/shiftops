@@ -234,6 +234,16 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .standby-panel { margin-bottom:16px; }
 .standby-panel-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; padding:14px 18px; }
 
+
+.week-head.today, .week-cell.today { background: rgba(79,142,247,0.10); box-shadow: inset 0 0 0 1px rgba(79,142,247,0.35); }
+.week-head.today { color: var(--accent); }
+.week-cell.today { border-color: rgba(79,142,247,0.45); }
+.week-cell.drag-over { background: rgba(52,199,123,0.10); box-shadow: inset 0 0 0 2px rgba(52,199,123,0.45); }
+.week-shift[draggable="true"] { cursor: grab; }
+.week-shift.dragging { opacity: 0.45; }
+.activity-line { font-size:12px;color:var(--text2);line-height:1.45; }
+.activity-action { font-weight:700;color:var(--accent); }
+
 @media (max-width: 900px) {
   .topbar { align-items:flex-start; gap:12px; flex-direction:column; }
   .attendance-toolbar { width:100%; }
@@ -343,6 +353,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('messages',this)">
         <span class="nav-icon">📢</span> Announcements
         <span class="nav-badge" id="announcement-nav-badge">0</span>
+      </button>
+      <button class="nav-item" onclick="switchPage('activity',this)">
+        <span class="nav-icon">🕘</span> Activity Log
       </button>
     </nav>
     <div class="sidebar-user">
@@ -525,6 +538,20 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <div class="table-wrap">
           <div class="table-header"><span class="table-title">Announcements / group thread</span><span class="table-count" id="message-count"></span></div>
           <div id="messages-body"><div class="empty-state"><div class="spinner"></div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ACTIVITY LOG PAGE -->
+    <div id="page-activity" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>Activity Log</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Track changes made in ShiftOps and who made them</p></div>
+        <div class="topbar-right"><button class="btn btn-ghost btn-sm" onclick="clearActivityLog()">Clear local log</button></div>
+      </div>
+      <div class="content">
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">Recent activity</span><span class="table-count" id="activity-count"></span></div>
+          <div id="activity-body"><div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet.</p></div></div>
         </div>
       </div>
     </div>
@@ -804,7 +831,7 @@ let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [];
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
-let allIncidents = [], allIncidentUpdates = [], allMessages = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
+let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLogs = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 let editingWorkerId = null, editingOutletId = null;
@@ -947,6 +974,7 @@ function switchPage(name, btn) {
   if (name === 'reports') initReportsPage();
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
+  if (name === 'activity') renderActivityLog();
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -957,6 +985,58 @@ function toast(msg, type = 'success') {
   t.innerHTML = `<span>${type === 'success' ? '✓' : '✕'}</span> ${msg}`;
   c.appendChild(t);
   setTimeout(() => t.remove(), 3500);
+}
+
+// ── Activity log ──────────────────────────────────────────────
+function activityStorageKey() { return 'shiftops_activity_log_v1'; }
+function readLocalActivityLog() {
+  try { return JSON.parse(localStorage.getItem(activityStorageKey()) || '[]'); }
+  catch(e) { return []; }
+}
+function writeLocalActivityLog(rows) {
+  localStorage.setItem(activityStorageKey(), JSON.stringify((rows || []).slice(0, 300)));
+}
+async function logActivity(action, details = '', refType = '', refId = '') {
+  const row = {
+    action,
+    details,
+    ref_type: refType,
+    ref_id: refId,
+    created_by: currentInternalUser || 'Unknown',
+    created_at: new Date().toISOString()
+  };
+  const rows = readLocalActivityLog();
+  rows.unshift(row);
+  writeLocalActivityLog(rows);
+  allActivityLogs = rows;
+  // If you create a Supabase table named activity_logs with these columns, this will also save online.
+  try { await supabaseClient.from('activity_logs').insert(row); } catch(e) {}
+  if (document.getElementById('page-activity')?.style.display !== 'none') renderActivityLog();
+}
+function renderActivityLog() {
+  const rows = readLocalActivityLog();
+  allActivityLogs = rows;
+  const count = document.getElementById('activity-count');
+  if (count) count.textContent = `${rows.length} local record${rows.length === 1 ? '' : 's'}`;
+  const body = document.getElementById('activity-body');
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet.</p></div>';
+    return;
+  }
+  body.innerHTML = `<table><thead><tr><th>Date / time</th><th>Done by</th><th>Action</th><th>Details</th></tr></thead><tbody>${rows.map(r => `
+    <tr>
+      <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${new Date(r.created_at).toLocaleString()}</td>
+      <td><span class="badge badge-blue">${escapeHtml(r.created_by || 'Unknown')}</span></td>
+      <td><span class="activity-action">${escapeHtml(r.action || '')}</span></td>
+      <td class="activity-line">${escapeHtml(r.details || '')}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+function clearActivityLog() {
+  if (!confirm('Clear the local activity log on this device?')) return;
+  writeLocalActivityLog([]);
+  renderActivityLog();
+  toast('Activity log cleared');
 }
 
 // ── Penalty logic ─────────────────────────────────────────────
@@ -1620,13 +1700,14 @@ function statusBadge(s) {
   if (isWorkerSuspended(s.worker_name)) return '<span class="badge badge-red">🚫 Suspended</span>';
   if (s.cancelled && s.mc_url) return '<span class="badge badge-amber">MC waived</span>';
   if (s.cancelled) return '<span class="badge badge-red">✕ Cancelled</span>';
+  if (s.clock_in && s.clock_out) return '<span class="badge badge-green">✓ Clocked-out</span>';
+  if (isPendingClockOut(s)) return '<span class="badge badge-amber">Pending clock-out</span>';
+  if (s.clock_in && !s.clock_out) return '<span class="badge badge-blue">Ongoing</span>';
+  if (isPendingClockIn(s)) return '<span class="badge badge-amber">Pending clock-in</span>';
   const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
   if (l.status === 'on-time') return '<span class="badge badge-green">✓ On time</span>';
   if (l.status === 'grace') return '<span class="badge badge-amber">Grace</span>';
   if (l.status === 'late') return `<span class="badge badge-red">Late ${l.mins}m</span>`;
-  if (isPendingClockOut(s)) return '<span class="badge badge-amber">Pending clock-out</span>';
-  if (s.clock_in && !s.clock_out) return '<span class="badge badge-blue">Ongoing</span>';
-  if (isPendingClockIn(s)) return '<span class="badge badge-amber">Pending clock-in</span>';
   return '<span class="badge badge-gray">Not in</span>'; 
 }
 
@@ -1780,7 +1861,7 @@ function renderWeeklyGrid() {
     const actions = s.cancelled
       ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
       : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button>${(isAvailable && !s.sr_worker) ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>` : ''}<button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
-    return `<div class="week-shift${cls}">
+    return `<div class="week-shift${cls}" draggable="${!s.cancelled}" ondragstart="handleShiftDragStart(event, '${s.id}')" ondragend="handleShiftDragEnd(event)">
       <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
       <div class="week-meta">${nameHtml}</div>
       <div class="week-time">${scheduledRange(s)}</div>
@@ -1798,12 +1879,13 @@ function renderWeeklyGrid() {
     </div>
     <div class="week-grid-wrap">
       <div class="week-grid">
-        ${days.map(d => `<div class="week-head">${DAYS_SHORT[d.getDay()]}<br>${d.getDate()} ${MONTHS[d.getMonth()]}</div>`).join('')}
+        ${days.map(d => { const todayClass = formatDate(d) === formatDate(new Date()) ? ' today' : ''; return `<div class="week-head${todayClass}">${DAYS_SHORT[d.getDay()]}<br>${d.getDate()} ${MONTHS[d.getMonth()]}</div>`; }).join('')}
         ${days.map(d => {
           const dayStr = formatDate(d);
           const shifts = shiftsForDay(dayStr);
           const standby = standbyForDay(dayStr);
-          return `<div class="week-cell" onclick="if(event.target === this) openAddModalForDate('${dayStr}')">
+          const todayClass = dayStr === formatDate(new Date()) ? ' today' : '';
+          return `<div class="week-cell${todayClass}" ondragover="handleShiftDragOver(event)" ondragleave="handleShiftDragLeave(event)" ondrop="handleShiftDrop(event, '${dayStr}')" onclick="if(event.target === this) openAddModalForDate('${dayStr}')">
             ${shifts.map(shiftCard).join('')}
             ${standby.map(x => standbyCard(x, true)).join('')}
             <div class="empty-book-slot" onclick="event.stopPropagation(); openAddModalForDate('${dayStr}')">+ Create shift</div>
@@ -1813,6 +1895,42 @@ function renderWeeklyGrid() {
       </div>
     </div>`;
   document.getElementById('table-body-wrap').innerHTML = html;
+}
+
+let draggedShiftId = null;
+function handleShiftDragStart(event, id) {
+  draggedShiftId = id;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', id);
+  event.currentTarget.classList.add('dragging');
+}
+function handleShiftDragEnd(event) {
+  event.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.week-cell.drag-over').forEach(x => x.classList.remove('drag-over'));
+  draggedShiftId = null;
+}
+function handleShiftDragOver(event) {
+  event.preventDefault();
+  event.currentTarget.classList.add('drag-over');
+}
+function handleShiftDragLeave(event) {
+  event.currentTarget.classList.remove('drag-over');
+}
+async function handleShiftDrop(event, newDate) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.remove('drag-over');
+  const id = event.dataTransfer.getData('text/plain') || draggedShiftId;
+  const s = allShifts.find(x => String(x.id) === String(id));
+  if (!s) return;
+  if (s.cancelled) { toast('Cancelled shifts cannot be moved', 'error'); return; }
+  if (s.shift_date === newDate) return;
+  const oldDate = s.shift_date;
+  const { error } = await supabaseClient.from('shifts').update({ shift_date: newDate, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error) { toast('Failed to move shift: ' + error.message, 'error'); return; }
+  await logActivity('Shift moved', `${s.worker_name || 'Available'} at ${s.outlet || '—'} moved from ${oldDate} to ${newDate}`, 'shift', id);
+  toast('Shift moved');
+  await loadShifts();
 }
 
 function openAddModalForDate(dateStr) {
