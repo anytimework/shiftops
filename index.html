@@ -558,14 +558,21 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="modal">
     <h3>Service recovery</h3>
     <div id="sr-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;font-size:13px;"></div>
-    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Enter the replacement worker's details and the raised rate. The cost difference is absorbed by you as service recovery.</span></div>
+    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Choose hourly replacement when you pay a higher worker rate, or fixed platform fee when a 3rd party charges a flat fee per shift.</span></div>
     <div class="divider"></div>
-    <div class="form-row"><label>Replacement worker</label><select id="sr-worker"><option value="">Select replacement worker</option></select></div>
-    <div class="form-grid">
-      <div class="form-row"><label>Original rate ($/hr)</label><input type="number" id="sr-orig" readonly style="background:var(--bg3);color:var(--text3);"></div>
-      <div class="form-row"><label>Replacement rate ($/hr)</label><input type="number" id="sr-new" step="0.50" min="1" oninput="calcSR()"></div>
+    <div class="form-row"><label>SR type</label><select id="sr-type" onchange="toggleSRType(); calcSR();"><option value="hourly">Hourly replacement difference</option><option value="fixed_fee">3rd party platform fee per shift</option></select></div>
+    <div id="sr-hourly-fields">
+      <div class="form-row"><label>Replacement worker</label><select id="sr-worker"><option value="">Select replacement worker</option></select></div>
+      <div class="form-grid">
+        <div class="form-row"><label>Original rate ($/hr)</label><input type="number" id="sr-orig" readonly style="background:var(--bg3);color:var(--text3);"></div>
+        <div class="form-row"><label>Replacement rate ($/hr)</label><input type="number" id="sr-new" step="0.50" min="1" oninput="calcSR()"></div>
+      </div>
+      <div class="form-row"><label>Hours to cover</label><input type="number" id="sr-hours" step="0.5" min="0.5" oninput="calcSR()"></div>
     </div>
-    <div class="form-row"><label>Hours to cover</label><input type="number" id="sr-hours" step="0.5" min="0.5" oninput="calcSR()"></div>
+    <div id="sr-fixed-fields" style="display:none;">
+      <div class="form-row"><label>Platform / source</label><input type="text" id="sr-platform" value="3rd party platform" placeholder="e.g. 3rd party platform"></div>
+      <div class="form-row"><label>Flat fee per shift ($)</label><input type="number" id="sr-fee" step="0.50" min="0" value="10.00" oninput="calcSR()"></div>
+    </div>
     <div class="pen-preview show" id="sr-preview" style="display:none!important;"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="closeSRModal()">Cancel</button>
@@ -1652,21 +1659,40 @@ function openSRModal(id, rate, workerName, outlet, sched) {
   document.getElementById('sr-info').innerHTML =
     `<div style="font-weight:600;">Replacing: ${workerName}</div>
      <div style="color:var(--text2);font-size:12px;margin-top:2px;">${outlet} · ${sched?.slice(0,5)} shift · Original rate: $${parseFloat(rate).toFixed(2)}/hr</div>`;
+  document.getElementById('sr-type').value = 'hourly';
   document.getElementById('sr-orig').value = parseFloat(rate).toFixed(2);
   document.getElementById('sr-new').value = '';
   document.getElementById('sr-hours').value = '';
+  document.getElementById('sr-platform').value = '3rd party platform';
+  document.getElementById('sr-fee').value = '10.00';
   populateSRWorkerSelect(workerName);
   document.getElementById('sr-worker').value = '';
   document.getElementById('sr-preview').style.cssText = '';
+  toggleSRType();
   document.getElementById('sr-modal').classList.add('open');
 }
 function closeSRModal() { document.getElementById('sr-modal').classList.remove('open'); pendingSRId = null; }
 
+function toggleSRType() {
+  const type = document.getElementById('sr-type')?.value || 'hourly';
+  document.getElementById('sr-hourly-fields').style.display = type === 'hourly' ? 'block' : 'none';
+  document.getElementById('sr-fixed-fields').style.display = type === 'fixed_fee' ? 'block' : 'none';
+}
+
 function calcSR() {
+  const type = document.getElementById('sr-type')?.value || 'hourly';
+  const prev = document.getElementById('sr-preview');
+  if (type === 'fixed_fee') {
+    const fee = parseFloat(document.getElementById('sr-fee').value);
+    if (isNaN(fee) || fee < 0) { prev.style.display = 'none'; return; }
+    prev.style.display = 'block';
+    prev.innerHTML = `<div class="pen-row"><span>3rd party platform fee</span><span>$${fee.toFixed(2)}</span></div>
+      <div class="pen-row total"><span>SR absorbed by you</span><span style="color:var(--amber);">+ $${fee.toFixed(2)}</span></div>`;
+    return;
+  }
   const orig = parseFloat(document.getElementById('sr-orig').value);
   const newR = parseFloat(document.getElementById('sr-new').value);
   const hrs = parseFloat(document.getElementById('sr-hours').value);
-  const prev = document.getElementById('sr-preview');
   if (isNaN(orig) || isNaN(newR) || isNaN(hrs) || hrs <= 0) { prev.style.display = 'none'; return; }
   prev.style.display = 'block';
   const absorbed = (newR - orig) * hrs;
@@ -1676,22 +1702,41 @@ function calcSR() {
 }
 
 async function confirmSR() {
-  const worker = document.getElementById('sr-worker').value.trim();
-  const newR = parseFloat(document.getElementById('sr-new').value);
-  const hrs = parseFloat(document.getElementById('sr-hours').value);
+  const type = document.getElementById('sr-type')?.value || 'hourly';
   const orig = parseFloat(document.getElementById('sr-orig').value);
-  if (!worker || isNaN(newR) || isNaN(hrs)) { toast('Please fill all fields', 'error'); return; }
+  let worker = '';
+  let srRate = null;
+  let srHours = null;
+  let absorbed = 0;
+
+  if (type === 'fixed_fee') {
+    worker = (document.getElementById('sr-platform').value || '3rd party platform').trim();
+    const fee = parseFloat(document.getElementById('sr-fee').value);
+    if (!worker || isNaN(fee) || fee < 0) { toast('Please enter platform/source and fee', 'error'); return; }
+    srRate = orig;
+    srHours = 0;
+    absorbed = fee;
+  } else {
+    worker = document.getElementById('sr-worker').value.trim();
+    const newR = parseFloat(document.getElementById('sr-new').value);
+    const hrs = parseFloat(document.getElementById('sr-hours').value);
+    if (!worker || isNaN(newR) || isNaN(hrs)) { toast('Please fill all fields', 'error'); return; }
+    srRate = newR;
+    srHours = hrs;
+    absorbed = (newR - orig) * hrs;
+  }
+
   const { error } = await supabaseClient.from('shifts').update({
     worker_name: worker,
     cancelled: false,
     sr_worker: worker,
-    sr_rate: newR,
-    sr_hours: hrs,
-    sr_absorbed: (newR-orig)*hrs,
+    sr_rate: srRate,
+    sr_hours: srHours,
+    sr_absorbed: absorbed,
     updated_at: new Date().toISOString()
   }).eq('id', pendingSRId);
   if (error) { toast('Failed to save SR', 'error'); return; }
-  toast('Replacement logged!');
+  toast(type === 'fixed_fee' ? '3rd party SR fee logged!' : 'Replacement logged!');
   closeSRModal(); await loadShifts();
 }
 
