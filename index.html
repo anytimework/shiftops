@@ -85,6 +85,12 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .metric-card.clickable:hover { transform: translateY(-1px); border-color: var(--accent); background: var(--bg3); }
 .metric-card.active-filter { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79,142,247,0.25) inset; }
 .metric-sub { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-top: 6px; line-height: 1.35; }
+.metric-split { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
+.metric-split-row { display:flex; align-items:center; justify-content:space-between; gap:10px; font-family:var(--mono); font-size:15px; font-weight:700; }
+.metric-split-country { display:inline-flex; align-items:center; gap:6px; color:var(--text2); font-family:var(--font); font-size:12px; font-weight:600; }
+.metric-split-amount.green { color:var(--green); }
+.metric-split-amount.amber { color:var(--amber); }
+.metric-split-amount.red { color:var(--red); }
 .metric-label { font-size: 11px; color: var(--text3); font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
 .metric-val { font-size: 26px; font-weight: 600; letter-spacing: -0.5px; }
 .metric-val.blue { color: var(--accent); }
@@ -397,7 +403,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div id="page-workers" style="display:none;">
       <div class="topbar">
         <div class="topbar-left"><h2>Workers</h2><p class="sub-text" style="font-size:12px;color:var(--text2);margin-top:3px;">Manage part-time worker profiles and suspension status</p></div>
-        <div class="topbar-right"><button class="btn btn-primary btn-sm" onclick="openAddWorkerModal()">+ Add worker</button></div>
+        <div class="topbar-right"><input id="worker-search" class="attendance-search" type="search" placeholder="Search workers" oninput="loadWorkerCards()"><button class="btn btn-primary btn-sm" onclick="openAddWorkerModal()">+ Add worker</button></div>
       </div>
       <div class="content">
         <div class="worker-cards" id="worker-cards"><div class="empty-state"><div class="spinner"></div></div></div>
@@ -408,7 +414,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div id="page-outlets" style="display:none;">
       <div class="topbar">
         <div class="topbar-left"><h2>Outlets</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Manage F&amp;B outlet locations</p></div>
-        <div class="topbar-right"><button class="btn btn-primary btn-sm" onclick="openAddOutletModal()">+ Add outlet</button></div>
+        <div class="topbar-right"><input id="outlet-search-page" class="attendance-search" type="search" placeholder="Search outlets / clients" oninput="loadOutletsList()"><button class="btn btn-primary btn-sm" onclick="openAddOutletModal()">+ Add outlet</button></div>
       </div>
       <div class="content">
         <div class="table-wrap">
@@ -643,7 +649,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <!-- ADD WORKER MODAL -->
 <div class="modal-overlay" id="add-worker-modal">
   <div class="modal">
-    <h3>Add worker</h3>
+    <h3 id="worker-modal-title">Add worker</h3>
     <div class="form-row"><label>Full name</label><input type="text" id="wf-name" placeholder="e.g. Amirah B."></div>
     <div class="form-row"><label>Country</label><select id="wf-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
     <div class="form-row"><label>Phone</label><input type="text" id="wf-phone" placeholder="+65 9xxx xxxx"></div>
@@ -655,7 +661,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-worker-modal').classList.remove('open')">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="addWorker()">Add worker</button>
+      <button class="btn btn-primary btn-sm" id="worker-save-btn" onclick="saveWorker()">Add worker</button>
     </div>
   </div>
 </div>
@@ -663,13 +669,13 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <!-- ADD OUTLET MODAL -->
 <div class="modal-overlay" id="add-outlet-modal">
   <div class="modal" style="width:320px;">
-    <h3>Add outlet</h3>
+    <h3 id="outlet-modal-title">Add outlet</h3>
     <div class="form-row"><label>Outlet name</label><input type="text" id="of-name" placeholder="e.g. Kopitiam Sengkang"></div>
     <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="addOutlet()">Add outlet</button>
+      <button class="btn btn-primary btn-sm" id="outlet-save-btn" onclick="saveOutlet()">Add outlet</button>
     </div>
   </div>
 </div>
@@ -801,6 +807,7 @@ let activeMetricFilter = 'all';
 let allIncidents = [], allIncidentUpdates = [], allMessages = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
+let editingWorkerId = null, editingOutletId = null;
 const INTERNAL_USER_ACCOUNTS = [
   { username:'Jon', passcode:'8472915630' },
   { username:'Jayden', passcode:'5028741936' },
@@ -1047,6 +1054,20 @@ function currencySymbolForCountry(country) { return normaliseCountry(country) ==
 function currencySymbolForOutlet(outletName) { return currencySymbolForCountry(outletCountry(outletName)); }
 function moneyForCountry(n, country) { return currencySymbolForCountry(country) + Number(n || 0).toFixed(2); }
 function moneyForShift(n, s) { return moneyForCountry(n, s?.country || outletCountry(s?.outlet)); }
+function countryForShift(s) { return normaliseCountry(s?.country || outletCountry(s?.outlet)); }
+function splitAmountsByCountry(rows, amountFn) {
+  return rows.reduce((acc, s) => {
+    const country = countryForShift(s);
+    acc[country] = (acc[country] || 0) + Number(amountFn(s) || 0);
+    return acc;
+  }, { Singapore: 0, Malaysia: 0 });
+}
+function countrySplitMetric(amounts, cls = 'green') {
+  return `<div class="metric-split">
+    <div class="metric-split-row"><span class="metric-split-country">🇸🇬 Singapore</span><span class="metric-split-amount ${cls}">$${Number(amounts.Singapore || 0).toFixed(2)}</span></div>
+    <div class="metric-split-row"><span class="metric-split-country">🇲🇾 Malaysia</span><span class="metric-split-amount ${cls}">RM${Number(amounts.Malaysia || 0).toFixed(2)}</span></div>
+  </div>`;
+}
 function updateCurrencyLabels() {
   const outlet = document.getElementById('f-outlet')?.value || '';
   const sym = currencySymbolForOutlet(outlet);
@@ -1261,9 +1282,12 @@ function notificationBubble(count, icon = '🔔') {
 function estimatedPaymentForShift(s) {
   if (!isPayableShift(s)) return 0;
   if (s.clock_out) return netPaymentForShift(s);
+  const estimatedStart = (s.clock_in || s.scheduled_start)?.slice(0,5);
   const estimatedEnd = s.scheduled_end?.slice(0,5);
-  if (!estimatedEnd) return 0;
-  const tempShift = { ...s, clock_out: estimatedEnd };
+  if (!estimatedStart || !estimatedEnd) return 0;
+  // Estimated payment should include every scheduled assigned worker, even before clock-in.
+  // Before clock-in, count from scheduled start to scheduled end; after clock-in, count from actual/payroll start to scheduled end.
+  const tempShift = { ...s, clock_in: estimatedStart, clock_out: estimatedEnd };
   if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(tempShift) - shiftPenaltyAmount(tempShift));
   return Math.max(0, payoutForShift(tempShift) - shiftPenaltyAmount(tempShift));
 }
@@ -1878,8 +1902,11 @@ function renderMetrics() {
   const latePenalties = allShifts.reduce((a,s) => { const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)); return a + (s.cancelled ? 0 : l.penalty); }, 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   const totalPenalties = latePenalties + cancelPenalties;
-  const totalPaidOut = payableShifts.filter(s => s.clock_out).reduce((a,s) => a + netPaymentForShift(s), 0);
-  const estimatedPayout = payableShifts.filter(s => !s.clock_out).reduce((a,s) => a + estimatedPaymentForShift(s), 0);
+  const totalPaidOutRows = payableShifts.filter(s => s.clock_out);
+  const estimatedPayoutRows = payableShifts.filter(s => !s.clock_out);
+  const totalPaidOutByCountry = splitAmountsByCountry(totalPaidOutRows, netPaymentForShift);
+  const estimatedPayoutByCountry = splitAmountsByCountry(estimatedPayoutRows, estimatedPaymentForShift);
+  const estimatedPayoutTotal = estimatedPayoutByCountry.Singapore + estimatedPayoutByCountry.Malaysia;
 
   updatePendingClockInBadge(pendingClockIn);
   updatePendingClockOutBadge(pendingClockOut);
@@ -1889,8 +1916,8 @@ function renderMetrics() {
     ${card('clocked_in','Clocked in', present, 'blue')}
     ${card('pending_clock_in','Pending clock-in', pendingClockIn, pendingClockIn>0?'amber':'green', pendingClockInLabel, pendingClockIn)}
     ${card('pending_clock_out','Pending clock-out', pendingClockOut, pendingClockOut>0?'amber':'green', pendingClockOutLabel, pendingClockOut)}
-    ${card('paid_out','Total paid out', '$'+totalPaidOut.toFixed(2), 'green')}
-    ${card('estimated_payout','Est. payout', '$'+estimatedPayout.toFixed(2), estimatedPayout>0?'amber':'')}
+    ${card('paid_out','Total payment', countrySplitMetric(totalPaidOutByCountry, 'green'), '')}
+    ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
     ${card('late','Late', late, late>0?'red':'green')}
     ${card('cancelled','Cancelled', cancelled, cancelled>0?'red':'')}
     ${card('penalties','Penalties', '$'+totalPenalties.toFixed(2), totalPenalties>0?'red':'green')}
@@ -2256,8 +2283,10 @@ async function confirmSR() {
 async function loadWorkerCards() {
   await loadWorkers();
   const container = document.getElementById('worker-cards');
-  if (!allWorkers.length) { container.innerHTML = '<div class="empty-state"><div class="empty-icon">👥</div><p>No workers yet.</p></div>'; return; }
-  container.innerHTML = allWorkers.map(w => {
+  const q = (document.getElementById('worker-search')?.value || '').trim().toLowerCase();
+  const filteredWorkers = q ? allWorkers.filter(w => [w.name, w.phone, w.bank_method, w.bank_details, normaliseCountry(w.country)].some(v => String(v || '').toLowerCase().includes(q))) : allWorkers;
+  if (!filteredWorkers.length) { container.innerHTML = `<div class="empty-state"><div class="empty-icon">👥</div><p>${q ? 'No workers match your search.' : 'No workers yet.'}</p></div>`; return; }
+  container.innerHTML = filteredWorkers.map(w => {
     const suspended = isWorkerSuspended(w.name);
     const initials = w.name.split(/[\s.]+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
     const until = suspended && w.suspended_until ? new Date(w.suspended_until) : null;
@@ -2281,8 +2310,11 @@ async function loadWorkerCards() {
         <div class="worker-stat"><div class="worker-stat-label">Cancellations (30d)</div><div class="worker-stat-val" style="color:${recent>=1?'var(--red)':'var(--green)'};">${recent}/2</div></div>
       </div>
       ${suspended && until ? `<div style="margin-top:10px;padding:8px 10px;background:var(--red-dim);border-radius:var(--radius);font-size:11px;color:var(--red);">Suspended until ${until.getDate()} ${MONTHS[until.getMonth()]} ${until.getFullYear()}</div>` : ''}
-      ${suspended ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;justify-content:center;" onclick="liftSuspension('${w.name}')">Lift suspension</button>` : ''}
-      <button class="btn btn-danger btn-sm" style="width:100%;margin-top:8px;justify-content:center;" onclick="deleteWorker('${w.id}')">Delete worker</button>
+      ${suspended ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;justify-content:center;" onclick="liftSuspension('${w.name.replace(/'/g,"\\'")}')">Lift suspension</button>` : ''}
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;" onclick="editWorker('${w.id}')">Edit</button>
+        <button class="btn btn-danger btn-sm" style="flex:1;justify-content:center;" onclick="deleteWorker('${w.id}')">Delete</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -2301,43 +2333,93 @@ async function deleteWorker(id) {
   const { error } = await supabaseClient.from('workers').delete().eq('id', id);
   if (error) { toast('Failed to delete worker: ' + error.message, 'error'); return; }
   toast('Worker deleted');
-  await loadWorkerCards(); await loadWorkers();
+  await loadWorkerCards(); await loadWorkers(); updateWorkerDatalist();
 }
 
-function openAddWorkerModal() { document.getElementById('wf-country').value = 'Singapore'; document.getElementById('add-worker-modal').classList.add('open'); }
+function resetWorkerModal() {
+  editingWorkerId = null;
+  document.getElementById('worker-modal-title').textContent = 'Add worker';
+  document.getElementById('worker-save-btn').textContent = 'Add worker';
+  document.getElementById('wf-name').value = '';
+  document.getElementById('wf-country').value = 'Singapore';
+  document.getElementById('wf-phone').value = '';
+  document.getElementById('wf-method').value = 'PayNow';
+  document.getElementById('wf-bank').value = '';
+}
+function openAddWorkerModal() { resetWorkerModal(); document.getElementById('add-worker-modal').classList.add('open'); }
+function editWorker(id) {
+  const w = allWorkers.find(x => x.id === id);
+  if (!w) { toast('Worker not found', 'error'); return; }
+  editingWorkerId = id;
+  document.getElementById('worker-modal-title').textContent = 'Edit worker';
+  document.getElementById('worker-save-btn').textContent = 'Save changes';
+  document.getElementById('wf-name').value = w.name || '';
+  document.getElementById('wf-country').value = normaliseCountry(w.country);
+  document.getElementById('wf-phone').value = w.phone || '';
+  document.getElementById('wf-method').value = w.bank_method || 'PayNow';
+  document.getElementById('wf-bank').value = w.bank_details || '';
+  document.getElementById('add-worker-modal').classList.add('open');
+}
 
-async function addWorker() {
+async function saveWorker() {
   const name = document.getElementById('wf-name').value.trim();
   if (!name) { toast('Please enter worker name', 'error'); return; }
-  const { error } = await supabaseClient.from('workers').insert({ name, phone: document.getElementById('wf-phone').value, bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value, country: document.getElementById('wf-country').value });
+  const payload = { name, phone: document.getElementById('wf-phone').value.trim(), bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value.trim(), country: document.getElementById('wf-country').value };
+  const query = editingWorkerId ? supabaseClient.from('workers').update(payload).eq('id', editingWorkerId) : supabaseClient.from('workers').insert(payload);
+  const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Worker added!');
+  toast(editingWorkerId ? 'Worker updated!' : 'Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
-  await loadWorkerCards(); await loadWorkers();
+  editingWorkerId = null;
+  await loadWorkerCards(); await loadWorkers(); updateWorkerDatalist();
 }
+const addWorker = saveWorker;
 
 // ── Outlets page ──────────────────────────────────────────────
 function loadOutletsList() {
+  const q = (document.getElementById('outlet-search-page')?.value || '').trim().toLowerCase();
+  const filteredOutlets = q ? allOutlets.filter(o => [o.name, o.location, normaliseCountry(o.country)].some(v => String(v || '').toLowerCase().includes(q))) : allOutlets;
+  if (!filteredOutlets.length) { document.getElementById('outlets-body').innerHTML = `<div class="empty-state"><div class="empty-icon">🏪</div><p>${q ? 'No outlets or clients match your search.' : 'No outlets yet.'}</p></div>`; return; }
   document.getElementById('outlets-body').innerHTML = `<table>
     <thead><tr><th>Outlet name</th><th>Country</th><th>Location</th><th>Added</th><th>Actions</th></tr></thead>
-    <tbody>${allOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${o.location || '—'}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}</td><td><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></td></tr>`).join('')}</tbody>
+    <tbody>${filteredOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${o.location || '—'}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`).join('')}</tbody>
   </table>`;
 }
 
-function openAddOutletModal() { document.getElementById('add-outlet-modal').classList.add('open'); }
+function resetOutletModal() {
+  editingOutletId = null;
+  document.getElementById('outlet-modal-title').textContent = 'Add outlet';
+  document.getElementById('outlet-save-btn').textContent = 'Add outlet';
+  document.getElementById('of-name').value = '';
+  document.getElementById('of-country').value = 'Singapore';
+  document.getElementById('of-location').value = '';
+}
+function openAddOutletModal() { resetOutletModal(); document.getElementById('add-outlet-modal').classList.add('open'); }
+function editOutlet(id) {
+  const o = allOutlets.find(x => x.id === id);
+  if (!o) { toast('Outlet not found', 'error'); return; }
+  editingOutletId = id;
+  document.getElementById('outlet-modal-title').textContent = 'Edit outlet';
+  document.getElementById('outlet-save-btn').textContent = 'Save changes';
+  document.getElementById('of-name').value = o.name || '';
+  document.getElementById('of-country').value = normaliseCountry(o.country);
+  document.getElementById('of-location').value = o.location || '';
+  document.getElementById('add-outlet-modal').classList.add('open');
+}
 
-async function addOutlet() {
+async function saveOutlet() {
   const name = document.getElementById('of-name').value.trim();
   if (!name) { toast('Enter an outlet name', 'error'); return; }
-  const { error } = await supabaseClient.from('outlets').insert({ name, location: document.getElementById('of-location').value.trim(), country: document.getElementById('of-country').value });
+  const payload = { name, location: document.getElementById('of-location').value.trim(), country: document.getElementById('of-country').value };
+  const query = editingOutletId ? supabaseClient.from('outlets').update(payload).eq('id', editingOutletId) : supabaseClient.from('outlets').insert(payload);
+  const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  toast('Outlet added!');
+  toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
-  document.getElementById('of-name').value = '';
-  document.getElementById('of-location').value = '';
-  document.getElementById('of-country').value = 'Singapore';
-  await loadOutlets(); loadOutletsList();
+  editingOutletId = null;
+  await loadOutlets(); loadOutletsList(); await loadShifts();
 }
+const addOutlet = saveOutlet;
 
 async function deleteOutlet(id) {
   const outlet = allOutlets.find(o => o.id === id);
@@ -2626,11 +2708,13 @@ function renderReport(from, to, outlet) {
   const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   document.getElementById('report-title').textContent = `${outlet || 'All outlets'} usage: ${formatDisplayDate(from)} to ${formatDisplayDate(to)}`;
   document.getElementById('report-count').textContent = `${currentReportRows.length} completed shift${currentReportRows.length !== 1 ? 's' : ''}`;
+  const reportTotalPayoutByCountry = splitAmountsByCountry(currentReportRows, payoutForShift);
+  const reportNetPayoutByCountry = splitAmountsByCountry(currentReportRows, netPaymentForShift);
   document.getElementById('report-metrics').innerHTML = `
     <div class="metric-card"><div class="metric-label">Completed shifts</div><div class="metric-val blue">${currentReportRows.length}</div></div>
     <div class="metric-card"><div class="metric-label">Total hours</div><div class="metric-val green">${totalHours.toFixed(2).replace(/\.00$/, '')}</div></div>
-    <div class="metric-card"><div class="metric-label">Total payout</div><div class="metric-val amber">${reportMoney(totalPayout, outlet)}</div></div>
-    <div class="metric-card"><div class="metric-label">Net payout</div><div class="metric-val green">${reportMoney(totalNetPayout, outlet)}</div></div>
+    <div class="metric-card"><div class="metric-label">Total payout</div>${outlet ? `<div class="metric-val amber">${reportMoney(totalPayout, outlet)}</div>` : countrySplitMetric(reportTotalPayoutByCountry, 'amber')}</div>
+    <div class="metric-card"><div class="metric-label">Net payout</div>${outlet ? `<div class="metric-val green">${reportMoney(totalNetPayout, outlet)}</div>` : countrySplitMetric(reportNetPayoutByCountry, 'green')}</div>
   `;
   if (!currentReportRows.length) {
     body.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>No completed shifts found for this report.</p></div>';
