@@ -1027,16 +1027,25 @@ function toast(msg, type = 'success') {
 }
 
 // ── Activity log ──────────────────────────────────────────────
-function activityStorageKey() { return 'shiftops_activity_log_v1'; }
+function activityStorageKey() { return 'shiftops_activity_log_v2'; }
+let activityLogMemory = [];
 function readLocalActivityLog() {
-  try { return JSON.parse(localStorage.getItem(activityStorageKey()) || '[]'); }
-  catch(e) { return []; }
+  try {
+    const saved = JSON.parse(localStorage.getItem(activityStorageKey()) || '[]');
+    activityLogMemory = Array.isArray(saved) ? saved : [];
+    return activityLogMemory;
+  } catch(e) {
+    return activityLogMemory || [];
+  }
 }
 function writeLocalActivityLog(rows) {
-  localStorage.setItem(activityStorageKey(), JSON.stringify((rows || []).slice(0, 300)));
+  const cleanRows = (rows || []).slice(0, 300);
+  activityLogMemory = cleanRows;
+  try { localStorage.setItem(activityStorageKey(), JSON.stringify(cleanRows)); } catch(e) {}
 }
-async function logActivity(action, details = '', refType = '', refId = '') {
+function logActivity(action, details = '', refType = '', refId = '') {
   const row = {
+    id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     action,
     details,
     ref_type: refType,
@@ -1044,23 +1053,28 @@ async function logActivity(action, details = '', refType = '', refId = '') {
     created_by: currentInternalUser || 'Unknown',
     created_at: new Date().toISOString()
   };
+
   const rows = readLocalActivityLog();
   rows.unshift(row);
   writeLocalActivityLog(rows);
   allActivityLogs = rows;
-  // If you create a Supabase table named activity_logs with these columns, this will also save online.
-  try { await supabaseClient.from('activity_logs').insert(row); } catch(e) {}
-  if (document.getElementById('page-activity')?.style.display !== 'none') renderActivityLog();
+  renderActivityLog();
+
+  // Optional cloud backup: if you create a Supabase table named activity_logs,
+  // this saves there too. It will not block the local activity page.
+  try {
+    if (supabaseClient) supabaseClient.from('activity_logs').insert(row).then(() => {}).catch(() => {});
+  } catch(e) {}
 }
 function renderActivityLog() {
   const rows = readLocalActivityLog();
   allActivityLogs = rows;
   const count = document.getElementById('activity-count');
-  if (count) count.textContent = `${rows.length} local record${rows.length === 1 ? '' : 's'}`;
+  if (count) count.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}`;
   const body = document.getElementById('activity-body');
   if (!body) return;
   if (!rows.length) {
-    body.innerHTML = '<div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet.</p></div>';
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet. Actions like adding shifts, clocking in/out, cancellations, replacements, imports and edits will appear here.</p></div>';
     return;
   }
   body.innerHTML = `<table><thead><tr><th>Date / time</th><th>Done by</th><th>Action</th><th>Details</th></tr></thead><tbody>${rows.map(r => `
@@ -1257,7 +1271,7 @@ function payrollSummary(s) {
     // Malaysia payroll summary uses only letters, numbers and spaces.
     return `${malaysiaSafeDate(s.shift_date)} ${s.worker_name} ${cleanHourText(hours)} work at RM${rate} per hr total RM${total}`;
   }
-  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at $${rate}/hr = $${total}`;
+  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${rate}/hr = SG${total}`;
 }
 function simplePayrollText(s) {
   const hours = calcShiftHours(s);
@@ -1265,7 +1279,7 @@ function simplePayrollText(s) {
   const country = normaliseCountry(s?.country || outletCountry(s.outlet));
   const rate = Number(s.rate || 0).toFixed(0);
   if (country === 'Malaysia') return `${cleanHourText(hours)} work on ${malaysiaSafeDate(s.shift_date)} at RM${rate} per hr`;
-  return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at $${rate}/hr`;
+  return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at SG${rate}/hr`;
 }
 function payoutForShift(s) {
   const hours = parseFloat(calcShiftHours(s) || 0);
