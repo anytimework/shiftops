@@ -3048,68 +3048,29 @@ function exportReportCsv() {
 
 // ── Import Bookings ───────────────────────────────────────────
 
-// Expected columns (case-insensitive, flexible names):
-// date | worker / worker_name | outlet | role | scheduled_start / start | scheduled_end / end
-// rate | break / break_mins | clock_in / in | clock_out / out | country
-
-const IMPORT_COL_MAP = {
-  date:            ['date','shift_date','shift date','day'],
-  worker_name:     ['worker','worker_name','worker name','name','staff','employee'],
-  outlet:          ['outlet','location','client','venue','site'],
-  role:            ['role','job','position','job type'],
-  scheduled_start: ['start','scheduled_start','sched start','sched_start','start time','time in','scheduled start'],
-  scheduled_end:   ['end','scheduled_end','sched end','sched_end','end time','time out','scheduled end','finish'],
-  rate:            ['rate','rate ($/hr)','hourly rate','pay rate','$/hr','rm/hr'],
-  break_mins:      ['break','break_mins','break mins','unpaid break','break (mins)','break(mins)'],
-  clock_in:        ['clock_in','clock in','clockin','actual in','in','actual start','clocked in'],
-  clock_out:       ['clock_out','clock out','clockout','actual out','out','actual end','clocked out'],
-  country:         ['country'],
-};
-
-function importNormaliseHeader(h) {
-  return String(h || '').trim().toLowerCase().replace(/[^a-z0-9 _]/g, '').replace(/\s+/g, ' ');
-}
-
-function importMapHeaders(headers) {
-  const map = {}; // col index -> field name
-  headers.forEach((h, i) => {
-    const norm = importNormaliseHeader(h);
-    for (const [field, aliases] of Object.entries(IMPORT_COL_MAP)) {
-      if (aliases.includes(norm) && !(field in Object.values(map))) {
-        map[i] = field;
-        break;
-      }
-    }
-  });
-  return map;
-}
+// ── Shared helpers ──────────────────────────────────────────
 
 function importParseDate(raw) {
   if (!raw) return null;
   raw = String(raw).trim();
-  // ISO: 2026-05-20
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  // Excel serial number
-  if (/^\d{5}$/.test(raw)) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw; // ISO
+  if (/^\d{5}$/.test(raw)) { // Excel serial
     const d = new Date((parseInt(raw) - 25569) * 86400 * 1000);
     if (!isNaN(d)) return d.toISOString().slice(0, 10);
   }
-  // DD/MM/YYYY or D/M/YYYY
+  // "17 May 2026" or "17 May, (Sun)"
+  const longDate = raw.match(/(\d{1,2})\s+([A-Za-z]+)[,\s]+.*?(\d{4})/);
+  if (longDate) {
+    const MONTH_MAP = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+    const m = MONTH_MAP[longDate[2].toLowerCase().slice(0,3)];
+    if (m) return `${longDate[3]}-${String(m).padStart(2,'0')}-${String(longDate[1]).padStart(2,'0')}`;
+  }
+  // DD/MM/YYYY
   const dmy = raw.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
   if (dmy) {
-    const [, d, m, y] = dmy;
-    const yr = y.length === 2 ? (parseInt(y) > 50 ? '19'+y : '20'+y) : y;
-    return `${yr}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+    const yr = dmy[3].length === 2 ? (parseInt(dmy[3]) > 50 ? '19'+dmy[3] : '20'+dmy[3]) : dmy[3];
+    return `${yr}-${dmy[2].padStart(2,'0')}-${dmy[1].padStart(2,'0')}`;
   }
-  // MM/DD/YYYY
-  const mdy = raw.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
-  if (mdy) {
-    const [, m, d, y] = mdy;
-    const dm = parseInt(m), dd = parseInt(d);
-    if (dm > 12) return `${y}-${String(dd).padStart(2,'0')}-${String(dm).padStart(2,'0')}`;
-    return `${y}-${String(dm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
-  }
-  // Try JS Date parse as fallback
   const parsed = new Date(raw);
   if (!isNaN(parsed)) return parsed.toISOString().slice(0, 10);
   return null;
@@ -3118,19 +3079,16 @@ function importParseDate(raw) {
 function importParseTime(raw) {
   if (!raw) return null;
   raw = String(raw).trim();
-  // HH:MM or H:MM
   const hm = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(am|pm))?$/i);
   if (hm) {
     let h = parseInt(hm[1]), m = parseInt(hm[2]);
-    const suffix = (hm[3] || '').toLowerCase();
-    if (suffix === 'pm' && h < 12) h += 12;
-    if (suffix === 'am' && h === 12) h = 0;
+    const suf = (hm[3] || '').toLowerCase();
+    if (suf === 'pm' && h < 12) h += 12;
+    if (suf === 'am' && h === 12) h = 0;
     return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
   }
-  // Excel decimal time: 0.375 = 09:00
-  if (/^0?\.\d+$/.test(raw)) {
-    const frac = parseFloat(raw);
-    const totalMins = Math.round(frac * 1440);
+  if (/^0?\.\d+$/.test(raw)) { // Excel decimal
+    const totalMins = Math.round(parseFloat(raw) * 1440);
     return `${String(Math.floor(totalMins/60)).padStart(2,'0')}:${String(totalMins%60).padStart(2,'0')}`;
   }
   return null;
@@ -3142,168 +3100,312 @@ function importParseRate(raw) {
   return isNaN(n) ? null : n;
 }
 
-function importParseBreak(raw) {
-  if (!raw) return 0;
-  raw = String(raw).trim().toLowerCase();
-  if (raw === '0' || raw === '-' || raw === 'none' || raw === 'nil') return 0;
-  const mins = parseInt(raw);
-  if (!isNaN(mins)) return mins;
-  const mMatch = raw.match(/(\d+)\s*m/);
-  if (mMatch) return parseInt(mMatch[1]);
-  const hMatch = raw.match(/(\d+)\s*h/);
-  if (hMatch) return parseInt(hMatch[1]) * 60;
-  return 0;
-}
-
-function importTsvToRows(text) {
-  // Split lines, handle \r\n and \r
-  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim());
-  if (!lines.length) return [];
-  return lines.map(line => {
-    // Tab-separated (from Excel/Sheets copy)
-    if (line.includes('\t')) return line.split('\t');
-    // Comma-separated (CSV)
-    return importParseCsvLine(line);
-  });
-}
-
 function importParseCsvLine(line) {
-  const result = [];
-  let cur = '', inQuote = false;
+  const result = []; let cur = '', inQ = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
-    if (inQuote) {
-      if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
-      else if (ch === '"') inQuote = false;
-      else cur += ch;
-    } else {
-      if (ch === '"') inQuote = true;
-      else if (ch === ',') { result.push(cur); cur = ''; }
-      else cur += ch;
-    }
+    if (inQ) { if (ch==='"' && line[i+1]==='"') { cur+='"'; i++; } else if (ch==='"') inQ=false; else cur+=ch; }
+    else { if (ch==='"') inQ=true; else if (ch===',') { result.push(cur); cur=''; } else cur+=ch; }
   }
-  result.push(cur);
-  return result;
+  result.push(cur); return result;
 }
 
-function importBuildRow(rawCols, headerMap, defaultCountry, importMode) {
-  const get = (field) => {
+function importSplitLines(text) {
+  return text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+}
+
+// ── Words/patterns to ignore in outlet/worker cleaning ─────
+
+const IGNORE_WORKER_TAGS = /\(app\)|\(new\)|\bnew\b|chef[,\s]|chef$|\bapp\b/gi;
+const IGNORE_COMMENTS = /^(false|true|internal\s+arrang\w*|internal|n\/a|na|nil|—|-)$/i;
+
+function cleanWorkerName(raw) {
+  // Remove tags like (App), (New), "Chef," that appear after the name
+  return raw.replace(IGNORE_WORKER_TAGS, '').replace(/[,\s]+$/, '').trim();
+}
+
+function cleanOutletName(raw) {
+  // Strip role suffix after " - " only if it looks like a role keyword
+  const ROLE_SUFFIXES = /\s*-\s*(cashier|chef|barista|runner|kitchen|dishwasher|service crew|crew)$/i;
+  return raw.replace(ROLE_SUFFIXES, '').trim();
+}
+
+// ── Detect format ───────────────────────────────────────────
+
+function detectImportFormat(lines) {
+  // ShiftOps fixed-column format: header row has "In" at col 1 and "Out" at col 3
+  // and data rows have "17 May 2026" style dates + times like "11:00 am"
+  const nonEmpty = lines.filter(l => l.trim());
+  if (nonEmpty.length < 2) return 'unknown';
+
+  const header = nonEmpty[0].split('\t');
+  const h1 = (header[1] || '').trim().toLowerCase();
+  const h3 = (header[3] || '').trim().toLowerCase();
+  if (h1 === 'in' && h3 === 'out') return 'shiftops';
+
+  // Check if first data row looks like ShiftOps (date + am/pm times at fixed positions)
+  const firstData = nonEmpty[1].split('\t');
+  if (firstData.length >= 10) {
+    const maybeDate = importParseDate((firstData[0] || '').trim());
+    const maybeTime = importParseTime((firstData[1] || '').trim());
+    if (maybeDate && maybeTime) return 'shiftops';
+  }
+
+  // Header-based format
+  const headerNorm = header.map(h => String(h).trim().toLowerCase());
+  if (headerNorm.some(h => ['date','shift_date','shift date','worker','worker_name'].includes(h))) return 'header';
+
+  return 'unknown';
+}
+
+// ── FORMAT A: ShiftOps fixed-column paste ───────────────────
+// Col: 0=date  1=clock_in  2="-"  3=clock_out  4=break(hrs)
+//      5=hrs   6=FALSE     7=worker  8=tags  9=outlet
+//      17=rate  21=comments  22=deductions(numeric)
+
+function parseShiftOpsFormat(lines, defaultCountry, importMode) {
+  const parsed = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const cols = line.split('\t').map(c => c.trim());
+
+    // Must have at least 10 cols
+    if (cols.length < 10) continue;
+
+    const dateStr = importParseDate(cols[0]);
+    if (!dateStr) continue; // skip header and footer rows
+
+    const clockIn  = importParseTime(cols[1]);
+    const clockOut = importParseTime(cols[3]);
+
+    // Skip rows where col[1] is a header word like "In"
+    if (!clockIn) continue;
+
+    // Break: col[4] is in HOURS (e.g. "1" = 60 mins, "0.5" = 30 mins)
+    const breakHrs = parseFloat(cols[4]) || 0;
+    const breakMins = Math.round(breakHrs * 60);
+
+    // FALSE flag at col[6] — skip if col[6] says TRUE (cancelled/no-show)
+    const flag = (cols[6] || '').trim().toUpperCase();
+    if (flag === 'TRUE') continue;
+
+    // Worker name at col[7], tags at col[8]
+    const workerRaw = cleanWorkerName(cols[7] || '');
+    if (!workerRaw) continue;
+
+    // Outlet at col[9] — strip role suffix
+    const outletRaw = cleanOutletName(cols[9] || '');
+    if (!outletRaw) continue;
+
+    // Rate at col[17] (integer like "15" or "18")
+    const rate = importParseRate(cols[17]) || 0;
+
+    // Comments at col[21] — skip rows where comment flags non-billable
+    // (we still import them, just strip the comment)
+
+    // Deductions at col[22] — numeric penalty
+    const dedRaw = (cols[22] || '').trim();
+    const deduction = /^\d+(\.\d+)?$/.test(dedRaw) ? parseFloat(dedRaw) : 0;
+
+    // Determine final clock times based on import mode
+    let finalClockIn  = clockIn;
+    let finalClockOut = clockOut;
+    const isPast = dateStr < new Date().toISOString().slice(0,10);
+    if (importMode === 'scheduled') { finalClockIn = null; finalClockOut = null; }
+    else if (importMode === 'completed') { /* keep as-is */ }
+    else { if (!isPast) { finalClockIn = null; finalClockOut = null; } }
+
+    // Resolve worker and outlet against existing records
+    const workerMatch = allWorkers.find(w =>
+      w.name.trim().toLowerCase() === workerRaw.toLowerCase()
+    );
+    const outletMatch = allOutlets.find(o =>
+      o.name.trim().toLowerCase() === outletRaw.toLowerCase()
+    );
+
+    // Auto-detect role from outlet name suffix before it was cleaned
+    const outletFull = (cols[9] || '').trim();
+    const roleRaw = importDetectRole(outletFull);
+
+    // If rate is 0, fall back to rate rules
+    let resolvedRate = rate;
+    if (!resolvedRate && outletMatch) {
+      const dateObj = new Date(dateStr + 'T00:00:00');
+      const suggested = getSuggestedRate(outletMatch.name, roleRaw, dateObj);
+      resolvedRate = suggested?.rate || 12;
+    }
+    if (!resolvedRate) resolvedRate = 12;
+
+    parsed.push({
+      _workerRaw:         workerRaw,
+      _outletRaw:         outletRaw,
+      _workerMatch:       workerMatch?.name || null,
+      _outletMatch:       outletMatch?.name || null,
+      _hasWorkerMismatch: !!workerRaw && !workerMatch,
+      _hasOutletMismatch: !!outletRaw && !outletMatch,
+      _deduction:         deduction,
+
+      shift_date:          dateStr,
+      worker_name:         workerMatch?.name || workerRaw,
+      outlet:              outletMatch?.name || outletRaw,
+      role:                roleRaw,
+      scheduled_start:     clockIn,   // these ARE the scheduled times in this format
+      scheduled_end:       clockOut,
+      rate:                resolvedRate,
+      break_mins:          breakMins,
+      clock_in:            finalClockIn,
+      clock_out:           finalClockOut,
+      country:             normaliseCountry(defaultCountry),
+      cancelled:           false,
+      late_penalty:        0,
+      cancellation_penalty: deduction || 0,
+    });
+  }
+  return parsed;
+}
+
+function importDetectRole(outletFullName) {
+  const n = outletFullName.toLowerCase();
+  if (/chef|cdp|chef de partie/.test(n)) return 'Chef De Partie';
+  if (/barista/.test(n)) return 'Barista';
+  if (/dishwasher/.test(n)) return 'Dishwasher / Kitchen Assistant';
+  if (/kitchen/.test(n)) return 'Dishwasher / Kitchen Assistant';
+  if (/cashier|runner/.test(n)) return 'F&B Service Crew';
+  return 'F&B Service Crew';
+}
+
+// ── FORMAT B: Header-based (flexible columns) ───────────────
+
+const IMPORT_COL_MAP = {
+  date:            ['date','shift_date','shift date','day'],
+  worker_name:     ['worker','worker_name','worker name','name','staff','employee'],
+  outlet:          ['outlet','location','client','venue','site'],
+  role:            ['role','job','position','job type'],
+  scheduled_start: ['start','scheduled_start','sched start','sched_start','start time','time in','scheduled start','in'],
+  scheduled_end:   ['end','scheduled_end','sched end','sched_end','end time','time out','scheduled end','finish','out'],
+  rate:            ['rate','rate ($/hr)','hourly rate','pay rate','$/hr','rm/hr'],
+  break_mins:      ['break','break_mins','break mins','unpaid break','break (mins)','break(mins)'],
+  clock_in:        ['clock_in','clock in','clockin','actual in','actual start','clocked in'],
+  clock_out:       ['clock_out','clock out','clockout','actual out','actual end','clocked out'],
+  country:         ['country'],
+};
+
+function importMapHeaders(headers) {
+  const map = {};
+  headers.forEach((h, i) => {
+    const norm = String(h || '').trim().toLowerCase().replace(/[^a-z0-9 _]/g,'').replace(/\s+/g,' ');
+    for (const [field, aliases] of Object.entries(IMPORT_COL_MAP)) {
+      if (aliases.includes(norm) && !Object.values(map).includes(field)) { map[i] = field; break; }
+    }
+  });
+  return map;
+}
+
+function parseHeaderFormat(lines, defaultCountry, importMode) {
+  const nonEmpty = lines.filter(l => l.trim());
+  if (nonEmpty.length < 2) return [];
+  const headerCols = nonEmpty[0].includes('\t') ? nonEmpty[0].split('\t') : importParseCsvLine(nonEmpty[0]);
+  const headerMap  = importMapHeaders(headerCols);
+
+  const get = (cols, field) => {
     const idx = Object.entries(headerMap).find(([,f]) => f === field)?.[0];
-    return idx !== undefined ? String(rawCols[idx] || '').trim() : '';
+    return idx !== undefined ? String(cols[parseInt(idx)] || '').trim() : '';
   };
 
-  const dateStr    = importParseDate(get('date'));
-  const workerRaw  = get('worker_name');
-  const outletRaw  = get('outlet');
-  const roleRaw    = get('role') || 'F&B Service Crew';
-  const startRaw   = importParseTime(get('scheduled_start'));
-  const endRaw     = importParseTime(get('scheduled_end'));
-  const rateRaw    = importParseRate(get('rate'));
-  const breakMins  = importParseBreak(get('break_mins'));
-  const clockIn    = importParseTime(get('clock_in'));
-  const clockOut   = importParseTime(get('clock_out'));
-  const countryRaw = get('country') || defaultCountry;
+  const parsed = [];
+  for (let i = 1; i < nonEmpty.length; i++) {
+    const line = nonEmpty[i];
+    const cols  = line.includes('\t') ? line.split('\t') : importParseCsvLine(line);
+    if (cols.every(c => !c.trim())) continue;
 
-  if (!dateStr) return null; // skip rows without a date
+    const dateStr   = importParseDate(get(cols,'date'));
+    if (!dateStr) continue;
 
-  // Resolve worker
-  const workerMatch = allWorkers.find(w =>
-    w.name.trim().toLowerCase() === workerRaw.trim().toLowerCase()
-  );
-  const workerName = workerRaw || 'Available';
+    const workerRaw  = cleanWorkerName(get(cols,'worker_name'));
+    const outletRaw  = cleanOutletName(get(cols,'outlet'));
+    const roleRaw    = get(cols,'role') || 'F&B Service Crew';
+    const startRaw   = importParseTime(get(cols,'scheduled_start'));
+    const endRaw     = importParseTime(get(cols,'scheduled_end'));
+    const rateRaw    = importParseRate(get(cols,'rate'));
+    const brkRaw     = get(cols,'break_mins');
+    const breakMins  = brkRaw ? Math.round((parseFloat(brkRaw)||0) * (/^\d+(\.\d+)?$/.test(brkRaw) && parseFloat(brkRaw) < 10 ? 60 : 1)) : 0;
+    const clockIn    = importParseTime(get(cols,'clock_in'));
+    const clockOut   = importParseTime(get(cols,'clock_out'));
+    const countryRaw = get(cols,'country') || defaultCountry;
 
-  // Resolve outlet
-  const outletMatch = allOutlets.find(o =>
-    o.name.trim().toLowerCase() === outletRaw.trim().toLowerCase()
-  );
+    let finalClockIn = clockIn, finalClockOut = clockOut;
+    const isPast = dateStr < new Date().toISOString().slice(0,10);
+    if (importMode === 'completed') { finalClockIn = clockIn||startRaw; finalClockOut = clockOut||endRaw; }
+    else if (importMode === 'scheduled') { finalClockIn=null; finalClockOut=null; }
+    else { if (isPast && clockOut) { finalClockIn = clockIn||startRaw; finalClockOut = clockOut; } }
 
-  // Determine clock-in/out based on mode
-  let finalClockIn = clockIn;
-  let finalClockOut = clockOut;
-  const isPast = dateStr < new Date().toISOString().slice(0,10);
+    const workerMatch = allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase());
+    const outletMatch = allOutlets.find(o => o.name.trim().toLowerCase() === outletRaw.toLowerCase());
 
-  if (importMode === 'completed') {
-    finalClockIn  = clockIn  || startRaw;
-    finalClockOut = clockOut || endRaw;
-  } else if (importMode === 'scheduled') {
-    finalClockIn  = null;
-    finalClockOut = null;
-  } else {
-    // auto: if past and clockOut present => treat as completed
-    if (isPast && clockOut) {
-      finalClockIn  = clockIn  || startRaw;
-      finalClockOut = clockOut;
+    let resolvedRate = rateRaw;
+    if (!resolvedRate && outletMatch) {
+      const suggested = getSuggestedRate(outletMatch.name, normaliseRole(roleRaw), new Date(dateStr+'T00:00:00'));
+      resolvedRate = suggested?.rate || 12;
     }
+    if (!resolvedRate) resolvedRate = 12;
+
+    parsed.push({
+      _workerRaw: workerRaw, _outletRaw: outletRaw,
+      _workerMatch: workerMatch?.name||null, _outletMatch: outletMatch?.name||null,
+      _hasWorkerMismatch: !!workerRaw && !workerMatch,
+      _hasOutletMismatch: !!outletRaw && !outletMatch,
+      _deduction: 0,
+      shift_date: dateStr, worker_name: workerMatch?.name||workerRaw||'Available',
+      outlet: outletMatch?.name||outletRaw||'', role: normaliseRole(roleRaw),
+      scheduled_start: startRaw||'09:00', scheduled_end: endRaw||'17:00',
+      rate: resolvedRate, break_mins: breakMins,
+      clock_in: finalClockIn, clock_out: finalClockOut,
+      country: normaliseCountry(countryRaw),
+      cancelled: false, late_penalty: 0, cancellation_penalty: 0,
+    });
   }
-
-  // Suggested rate from rate rules if not provided
-  let resolvedRate = rateRaw;
-  if (!resolvedRate && outletMatch) {
-    const dateObj = new Date(dateStr + 'T00:00:00');
-    const suggested = getSuggestedRate(outletMatch.name, normaliseRole(roleRaw), dateObj);
-    resolvedRate = suggested?.rate || 12;
-  }
-  if (!resolvedRate) resolvedRate = 12;
-
-  return {
-    _workerRaw:  workerRaw,
-    _outletRaw:  outletRaw,
-    _workerMatch: workerMatch?.name || null,
-    _outletMatch: outletMatch?.name || null,
-    _hasWorkerMismatch: workerRaw && !workerMatch,
-    _hasOutletMismatch: outletRaw && !outletMatch,
-
-    shift_date:       dateStr,
-    worker_name:      workerMatch?.name || workerRaw || 'Available',
-    outlet:           outletMatch?.name || outletRaw || '',
-    role:             normaliseRole(roleRaw),
-    scheduled_start:  startRaw || '09:00',
-    scheduled_end:    endRaw || '17:00',
-    rate:             resolvedRate,
-    break_mins:       breakMins,
-    clock_in:         finalClockIn,
-    clock_out:        finalClockOut,
-    country:          normaliseCountry(countryRaw),
-    cancelled:        false,
-    late_penalty:     0,
-    cancellation_penalty: 0,
-  };
+  return parsed;
 }
+
+// ── Master parser — auto-detects format ─────────────────────
 
 function parseImportText(text) {
-  const rows = importTsvToRows(text);
-  if (rows.length < 2) return [];
-  const headers = rows[0];
-  const headerMap = importMapHeaders(headers);
-  if (!Object.values(headerMap).includes('date')) return null; // no date column found
+  const lines = importSplitLines(text);
+  const nonEmpty = lines.filter(l => l.trim());
+  if (nonEmpty.length < 2) return [];
 
   const defaultCountry = document.getElementById('import-country')?.value || 'Singapore';
   const importMode     = document.getElementById('import-mode')?.value || 'auto';
 
-  const parsed = [];
-  for (let i = 1; i < rows.length; i++) {
-    if (rows[i].every(c => !c.trim())) continue; // skip blank rows
-    const row = importBuildRow(rows[i], headerMap, defaultCountry, importMode);
-    if (row) parsed.push(row);
+  const fmt = detectImportFormat(nonEmpty);
+  if (fmt === 'shiftops') {
+    // Skip the header line (first non-empty), parse the rest
+    const dataLines = nonEmpty.slice(1);
+    const rows = parseShiftOpsFormat(dataLines, defaultCountry, importMode);
+    return rows.length ? rows : null;
   }
-  return parsed;
+  if (fmt === 'header') {
+    return parseHeaderFormat(nonEmpty, defaultCountry, importMode);
+  }
+  // Unknown — try ShiftOps first, then header
+  const tryShiftOps = parseShiftOpsFormat(nonEmpty.slice(1), defaultCountry, importMode);
+  if (tryShiftOps.length) return tryShiftOps;
+  const tryHeader = parseHeaderFormat(nonEmpty, defaultCountry, importMode);
+  if (tryHeader.length) return tryHeader;
+  return null;
 }
 
 function parseImportPaste() {
   const text = document.getElementById('import-paste')?.value || '';
   if (!text.trim()) { toast('Please paste data first', 'error'); return; }
   const rows = parseImportText(text);
-  if (rows === null) {
-    toast('Could not find a "Date" column. Make sure the first row is a header row with column names.', 'error');
-    return;
-  }
-  if (!rows.length) {
-    toast('No valid rows found. Check that your data has dates in DD/MM/YYYY or YYYY-MM-DD format.', 'error');
+  if (!rows || !rows.length) {
+    toast('No valid rows detected. Supported formats: ShiftOps daily sheet (paste directly from Sheets) or any spreadsheet with Date/Worker/Outlet/Start/End/Rate column headers.', 'error');
     return;
   }
   importRows = rows;
   renderImportPreview();
-  toast(`Parsed ${rows.length} row${rows.length !== 1 ? 's' : ''} — review below before confirming`);
+  toast(`Parsed ${rows.length} row${rows.length !== 1 ? 's' : ''} — review below then click Confirm`);
 }
 
 async function handleImportFile(event) {
