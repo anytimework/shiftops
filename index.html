@@ -602,6 +602,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div id="add-date-hint" class="alert alert-blue" style="display:none;"><span class="alert-icon">📅</span><span id="add-date-hint-text"></span></div>
     <div id="add-block-warn" class="alert alert-red" style="display:none;"><span class="alert-icon">🚫</span><span id="add-block-text"></span></div>
     <div class="form-row">
+      <label>Country</label>
+      <select id="f-country" onchange="onShiftCountryChange()"><option value="Singapore" selected>Singapore</option><option value="Malaysia">Malaysia</option></select>
+    </div>
+    <div class="form-row">
       <label>Worker name <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional — leave blank for Available)</span></label>
       <input type="text" id="f-name" placeholder="Start typing a name, or leave blank for Available" list="worker-datalist" oninput="onWorkerInput()">
       <datalist id="worker-datalist"></datalist>
@@ -881,6 +885,7 @@ const INTERNAL_USER_ACCOUNTS = [
   { username:'Niro', passcode:'6839172045' }
 ];
 const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
+const INTERNAL_LOGIN_TTL_MS = 12 * 60 * 60 * 1000;
 
 
 const JOB_TYPES = ['F&B Service Crew', 'Dishwasher', 'Kitchen Assistant', 'Chef De Partie', 'Cashier', 'Runner', 'Barista'];
@@ -900,7 +905,10 @@ function normaliseRole(r) {
 
 function defaultDailyRates(role) {
   const r = normaliseRole(role);
-  if (r === 'F&B Service Crew' || r === 'Cashier' || r === 'Runner' || r === 'Barista') {
+  if (r === 'Barista') {
+    return { mon:15, tue:15, wed:15, thu:15, fri:15, sat:15, sun:15 };
+  }
+  if (r === 'F&B Service Crew' || r === 'Cashier' || r === 'Runner') {
     return { mon:12, tue:12, wed:12, thu:12, fri:15, sat:15, sun:15 };
   }
   if (r === 'Dishwasher' || r === 'Kitchen Assistant') {
@@ -922,7 +930,9 @@ function ensureOutletRates(outlet) {
   JOB_TYPES.forEach(role => {
     if (!rateRules[outlet][role]) rateRules[outlet][role] = defaultDailyRates(role);
     DAY_KEYS.forEach(day => {
-      if (rateRules[outlet][role][day] === undefined || rateRules[outlet][role][day] === null || rateRules[outlet][role][day] === '') {
+      if (role === 'Barista') {
+        rateRules[outlet][role][day] = 15;
+      } else if (rateRules[outlet][role][day] === undefined || rateRules[outlet][role][day] === null || rateRules[outlet][role][day] === '') {
         rateRules[outlet][role][day] = defaultDailyRates(role)[day];
       }
     });
@@ -1209,10 +1219,30 @@ function updateCurrencyLabels() {
   if (rateLabel) rateLabel.textContent = `Rate (${sym}/hr)`;
   if (feeLabel) feeLabel.textContent = `Extra platform cost (${sym})`;
 }
+function selectedShiftCountry() {
+  return normaliseCountry(document.getElementById('f-country')?.value || 'Singapore');
+}
+function outletsForShiftCountry() {
+  const country = selectedShiftCountry();
+  return allOutlets.filter(o => normaliseCountry(o.country) === country);
+}
 function workersForSelectedOutlet() {
-  const outlet = document.getElementById('f-outlet')?.value || '';
-  const country = outletCountry(outlet);
+  const country = selectedShiftCountry();
   return allWorkers.filter(w => normaliseCountry(w.country) === country);
+}
+function updateShiftOutletOptions(preserveExisting = true) {
+  const fsel = document.getElementById('f-outlet');
+  if (!fsel) return;
+  const existing = fsel.value;
+  const list = outletsForShiftCountry();
+  fsel.innerHTML = list.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
+  if (preserveExisting && existing && list.some(o => o.name === existing)) fsel.value = existing;
+  else if (list.length) fsel.value = list[0].name;
+}
+function onShiftCountryChange() {
+  updateShiftOutletOptions(false);
+  document.getElementById('f-name').value = '';
+  onShiftOutletChange();
 }
 function updateWorkerDatalist() {
   const dl = document.getElementById('worker-datalist');
@@ -1480,7 +1510,7 @@ async function loadOutlets() {
   const existing = sel.value;
   sel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
   if (existing) sel.value = existing;
-  fsel.innerHTML = allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join(''); updateCurrencyLabels(); updateWorkerDatalist();
+  updateShiftOutletOptions(true); updateCurrencyLabels(); updateWorkerDatalist();
   const rsel = document.getElementById('rf-outlet');
   if (rsel) rsel.innerHTML = '<option value="">General / all outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
   const reportSel = document.getElementById('report-outlet');
@@ -2161,6 +2191,8 @@ function openAddModal() {
   document.getElementById('add-block-warn').style.display = 'none';
   document.getElementById('add-confirm-btn').disabled = false;
   document.getElementById('pen-preview').classList.remove('show');
+  document.getElementById('f-country').value = 'Singapore';
+  updateShiftOutletOptions(false);
   document.getElementById('f-name').value = '';
   document.getElementById('f-clockin').value = '';
   document.getElementById('f-sched-end').value = '17:00';
@@ -2653,7 +2685,6 @@ function seedInternalUsers() {
   });
   Object.keys(saved).forEach(u => { if (!INTERNAL_USERS.includes(u)) delete saved[u]; });
   localStorage.setItem('internal_users', JSON.stringify(saved));
-  localStorage.removeItem('current_internal_user'); // always require passcode after refresh/open
   const sel = document.getElementById('login-user');
   if (sel) sel.innerHTML = INTERNAL_USERS.map(u => `<option>${u}</option>`).join('');
 }
@@ -2663,9 +2694,40 @@ function setLoggedInUserLabel() {
   const msgLabel = document.getElementById('message-user-label');
   if (msgLabel) msgLabel.textContent = currentInternalUser ? `Signed in: ${currentInternalUser}` : '';
 }
+function getValidInternalSession() {
+  try {
+    const session = JSON.parse(localStorage.getItem('internal_session') || 'null');
+    if (!session || !session.user || !session.expiresAt) return null;
+    if (!INTERNAL_USERS.includes(session.user) || Date.now() > Number(session.expiresAt)) {
+      localStorage.removeItem('internal_session');
+      localStorage.removeItem('current_internal_user');
+      return null;
+    }
+    return session;
+  } catch(e) {
+    localStorage.removeItem('internal_session');
+    localStorage.removeItem('current_internal_user');
+    return null;
+  }
+}
+function saveInternalSession(user) {
+  const session = { user, expiresAt: Date.now() + INTERNAL_LOGIN_TTL_MS };
+  localStorage.setItem('internal_session', JSON.stringify(session));
+  localStorage.setItem('current_internal_user', user);
+}
 function requireInternalLogin() {
+  const session = getValidInternalSession();
+  if (session) {
+    currentInternalUser = session.user;
+    document.getElementById('main-app').style.display = 'flex';
+    document.getElementById('internal-login-modal').classList.remove('open');
+    setLoggedInUserLabel();
+    startMessagePolling();
+    return;
+  }
   currentInternalUser = null;
   localStorage.removeItem('current_internal_user');
+  localStorage.removeItem('internal_session');
   setLoggedInUserLabel();
   updateAnnouncementBadge(0);
   document.getElementById('main-app').style.display = 'none';
@@ -2678,6 +2740,7 @@ function internalLogin() {
   const users = JSON.parse(localStorage.getItem('internal_users') || '{}');
   if (!user || !pass || !users[user] || users[user].passcode !== pass) {
     localStorage.removeItem('current_internal_user');
+    localStorage.removeItem('internal_session');
     currentInternalUser = null;
     document.getElementById('main-app').style.display = 'none';
     document.getElementById('internal-login-modal').classList.add('open');
@@ -2685,7 +2748,7 @@ function internalLogin() {
     return;
   }
   currentInternalUser = user;
-  localStorage.setItem('current_internal_user', user);
+  saveInternalSession(user);
   document.getElementById('main-app').style.display = 'flex';
   document.getElementById('internal-login-modal').classList.remove('open');
   document.getElementById('login-pass').value = '';
@@ -2699,6 +2762,7 @@ function internalLogout() {
   messagePollTimer = null;
   currentInternalUser = null;
   localStorage.removeItem('current_internal_user');
+  localStorage.removeItem('internal_session');
   setLoggedInUserLabel();
   updateAnnouncementBadge(0);
   document.getElementById('main-app').style.display = 'none';
