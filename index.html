@@ -495,7 +495,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
             <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;">
               <div class="form-row"><label>Import mode</label><select id="import-mode"><option value="auto">Auto: past with Out = clocked-out</option><option value="completed">Force clocked-out/completed</option><option value="scheduled">Force confirmed/scheduled</option></select></div>
               <div class="form-row"><label>Default country</label><select id="import-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
-              <div class="form-row"><label>For unmatched records</label><select id="import-unmatched-mode"><option value="create">Create new worker/outlet if selected</option><option value="skip">Skip rows with unresolved mapping</option></select></div>
+
             </div>
             <div class="form-row"><label>Paste data here</label><textarea id="import-paste" placeholder="Paste copied rows from Excel / Google Sheets here..." style="width:100%;min-height:180px;font-family:var(--mono);font-size:12px;padding:10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);"></textarea></div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -2551,8 +2551,9 @@ async function loadWorkerCards() {
       </div>
       ${suspended && until ? `<div style="margin-top:10px;padding:8px 10px;background:var(--red-dim);border-radius:var(--radius);font-size:11px;color:var(--red);">Suspended until ${until.getDate()} ${MONTHS[until.getMonth()]} ${until.getFullYear()}</div>` : ''}
       ${suspended ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;justify-content:center;" onclick="liftSuspension('${w.name.replace(/'/g,"\\'")}')">Lift suspension</button>` : ''}
-      <div style="display:flex;gap:8px;margin-top:8px;">
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;" onclick="editWorker('${w.id}')">Edit</button>
+        ${recent > 0 ? `<button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;color:var(--amber);" onclick="openCancelLogModal('${w.name.replace(/'/g,"\\'")}')">📋 ${recent} cancel${recent!==1?'s':''}</button>` : ''}
         <button class="btn btn-danger btn-sm" style="flex:1;justify-content:center;" onclick="deleteWorker('${w.id}')">Delete</button>
       </div>
     </div>`;
@@ -3200,12 +3201,36 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     // Rate at col[17] (integer like "15" or "18")
     const rate = importParseRate(cols[17]) || 0;
 
-    // Comments at col[21] — skip rows where comment flags non-billable
-    // (we still import them, just strip the comment)
+    // Comments at col[21]: detect late & cancellation penalties, and waivers
+    const comment = (cols[21] || '').trim().toLowerCase();
+    const WAIVER_RE = /waiv|waived|not deduct|no deduct|will not deduct|no penalt|penalt.*waiv|exempt|forgiv/i;
+    const LATE_RE   = /late\s*\d+\s*min|late\s*\d+m|arrived.*late|clocked.*late|\d+\s*min.*late/i;
+    const CANCEL_RE = /cancel.*penalt|penalt.*cancel|deduct.*cancel|cancel.*deduct|\$15.*cancel/i;
 
-    // Deductions at col[22] — numeric penalty
+    const isWaived = WAIVER_RE.test(cols[21] || '');
+
+    // Deductions at col[22] — numeric penalty (e.g. "15")
     const dedRaw = (cols[22] || '').trim();
-    const deduction = /^\d+(\.\d+)?$/.test(dedRaw) ? parseFloat(dedRaw) : 0;
+    let deduction = /^\d+(\.\d+)?$/.test(dedRaw) ? parseFloat(dedRaw) : 0;
+
+    // Detect late penalty from comment if not already in col[22]
+    let latePenalty = 0;
+    if (!isWaived && LATE_RE.test(cols[21] || '')) {
+      // If the comment mentions late but col[22] is not set, set default late penalty
+      if (!deduction) latePenalty = 2.5; // minimum 1 block
+    }
+
+    // Cancellation penalty from comment
+    let cancelPenalty = 0;
+    if (!isWaived && CANCEL_RE.test(cols[21] || '') && deduction) {
+      cancelPenalty = deduction;
+      deduction = 0;
+    } else if (!isWaived && deduction) {
+      cancelPenalty = deduction; // col[22] numeric = cancellation deduction
+    }
+
+    // Waiver overrides everything
+    if (isWaived) { latePenalty = 0; cancelPenalty = 0; }
 
     // Determine final clock times based on import mode
     let finalClockIn  = clockIn;
@@ -3257,8 +3282,9 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       clock_out:           finalClockOut,
       country:             normaliseCountry(defaultCountry),
       cancelled:           false,
-      late_penalty:        0,
-      cancellation_penalty: deduction || 0,
+      late_penalty:        latePenalty,
+      cancellation_penalty: cancelPenalty,
+      _waived:             isWaived,
     });
   }
   return parsed;
@@ -3458,6 +3484,10 @@ function importOutletOptions(selectedName) {
   return `<option value="__NEW__">+ Create new outlet</option>` + opts;
 }
 
+// Track which import row is pending quick-add
+let _importNewWorkerIdx = null;
+let _importNewOutletIdx = null;
+
 function renderImportPreview() {
   const body     = document.getElementById('import-preview-body');
   const countEl  = document.getElementById('import-count');
@@ -3471,71 +3501,255 @@ function renderImportPreview() {
   }
 
   const mismatches = importRows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
-  if (countEl) countEl.textContent = `${importRows.length} row${importRows.length !== 1 ? 's' : ''}${mismatches ? ` · ${mismatches} need mapping` : ' · Ready to confirm'}`;
+  if (countEl) countEl.textContent = `${importRows.length} row${importRows.length !== 1 ? 's' : ''}` + (mismatches ? ` · ${mismatches} need mapping` : ' · Ready to confirm');
 
-  // Metrics summary
   const total = importRows.length;
   const withClock = importRows.filter(r => r.clock_in && r.clock_out).length;
   const scheduled = importRows.filter(r => !r.clock_in).length;
-  const needMap   = mismatches;
+  const withPenalty = importRows.filter(r => (r.cancellation_penalty||0) > 0 || (r.late_penalty||0) > 0).length;
   if (metricsEl) metricsEl.innerHTML = `
     <div class="metric-card"><div class="metric-label">Total rows</div><div class="metric-val blue">${total}</div></div>
     <div class="metric-card"><div class="metric-label">Clocked out</div><div class="metric-val green">${withClock}</div></div>
     <div class="metric-card"><div class="metric-label">Scheduled only</div><div class="metric-val">${scheduled}</div></div>
-    <div class="metric-card"><div class="metric-label">Need mapping</div><div class="metric-val ${needMap ? 'red' : 'green'}">${needMap}</div></div>
+    <div class="metric-card"><div class="metric-label">Need mapping</div><div class="metric-val ${mismatches ? 'red' : 'green'}">${mismatches}</div></div>
+    <div class="metric-card"><div class="metric-label">With penalties</div><div class="metric-val ${withPenalty ? 'red' : 'green'}">${withPenalty}</div></div>
   `;
 
   const thead = `<thead><tr>
-    <th>Date</th><th>Worker</th><th>Outlet</th><th>Role</th>
-    <th>Start</th><th>End</th><th>Rate</th><th>Break</th>
-    <th>Clock In</th><th>Clock Out</th><th>Status</th>
+    <th>Date</th><th>Worker</th><th>Outlet / Client</th><th>Role</th>
+    <th>Start</th><th>End</th><th>Rate ($/hr)</th><th>Break</th>
+    <th>Clock In</th><th>Clock Out</th><th>Penalty</th><th>Status / Cancel</th>
   </tr></thead>`;
 
+  const SEL_STYLE = 'font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--amber);border-radius:4px;';
+
   const tbodyRows = importRows.map((r, idx) => {
-    const workerCell = r._hasWorkerMismatch
-      ? `<td><select style="font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--amber);border-radius:4px;"
-            onchange="importRows[${idx}]._workerMatch=this.value!=='__NEW__'?this.value:null;importRows[${idx}].worker_name=this.value!=='__NEW__'?this.value:${JSON.stringify(r._workerRaw)};importRows[${idx}]._hasWorkerMismatch=this.value==='__NEW__'?false:false;renderImportMetrics()">
-            ${importWorkerOptions(r._workerMatch || '')}
-          </select><div class="sub-text" style="color:var(--amber);">⚠️ ${escapeHtml(r._workerRaw)}</div></td>`
-      : `<td style="font-weight:500;">${escapeHtml(r.worker_name)}</td>`;
+    // ── Worker cell ──
+    let workerCell;
+    if (r._hasWorkerMismatch) {
+      workerCell = `<td style="background:rgba(245,166,35,0.08);border-left:3px solid var(--amber);">
+        <div style="font-weight:600;font-size:12px;color:var(--amber);">⚠️ ${escapeHtml(r._workerRaw)}</div>
+        <div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;">
+          <select style="${SEL_STYLE}" onchange="onImportWorkerSelect(${idx},this.value)">
+            <option value="">— map to existing —</option>
+            ${allWorkers.map(w => `<option value="${escapeAttr(w.name)}">${escapeHtml(w.name)}</option>`).join('')}
+          </select>
+          <button style="font-size:11px;padding:3px 8px;background:var(--teal);color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;"
+            onclick="openImportNewWorkerModal(${idx})">+ New worker</button>
+        </div>
+        <div class="sub-text" style="color:var(--text3);margin-top:2px;font-size:10px;">Not saved until mapped</div>
+      </td>`;
+    } else {
+      workerCell = `<td style="font-weight:500;">${escapeHtml(r.worker_name)}</td>`;
+    }
 
-    const outletCell = r._hasOutletMismatch
-      ? `<td><select style="font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--amber);border-radius:4px;"
-            onchange="importRows[${idx}]._outletMatch=this.value!=='__NEW__'?this.value:null;importRows[${idx}].outlet=this.value!=='__NEW__'?this.value:${JSON.stringify(r._outletRaw)};importRows[${idx}]._hasOutletMismatch=false;renderImportMetrics()">
-            ${importOutletOptions(r._outletMatch || '')}
-          </select><div class="sub-text" style="color:var(--amber);">⚠️ ${escapeHtml(r._outletRaw)}</div></td>`
-      : `<td>${escapeHtml(r.outlet)}</td>`;
+    // ── Outlet cell ──
+    let outletCell;
+    if (r._hasOutletMismatch) {
+      outletCell = `<td style="background:rgba(245,166,35,0.08);border-left:3px solid var(--amber);">
+        <div style="font-weight:600;font-size:12px;color:var(--amber);">⚠️ ${escapeHtml(r._outletRaw)}</div>
+        <div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;">
+          <select style="${SEL_STYLE}" onchange="onImportOutletSelect(${idx},this.value)">
+            <option value="">— map to existing —</option>
+            ${allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)}</option>`).join('')}
+          </select>
+          <button style="font-size:11px;padding:3px 8px;background:var(--teal);color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;"
+            onclick="openImportNewOutletModal(${idx})">+ New client</button>
+        </div>
+        <div class="sub-text" style="color:var(--text3);margin-top:2px;font-size:10px;">Not saved until mapped</div>
+      </td>`;
+    } else {
+      outletCell = `<td>${escapeHtml(r.outlet)}</td>`;
+    }
 
-    const statusBadge = r._hasWorkerMismatch || r._hasOutletMismatch
-      ? `<span class="badge badge-amber">Needs map</span>`
-      : (r.clock_in && r.clock_out)
-        ? `<span class="badge badge-green">Completed</span>`
-        : `<span class="badge badge-blue">Scheduled</span>`;
+    // ── Rate cell (editable) ──
+    const rateCell = `<td>
+      <input type="number" step="0.5" min="0" value="${parseFloat(r.rate||12).toFixed(2)}"
+        style="width:64px;font-size:12px;padding:3px 5px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);"
+        onchange="importRows[${idx}].rate=parseFloat(this.value)||12;">
+    </td>`;
 
-    return `<tr>
+    // ── Penalty cell ──
+    const latePen   = parseFloat(r.late_penalty||0);
+    const cancelPen = parseFloat(r.cancellation_penalty||0);
+    const totalPen  = latePen + cancelPen;
+    let penCell;
+    if (totalPen > 0) {
+      penCell = `<td>
+        <input type="number" step="0.5" min="0" value="${totalPen.toFixed(2)}"
+          style="width:64px;font-size:12px;padding:3px 5px;background:var(--bg3);color:var(--text);border:1px solid var(--red);border-radius:4px;font-family:var(--mono);"
+          onchange="importRows[${idx}].cancellation_penalty=parseFloat(this.value)||0;importRows[${idx}].late_penalty=0;">
+        <div class="sub-text" style="color:var(--red);margin-top:1px;">${latePen>0&&cancelPen>0?'late+cancel':latePen>0?'late':'cancel'}</div>
+      </td>`;
+    } else {
+      penCell = `<td style="color:var(--text3);font-size:12px;">—</td>`;
+    }
+
+    // ── Status / cancel cell ──
+    let statusCell;
+    if (r._hasWorkerMismatch || r._hasOutletMismatch) {
+      statusCell = `<td>
+        <span class="badge badge-amber">⚠️ Unmapped</span>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Will be skipped</div>
+      </td>`;
+    } else if (r._cancelled) {
+      statusCell = `<td>
+        <span class="badge badge-red">Cancelled</span>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._cancelled=false;renderImportPreview()">Undo</button>
+      </td>`;
+    } else {
+      const st = (r.clock_in && r.clock_out) ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-blue">Scheduled</span>';
+      statusCell = `<td>
+        ${st}
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Cancel</button>
+      </td>`;
+    }
+
+    const rowStyle = r._cancelled ? 'opacity:0.45;' : '';
+    return `<tr style="${rowStyle}">
       <td style="font-family:var(--mono);font-size:12px;">${r.shift_date}</td>
       ${workerCell}
       ${outletCell}
       <td style="font-size:12px;">${escapeHtml(r.role)}</td>
       <td style="font-family:var(--mono);font-size:12px;">${r.scheduled_start}</td>
       <td style="font-family:var(--mono);font-size:12px;">${r.scheduled_end}</td>
-      <td style="font-family:var(--mono);font-size:12px;">${parseFloat(r.rate).toFixed(2)}</td>
+      ${rateCell}
       <td style="font-family:var(--mono);font-size:12px;">${breakLabel(r.break_mins)}</td>
-      <td style="font-family:var(--mono);font-size:12px;">${r.clock_in || '—'}</td>
-      <td style="font-family:var(--mono);font-size:12px;">${r.clock_out || '—'}</td>
-      <td>${statusBadge}</td>
+      <td style="font-family:var(--mono);font-size:12px;">${r.clock_in||'—'}</td>
+      <td style="font-family:var(--mono);font-size:12px;">${r.clock_out||'—'}</td>
+      ${penCell}
+      ${statusCell}
     </tr>`;
   }).join('');
 
+  const activeCount = importRows.filter(r => !r._cancelled && !r._hasWorkerMismatch && !r._hasOutletMismatch).length;
+  const unmappedCount = importRows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
+  const unmappedNote = unmappedCount > 0
+    ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${unmappedCount} row${unmappedCount!==1?'s':''} unmapped — will be skipped.</span>`
+    : '';
   body.innerHTML = `
     <div style="overflow-x:auto;">
       <table>${thead}<tbody>${tbodyRows}</tbody></table>
     </div>
     <div style="padding:14px 18px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-      <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()">✓ Confirm &amp; Save ${importRows.length} shift${importRows.length !== 1 ? 's' : ''}</button>
+      <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()">✓ Confirm &amp; Save ${activeCount} shift${activeCount !== 1 ? 's' : ''}</button>
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
-      <span style="font-size:12px;color:var(--text3);">Nothing is saved until you click Confirm.</span>
+      ${unmappedNote}
+      <span style="font-size:12px;color:var(--text3);">Rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>`;
+}
+
+// Map an existing worker to ALL rows that share the same raw name
+function onImportWorkerSelect(idx, val) {
+  if (!val) return;
+  const rawName = importRows[idx]._workerRaw;
+  // Apply to all rows with the same raw name
+  importRows.forEach(r => {
+    if (r._workerRaw === rawName) {
+      r.worker_name = val;
+      r._workerMatch = val;
+      r._hasWorkerMismatch = false;
+    }
+  });
+  renderImportPreview();
+  toast(`Mapped "${rawName}" → "${val}"`);
+}
+
+// Map an existing outlet to ALL rows that share the same raw name
+function onImportOutletSelect(idx, val) {
+  if (!val) return;
+  const rawName = importRows[idx]._outletRaw;
+  importRows.forEach(r => {
+    if (r._outletRaw === rawName) {
+      r.outlet = val;
+      r._outletMatch = val;
+      r._hasOutletMismatch = false;
+    }
+  });
+  renderImportPreview();
+  toast(`Mapped "${rawName}" → "${val}"`);
+}
+
+// Open new-worker modal, pre-filled but editable
+function openImportNewWorkerModal(idx) {
+  _importNewWorkerIdx = idx;
+  const raw = importRows[idx]._workerRaw || '';
+  document.getElementById('inw-name').value = raw;
+  document.getElementById('inw-name').removeAttribute('readonly');
+  document.getElementById('inw-country').value = importRows[idx].country || 'Singapore';
+  document.getElementById('inw-phone').value = '';
+  document.getElementById('inw-method').value = 'PayNow';
+  document.getElementById('inw-bank').value = '';
+  document.getElementById('import-new-worker-modal').classList.add('open');
+}
+
+// Open new-outlet modal, pre-filled but editable
+function openImportNewOutletModal(idx) {
+  _importNewOutletIdx = idx;
+  const raw = importRows[idx]._outletRaw || '';
+  document.getElementById('ino-name').value = raw;
+  document.getElementById('ino-name').removeAttribute('readonly');
+  document.getElementById('ino-country').value = importRows[idx].country || 'Singapore';
+  document.getElementById('ino-location').value = '';
+  document.getElementById('import-new-outlet-modal').classList.add('open');
+}
+
+async function saveImportNewWorker() {
+  const name = document.getElementById('inw-name').value.trim();
+  if (!name) { toast('Enter worker name', 'error'); return; }
+  const payload = {
+    name,
+    country:      document.getElementById('inw-country').value,
+    phone:        document.getElementById('inw-phone').value.trim(),
+    bank_method:  document.getElementById('inw-method').value,
+    bank_details: document.getElementById('inw-bank').value.trim(),
+  };
+  const { data, error } = await supabaseClient.from('workers').insert(payload).select().single();
+  if (error) { toast('Failed to create worker: ' + error.message, 'error'); return; }
+  await loadWorkers();
+  // Map ALL rows that share the same raw name (not just the one that triggered)
+  if (_importNewWorkerIdx !== null) {
+    const rawName = importRows[_importNewWorkerIdx]._workerRaw;
+    importRows.forEach(r => {
+      if (r._workerRaw === rawName) {
+        r.worker_name = data.name;
+        r._workerMatch = data.name;
+        r._hasWorkerMismatch = false;
+      }
+    });
+    _importNewWorkerIdx = null;
+  }
+  document.getElementById('import-new-worker-modal').classList.remove('open');
+  toast(`Worker "${data.name}" created and mapped!`);
+  renderImportPreview();
+}
+
+async function saveImportNewOutlet() {
+  const name = document.getElementById('ino-name').value.trim();
+  if (!name) { toast('Enter outlet/client name', 'error'); return; }
+  const payload = {
+    name,
+    country:  document.getElementById('ino-country').value,
+    location: document.getElementById('ino-location').value.trim(),
+  };
+  const { data, error } = await supabaseClient.from('outlets').insert(payload).select().single();
+  if (error) { toast('Failed to create outlet: ' + error.message, 'error'); return; }
+  await loadOutlets();
+  // Map ALL rows that share the same raw outlet name
+  if (_importNewOutletIdx !== null) {
+    const rawName = importRows[_importNewOutletIdx]._outletRaw;
+    importRows.forEach(r => {
+      if (r._outletRaw === rawName) {
+        r.outlet = data.name;
+        r._outletMatch = data.name;
+        r._hasOutletMismatch = false;
+      }
+    });
+    _importNewOutletIdx = null;
+  }
+  document.getElementById('import-new-outlet-modal').classList.remove('open');
+  toast(`Outlet/client "${data.name}" created and mapped!`);
+  renderImportPreview();
 }
 
 function renderImportMetrics() {
@@ -3557,50 +3771,14 @@ function renderImportMetrics() {
 async function confirmImportBookings() {
   if (!importRows.length) { toast('Nothing to import', 'error'); return; }
 
-  const unmatchedMode = document.getElementById('import-unmatched-mode')?.value || 'skip';
-  let saved = 0, skipped = 0, created = 0;
+  let saved = 0, skipped = 0;
 
   for (const r of importRows) {
-    // Handle unmatched worker
-    if (r._hasWorkerMismatch && r._workerRaw && r._workerRaw.toLowerCase() !== 'available') {
-      if (unmatchedMode === 'create') {
-        // Create new worker record
-        const { data: newW, error: wErr } = await supabaseClient.from('workers').insert({
-          name: r._workerRaw,
-          country: r.country,
-          bank_method: 'PayNow'
-        }).select().single();
-        if (!wErr && newW) {
-          r.worker_name = newW.name;
-          r._hasWorkerMismatch = false;
-          created++;
-          await loadWorkers();
-        }
-      } else {
-        skipped++;
-        continue;
-      }
-    }
+    // Always skip unmapped rows — user must explicitly map or add before confirming
+    if (r._hasWorkerMismatch || r._hasOutletMismatch) { skipped++; continue; }
 
-    // Handle unmatched outlet
-    if (r._hasOutletMismatch && r._outletRaw) {
-      if (unmatchedMode === 'create') {
-        const { data: newO, error: oErr } = await supabaseClient.from('outlets').insert({
-          name: r._outletRaw,
-          country: r.country,
-          location: ''
-        }).select().single();
-        if (!oErr && newO) {
-          r.outlet = newO.name;
-          r._hasOutletMismatch = false;
-          created++;
-          await loadOutlets();
-        }
-      } else {
-        skipped++;
-        continue;
-      }
-    }
+    // Skip rows marked cancelled in the preview
+    if (r._cancelled) { skipped++; continue; }
 
     // Build the shift payload
     const payload = {
@@ -3616,8 +3794,8 @@ async function confirmImportBookings() {
       clock_out:        r.clock_out || null,
       country:          r.country,
       cancelled:        false,
-      late_penalty:     0,
-      cancellation_penalty: 0,
+      late_penalty:     parseFloat(r.late_penalty || 0),
+      cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
       mc_url:           null,
       sr_worker:        null,
       sr_rate:          null,
@@ -3664,6 +3842,65 @@ function clearImportBookings() {
   if (countEl) countEl.textContent = '';
 }
 
+
+// ── Cancellation log viewer (worker page) ────────────────────
+
+async function openCancelLogModal(workerName) {
+  document.getElementById('cancel-log-title').textContent = `Cancellation history — ${workerName}`;
+  const body = document.getElementById('cancel-log-body');
+  body.innerHTML = '<div style="padding:16px;color:var(--text2);">Loading…</div>';
+  document.getElementById('cancel-log-modal').classList.add('open');
+
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
+  const { data, error } = await supabaseClient
+    .from('cancellation_log')
+    .select('*')
+    .eq('worker_name', workerName)
+    .order('cancelled_at', { ascending: false })
+    .limit(50);
+
+  if (error || !data?.length) {
+    body.innerHTML = '<div style="padding:16px;color:var(--text2);">No cancellation records found.</div>';
+    return;
+  }
+
+  body.innerHTML = `<table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="border-bottom:1px solid var(--border);">
+      <th style="padding:8px 10px;text-align:left;font-size:12px;color:var(--text2);">Date</th>
+      <th style="padding:8px 10px;text-align:left;font-size:12px;color:var(--text2);">Type</th>
+      <th style="padding:8px 10px;text-align:left;font-size:12px;color:var(--text2);">Shift ID</th>
+      <th style="padding:8px 10px;"></th>
+    </tr></thead>
+    <tbody>
+      ${data.map(c => {
+        const isRecent = new Date(c.cancelled_at) >= cutoff;
+        return `<tr style="border-bottom:1px solid var(--border2);">
+          <td style="padding:8px 10px;font-family:var(--mono);font-size:12px;">${c.cancelled_at || '—'}<br>
+            ${isRecent ? '<span class="badge badge-red" style="font-size:10px;">Counts (30d)</span>' : '<span class="badge" style="font-size:10px;background:var(--bg3);color:var(--text3);">Older</span>'}
+          </td>
+          <td style="padding:8px 10px;font-size:12px;">${c.has_mc ? '<span class="badge badge-amber">MC waived</span>' : '<span class="badge badge-red">Penalty</span>'}</td>
+          <td style="padding:8px 10px;font-family:var(--mono);font-size:11px;color:var(--text3);">${c.shift_id ? c.shift_id.slice(0,8)+'…' : '—'}</td>
+          <td style="padding:8px 10px;">
+            <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 8px;color:var(--red);"
+              onclick="removeCancellationRecord('${c.id}', '${workerName.replace(/'/g,"\'")}')">Remove</button>
+          </td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+
+async function removeCancellationRecord(id, workerName) {
+  if (!confirm('Remove this cancellation record? This cannot be undone and will reduce the worker\'s cancellation count.')) return;
+  const { error } = await supabaseClient.from('cancellation_log').delete().eq('id', id);
+  if (error) { toast('Failed to remove: ' + error.message, 'error'); return; }
+  toast('Cancellation record removed');
+  logActivity('Remove cancellation record', `Removed cancellation record for ${workerName}`, 'worker', '');
+  await loadWorkers();
+  await openCancelLogModal(workerName); // refresh the modal
+  loadWorkerCards(); // refresh count badges
+}
+
 // ── Close modals on overlay click ─────────────────────────────
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
@@ -3672,5 +3909,73 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 // ── Start ─────────────────────────────────────────────────────
 initSupabase();
 </script>
+
+<!-- Cancellation log modal -->
+<div class="modal-overlay" id="cancel-log-modal">
+  <div class="modal" style="max-width:560px;width:95%;">
+    <div class="modal-header">
+      <h3 class="modal-title" id="cancel-log-title">Cancellation history</h3>
+      <button class="modal-close" onclick="document.getElementById('cancel-log-modal').classList.remove('open')">✕</button>
+    </div>
+    <div id="cancel-log-body" style="padding:0 18px 6px;max-height:380px;overflow-y:auto;"></div>
+    <div style="padding:14px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('cancel-log-modal').classList.remove('open')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Quick-add worker modal (import) -->
+<div class="modal-overlay" id="import-new-worker-modal">
+  <div class="modal" style="max-width:420px;width:95%;">
+    <div class="modal-header">
+      <h3 class="modal-title">Add new worker</h3>
+      <button class="modal-close" onclick="document.getElementById('import-new-worker-modal').classList.remove('open')">✕</button>
+    </div>
+    <div style="padding:18px;">
+      <div class="form-row"><label>Full Name</label><input id="inw-name" class="form-input" placeholder="Worker full name"></div>
+      <div class="form-row"><label>Country</label>
+        <select id="inw-country" class="form-input">
+          <option value="Singapore">Singapore</option>
+          <option value="Malaysia">Malaysia</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Phone</label><input id="inw-phone" class="form-input" placeholder="+65 9123 4567"></div>
+      <div class="form-row"><label>Payment method</label>
+        <select id="inw-method" class="form-input">
+          <option>PayNow</option><option>DBS</option><option>POSB</option><option>OCBC</option><option>Cash</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Account / PayNow no.</label><input id="inw-bank" class="form-input" placeholder="e.g. 98765432"></div>
+    </div>
+    <div style="padding:0 18px 18px;display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-new-worker-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveImportNewWorker()">Save &amp; use worker</button>
+    </div>
+  </div>
+</div>
+
+<!-- Quick-add outlet modal (import) -->
+<div class="modal-overlay" id="import-new-outlet-modal">
+  <div class="modal" style="max-width:420px;width:95%;">
+    <div class="modal-header">
+      <h3 class="modal-title">Add new outlet / client</h3>
+      <button class="modal-close" onclick="document.getElementById('import-new-outlet-modal').classList.remove('open')">✕</button>
+    </div>
+    <div style="padding:18px;">
+      <div class="form-row"><label>Outlet / Client Name</label><input id="ino-name" class="form-input" placeholder="Outlet / client name"></div>
+      <div class="form-row"><label>Country</label>
+        <select id="ino-country" class="form-input">
+          <option value="Singapore">Singapore</option>
+          <option value="Malaysia">Malaysia</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Address / Location</label><input id="ino-location" class="form-input" placeholder="e.g. #01-01, 123 Example Road"></div>
+    </div>
+    <div style="padding:0 18px 18px;display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-new-outlet-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveImportNewOutlet()">Save &amp; use outlet</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
