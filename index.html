@@ -3319,13 +3319,21 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     else if (importMode === 'completed') { /* keep as-is */ }
     else { if (!isPast) { finalClockIn = null; finalClockOut = null; } }
 
-    // Resolve worker and outlet against existing records
+    // Resolve worker — exact first, then fuzzy
     const workerMatch = allWorkers.find(w =>
       w.name.trim().toLowerCase() === workerRaw.toLowerCase()
-    );
+    ) || (() => {
+      const fuzzy = importBestMatch(workerRaw, allWorkers.map(w => w.name));
+      return fuzzy ? allWorkers.find(w => w.name === fuzzy.name) : null;
+    })();
+
+    // Resolve outlet — exact first, then fuzzy
     const outletMatch = allOutlets.find(o =>
       o.name.trim().toLowerCase() === outletRaw.toLowerCase()
-    );
+    ) || (() => {
+      const fuzzy = importBestMatch(outletRaw, allOutlets.map(o => o.name));
+      return fuzzy ? allOutlets.find(o => o.name === fuzzy.name) : null;
+    })();
 
     // Auto-detect role from outlet name suffix before it was cleaned
     const outletFull = (cols[9] || '').trim();
@@ -3397,6 +3405,42 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     });
   }
   return parsed;
+}
+
+// ── Fuzzy match helpers for import reconciliation ────────────
+
+function importFuzzyScore(raw, candidate) {
+  // Normalise both strings: lowercase, strip punctuation, split into tokens
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const tokenise = s => norm(s).split(' ').filter(Boolean);
+  const rawTokens = tokenise(raw);
+  const candTokens = tokenise(candidate);
+  if (!rawTokens.length || !candTokens.length) return 0;
+
+  // Count matching tokens (bidirectional)
+  const rawSet  = new Set(rawTokens);
+  const candSet = new Set(candTokens);
+  let matches = 0;
+  rawSet.forEach(t => { if (candSet.has(t)) matches++; });
+
+  // Score = matched tokens / max possible (penalise very different lengths)
+  const score = matches / Math.max(rawSet.size, candSet.size);
+
+  // Bonus: one string contains the other entirely
+  const rn = norm(raw), cn = norm(candidate);
+  const containsBonus = (rn.includes(cn) || cn.includes(rn)) ? 0.2 : 0;
+
+  return Math.min(1, score + containsBonus);
+}
+
+function importBestMatch(raw, candidates, threshold = 0.35) {
+  // Returns { name, score } of best fuzzy match, or null if below threshold
+  let best = null, bestScore = 0;
+  for (const c of candidates) {
+    const score = importFuzzyScore(raw, c);
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  return bestScore >= threshold ? { name: best, score: bestScore } : null;
 }
 
 function timeToMins(timeStr) {
@@ -3640,39 +3684,63 @@ function renderImportPreview() {
   const SEL_STYLE = 'font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--amber);border-radius:4px;';
 
   const tbodyRows = importRows.map((r, idx) => {
-    // ── Worker cell ──
+    // ── Worker cell — smart suggestion + search fallback ──
     let workerCell;
     if (r._hasWorkerMismatch) {
-      workerCell = `<td style="background:rgba(245,166,35,0.08);border-left:3px solid var(--amber);">
+      const wSuggest = importBestMatch(r._workerRaw, allWorkers.map(w => w.name));
+      const wSuggestName = wSuggest ? wSuggest.name : null;
+      workerCell = `<td style="background:rgba(245,166,35,0.08);border-left:3px solid var(--amber);min-width:180px;">
         <div style="font-weight:600;font-size:12px;color:var(--amber);">⚠️ ${escapeHtml(r._workerRaw)}</div>
-        <div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;">
-          <select style="${SEL_STYLE}" onchange="onImportWorkerSelect(${idx},this.value)">
-            <option value="">— map to existing —</option>
-            ${allWorkers.map(w => `<option value="${escapeAttr(w.name)}">${escapeHtml(w.name)}</option>`).join('')}
-          </select>
+        ${wSuggestName ? `
+        <div style="margin-top:5px;padding:5px 8px;background:var(--bg2);border:1px solid var(--border2);border-radius:5px;display:flex;align-items:center;justify-content:space-between;gap:6px;">
+          <span style="font-size:11px;color:var(--text2);">Suggest:</span>
+          <span style="font-size:12px;font-weight:600;color:var(--text);flex:1;padding:0 4px;">${escapeHtml(wSuggestName)}</span>
+          <button title="Accept suggestion" style="padding:3px 8px;background:var(--green);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:700;line-height:1;"
+            onclick="onImportWorkerSelect(${idx},'${escapeAttr(wSuggestName)}')">✓</button>
+        </div>` : ''}
+        <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;">
+          <input type="text" placeholder="Search worker…" style="flex:1;min-width:100px;font-size:11px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;"
+            oninput="importFilterWorkers(this.value,'import-w-list-${idx}')"
+            onfocus="document.getElementById('import-w-list-${idx}').style.display='block'"
+            onblur="setTimeout(()=>{const el=document.getElementById('import-w-list-${idx}');if(el)el.style.display='none';},200)">
           <button style="font-size:11px;padding:3px 8px;background:var(--teal);color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;"
-            onclick="openImportNewWorkerModal(${idx})">+ New worker</button>
+            onclick="openImportNewWorkerModal(${idx})">+ New</button>
         </div>
-        <div class="sub-text" style="color:var(--text3);margin-top:2px;font-size:10px;">Not saved until mapped</div>
+        <div id="import-w-list-${idx}" style="display:none;max-height:130px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border2);border-radius:4px;margin-top:2px;z-index:99;position:relative;">
+          ${allWorkers.map(w => `<div style="padding:5px 8px;font-size:12px;cursor:pointer;" onmousedown="onImportWorkerSelect(${idx},'${escapeAttr(w.name)}')">${escapeHtml(w.name)}</div>`).join('')}
+        </div>
+        <div class="sub-text" style="color:var(--text3);margin-top:2px;font-size:10px;">Skipped until mapped</div>
       </td>`;
     } else {
       workerCell = `<td style="font-weight:500;">${escapeHtml(r.worker_name)}</td>`;
     }
 
-    // ── Outlet cell ──
+    // ── Outlet cell — smart suggestion + search fallback ──
     let outletCell;
     if (r._hasOutletMismatch) {
-      outletCell = `<td style="background:rgba(245,166,35,0.08);border-left:3px solid var(--amber);">
+      const oSuggest = importBestMatch(r._outletRaw, allOutlets.map(o => o.name));
+      const oSuggestName = oSuggest ? oSuggest.name : null;
+      outletCell = `<td style="background:rgba(245,166,35,0.08);border-left:3px solid var(--amber);min-width:180px;">
         <div style="font-weight:600;font-size:12px;color:var(--amber);">⚠️ ${escapeHtml(r._outletRaw)}</div>
-        <div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;">
-          <select style="${SEL_STYLE}" onchange="onImportOutletSelect(${idx},this.value)">
-            <option value="">— map to existing —</option>
-            ${allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)}</option>`).join('')}
-          </select>
+        ${oSuggestName ? `
+        <div style="margin-top:5px;padding:5px 8px;background:var(--bg2);border:1px solid var(--border2);border-radius:5px;display:flex;align-items:center;justify-content:space-between;gap:6px;">
+          <span style="font-size:11px;color:var(--text2);">Suggest:</span>
+          <span style="font-size:12px;font-weight:600;color:var(--text);flex:1;padding:0 4px;">${escapeHtml(oSuggestName)}</span>
+          <button title="Accept suggestion" style="padding:3px 8px;background:var(--green);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:700;line-height:1;"
+            onclick="onImportOutletSelect(${idx},'${escapeAttr(oSuggestName)}')">✓</button>
+        </div>` : ''}
+        <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;">
+          <input type="text" placeholder="Search outlet…" style="flex:1;min-width:100px;font-size:11px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;"
+            oninput="importFilterOutlets(this.value,'import-o-list-${idx}')"
+            onfocus="document.getElementById('import-o-list-${idx}').style.display='block'"
+            onblur="setTimeout(()=>{const el=document.getElementById('import-o-list-${idx}');if(el)el.style.display='none';},200)">
           <button style="font-size:11px;padding:3px 8px;background:var(--teal);color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;"
-            onclick="openImportNewOutletModal(${idx})">+ New client</button>
+            onclick="openImportNewOutletModal(${idx})">+ New</button>
         </div>
-        <div class="sub-text" style="color:var(--text3);margin-top:2px;font-size:10px;">Not saved until mapped</div>
+        <div id="import-o-list-${idx}" style="display:none;max-height:130px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border2);border-radius:4px;margin-top:2px;z-index:99;position:relative;">
+          ${allOutlets.map(o => `<div style="padding:5px 8px;font-size:12px;cursor:pointer;" onmousedown="onImportOutletSelect(${idx},'${escapeAttr(o.name)}')">${escapeHtml(o.name)}</div>`).join('')}
+        </div>
+        <div class="sub-text" style="color:var(--text3);margin-top:2px;font-size:10px;">Skipped until mapped</div>
       </td>`;
     } else {
       outletCell = `<td>${escapeHtml(r.outlet)}</td>`;
@@ -3759,6 +3827,31 @@ function renderImportPreview() {
       ${unmappedNote}
       <span style="font-size:12px;color:var(--text3);">Rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>`;
+}
+
+// Search filter helpers for import mapping dropdowns
+function importFilterWorkers(query, listId) {
+  const el = document.getElementById(listId);
+  if (!el) return;
+  const q = query.trim().toLowerCase();
+  const filtered = q ? allWorkers.filter(w => w.name.toLowerCase().includes(q)) : allWorkers;
+  el.style.display = filtered.length ? 'block' : 'none';
+  const idx = parseInt(listId.replace('import-w-list-',''));
+  el.innerHTML = filtered.map(w =>
+    `<div style="padding:5px 8px;font-size:12px;cursor:pointer;" onmousedown="onImportWorkerSelect(${idx},'${escapeAttr(w.name)}')">${escapeHtml(w.name)}</div>`
+  ).join('');
+}
+
+function importFilterOutlets(query, listId) {
+  const el = document.getElementById(listId);
+  if (!el) return;
+  const q = query.trim().toLowerCase();
+  const filtered = q ? allOutlets.filter(o => o.name.toLowerCase().includes(q)) : allOutlets;
+  el.style.display = filtered.length ? 'block' : 'none';
+  const idx = parseInt(listId.replace('import-o-list-',''));
+  el.innerHTML = filtered.map(o =>
+    `<div style="padding:5px 8px;font-size:12px;cursor:pointer;" onmousedown="onImportOutletSelect(${idx},'${escapeAttr(o.name)}')">${escapeHtml(o.name)}</div>`
+  ).join('');
 }
 
 // Map an existing worker to ALL rows that share the same raw name
@@ -3902,19 +3995,19 @@ async function confirmImportBookings() {
     // Skip rows marked cancelled in the preview
     if (r._cancelled) { skipped++; continue; }
 
-    // ── Overlap check: warn if same worker has a shift on same day with overlapping times ──
+    // ── Overlap check: query DB for that date to catch conflicts across all dates ──
     if (r.worker_name && r.worker_name !== 'Available') {
-      const existingShifts = allShifts.filter(s =>
-        s.shift_date === r.shift_date &&
-        s.worker_name?.trim().toLowerCase() === r.worker_name.trim().toLowerCase() &&
-        !s.cancelled
-      );
+      const { data: dayShifts } = await supabaseClient
+        .from('shifts').select('scheduled_start,scheduled_end,outlet')
+        .eq('shift_date', r.shift_date)
+        .eq('cancelled', false)
+        .ilike('worker_name', r.worker_name.trim());
       const newStart = timeToMins(r.scheduled_start);
       const newEnd   = timeToMins(r.scheduled_end);
-      const overlap  = existingShifts.find(s => {
+      const overlap  = (dayShifts || []).find(s => {
         const eStart = timeToMins(s.scheduled_start);
         const eEnd   = timeToMins(s.scheduled_end);
-        return newStart < eEnd && newEnd > eStart; // overlap condition
+        return newStart < eEnd && newEnd > eStart;
       });
       if (overlap) {
         const skip = !confirm(
@@ -3965,7 +4058,6 @@ async function confirmImportBookings() {
   await loadOutlets();
 
   let msg = `Saved ${saved} shift${saved !== 1 ? 's' : ''}`;
-  if (created) msg += `, created ${created} new record${created !== 1 ? 's' : ''}`;
   if (skipped) msg += ` (${skipped} skipped)`;
   toast(msg, saved > 0 ? 'success' : 'error');
 
