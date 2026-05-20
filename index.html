@@ -1297,11 +1297,12 @@ function payrollSummary(s) {
   const country = normaliseCountry(s?.country || outletCountry(s.outlet));
   const rate = Number(s.rate || 0).toFixed(0);
   const total = Number(payoutForShift(s) || 0).toFixed(0);
+  const tc = transportClaim(s);
+  const tcSuffix = tc > 0 ? (country === 'Malaysia' ? ` + RM${tc.toFixed(2)} transport claim` : ` + SG$${tc.toFixed(2)} transport claim`) : '';
   if (country === 'Malaysia') {
-    // Malaysia payroll summary uses only letters, numbers and spaces.
-    return `${malaysiaSafeDate(s.shift_date)} ${s.worker_name} ${cleanHourText(hours)} work at RM${rate} per hr total RM${total}`;
+    return `${malaysiaSafeDate(s.shift_date)} ${s.worker_name} ${cleanHourText(hours)} work at RM${rate} per hr total RM${total}${tcSuffix}`;
   }
-  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${rate}/hr = SG${total}`;
+  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${rate}/hr = SG${total}${tcSuffix}`;
 }
 function simplePayrollText(s) {
   const hours = calcShiftHours(s);
@@ -1327,9 +1328,13 @@ function serviceRecoveryPayment(s) {
   if (!hrs) return payoutForShift(s);
   return hrs * rate;
 }
+function transportClaim(s) {
+  return parseFloat(s.transport_claim || 0);
+}
 function netPaymentForShift(s) {
-  if (s.sr_worker) return serviceRecoveryPayment(s);
-  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s));
+  const tc = transportClaim(s);
+  if (s.sr_worker) return serviceRecoveryPayment(s) + tc;
+  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s)) + tc;
 }
 function isPayableShift(s) {
   const workerName = String(s?.worker_name || '').trim().toLowerCase();
@@ -1468,7 +1473,9 @@ function paymentDisplay(s) {
   if (s.sr_worker) {
     return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${moneyForShift(net, s)}</div>${srFee?`<div class="sub-text">3rd party fee absorbed: ${moneyForShift(srFee, s)}</div>`:''}<div class="sub-text">Paid to: ${s.sr_worker}</div>`;
   }
-  return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${moneyForShift(net, s)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${moneyForShift(penalty, s)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
+  const tc = transportClaim(s);
+  const tcTag = tc > 0 ? `<div class="sub-text" style="color:var(--teal);">🚕 Transport: +${moneyForShift(tc, s)}</div>` : '';
+  return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${moneyForShift(net, s)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${moneyForShift(penalty, s)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>${tcTag}`;
 }
 
 function calcLatePenalty(sched, clockIn) {
@@ -2064,17 +2071,32 @@ function openEditRow(id) {
   if (!s) return;
   document.getElementById(`ci-disp-${id}`).innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
   document.getElementById(`co-disp-${id}`).innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
-  document.getElementById(`break-disp-${id}`).innerHTML = breakSelectHtml(`edit-break-${id}`, breakMinsForShift(s)) + `<button class="btn btn-primary btn-sm" style="margin-top:4px;" onclick="saveRow('${id}')">Save</button>`;
+  const tc = parseFloat(s.transport_claim || 0);
+  document.getElementById(`break-disp-${id}`).innerHTML =
+    breakSelectHtml(`edit-break-${id}`, breakMinsForShift(s)) +
+    `<div style="margin-top:6px;display:flex;align-items:center;gap:6px;">
+       <span style="font-size:11px;color:var(--text2);">🚕 Transport $</span>
+       <input type="number" min="0" step="0.50" id="edit-tc-${id}" value="${tc > 0 ? tc.toFixed(2) : ''}" placeholder="0.00"
+         style="width:70px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
+     </div>` +
+    `<button class="btn btn-primary btn-sm" style="margin-top:6px;" onclick="saveRow('${id}')">Save</button>`;
 }
 
 async function saveRow(id) {
   const ci = document.getElementById('edit-ci-' + id)?.value;
   const co = document.getElementById('edit-co-' + id)?.value;
   const br = parseInt(document.getElementById('edit-break-' + id)?.value || 0, 10);
-  const { error } = await supabaseClient.from('shifts').update({ clock_in: ci||null, clock_out: co||null, break_mins: br, updated_at: new Date().toISOString() }).eq('id', id);
+  const tcRaw = document.getElementById('edit-tc-' + id)?.value;
+  const tc = tcRaw ? parseFloat(tcRaw) || 0 : 0;
+  const { error } = await supabaseClient.from('shifts').update({
+    clock_in: ci||null, clock_out: co||null, break_mins: br,
+    transport_claim: tc || null,
+    updated_at: new Date().toISOString()
+  }).eq('id', id);
   if (error) { toast('Failed to save', 'error'); return; }
   const s = allShifts.find(x => x.id === id);
-  await logActivity('Attendance updated', `${s?.worker_name || 'Available'} at ${s?.outlet || '—'} clock-in ${ci || '—'}, clock-out ${co || '—'}, break ${br} mins`, 'shift', id);
+  const tcNote = tc > 0 ? `, transport claim $${tc.toFixed(2)}` : '';
+  await logActivity('Attendance updated', `${s?.worker_name || 'Available'} at ${s?.outlet || '—'} clock-in ${ci || '—'}, clock-out ${co || '—'}, break ${br} mins${tcNote}`, 'shift', id);
   toast('Saved!');
   await loadShifts();
 }
@@ -2273,6 +2295,34 @@ async function addShift() {
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
   const thirdPartyFee = isThirdParty ? (parseFloat(document.getElementById('f-third-party-fee').value) || 10) : null;
+
+  // ── Overlap check ──
+  if (!isThirdParty && name !== 'Available') {
+    const dateStr = formatDate(currentDate);
+    const existing = allShifts.filter(s =>
+      s.shift_date === dateStr &&
+      s.worker_name?.trim().toLowerCase() === name.trim().toLowerCase() &&
+      !s.cancelled
+    );
+    const newStart = timeToMins(sched);
+    const newEnd   = timeToMins(schedEnd);
+    const overlap  = existing.find(s => {
+      const eStart = timeToMins(s.scheduled_start);
+      const eEnd   = timeToMins(s.scheduled_end);
+      return newStart < eEnd && newEnd > eStart;
+    });
+    if (overlap) {
+      const proceed = confirm(
+        `⚠️ Overlap detected!\n\n` +
+        `${name} already has a shift on ${dateStr}:\n` +
+        `${overlap.scheduled_start}–${overlap.scheduled_end} at ${overlap.outlet || 'unknown outlet'}\n\n` +
+        `New shift: ${sched}–${schedEnd || '?'}\n\n` +
+        `Click OK to save anyway, or Cancel to go back and adjust timings.`
+      );
+      if (!proceed) return;
+    }
+  }
+
   const { error } = await supabaseClient.from('shifts').insert({
     shift_date: formatDate(currentDate),
     worker_name: name,
@@ -2983,23 +3033,29 @@ function renderReport(from, to, outlet) {
   document.getElementById('report-count').textContent = `${currentReportRows.length} completed shift${currentReportRows.length !== 1 ? 's' : ''}`;
   const reportTotalPayoutByCountry = splitAmountsByCountry(currentReportRows, payoutForShift);
   const reportNetPayoutByCountry = splitAmountsByCountry(currentReportRows, netPaymentForShift);
+  const totalTransportMetric = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
   document.getElementById('report-metrics').innerHTML = `
     <div class="metric-card"><div class="metric-label">Completed shifts</div><div class="metric-val blue">${currentReportRows.length}</div></div>
     <div class="metric-card"><div class="metric-label">Total hours</div><div class="metric-val green">${totalHours.toFixed(2).replace(/\.00$/, '')}</div></div>
     <div class="metric-card"><div class="metric-label">Total payout</div>${outlet ? `<div class="metric-val amber">${reportMoney(totalPayout, outlet)}</div>` : countrySplitMetric(reportTotalPayoutByCountry, 'amber')}</div>
     <div class="metric-card"><div class="metric-label">Net payout</div>${outlet ? `<div class="metric-val green">${reportMoney(totalNetPayout, outlet)}</div>` : countrySplitMetric(reportNetPayoutByCountry, 'green')}</div>
+    ${totalTransportMetric > 0 ? `<div class="metric-card"><div class="metric-label">🚕 Transport claims</div><div class="metric-val" style="color:var(--teal);">${reportMoney(totalTransportMetric, outlet)}</div></div>` : ''}
+    ${totalTransportMetric > 0 ? `<div class="metric-card"><div class="metric-label">Total billed to client</div><div class="metric-val" style="color:var(--teal);">${reportMoney(totalNetPayout + totalTransportMetric, outlet)}</div></div>` : ''}
   `;
   if (!currentReportRows.length) {
     body.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>No completed shifts found for this report.</p></div>';
     return;
   }
+  const totalTransport = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
   body.innerHTML = `<div style="overflow-x:auto;"><table>
     <thead><tr>
-      <th>Date</th><th>Employee</th><th>Outlet</th><th>Hours Worked</th><th>Rate</th><th>Payout</th><th>Net Payout</th><th>Summary</th><th>Role / Payroll Notes</th><th>In</th><th>Out</th><th>Break</th>
+      <th>Date</th><th>Employee</th><th>Outlet</th><th>Hours Worked</th><th>Rate</th><th>Payout</th><th>Net Payout</th><th>🚕 Transport</th><th>Total Billed</th><th>Summary</th><th>Role / Payroll Notes</th><th>In</th><th>Out</th><th>Break</th>
     </tr></thead>
     <tbody>
       ${currentReportRows.map(s => {
         const hours = parseFloat(calcShiftHours(s) || 0);
+        const tc = transportClaim(s);
+        const net = netPaymentForShift(s);
         return `<tr>
           <td>${formatDisplayDate(s.shift_date)}</td>
           <td>${s.worker_name}</td>
@@ -3007,7 +3063,9 @@ function renderReport(from, to, outlet) {
           <td style="font-family:var(--mono);">${hours.toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}</td>
           <td style="font-family:var(--mono);">${parseFloat(s.rate || 0).toFixed(0)}</td>
           <td style="font-family:var(--mono);">${moneyForShift(payoutForShift(s), s)}</td>
-          <td style="font-family:var(--mono);font-weight:600;">${moneyForShift(netPaymentForShift(s), s)}</td>
+          <td style="font-family:var(--mono);font-weight:600;">${moneyForShift(net, s)}</td>
+          <td style="font-family:var(--mono);color:var(--teal);">${tc > 0 ? moneyForShift(tc, s) : '—'}</td>
+          <td style="font-family:var(--mono);font-weight:700;">${moneyForShift(net, s)}</td>
           <td style="min-width:230px;">${payrollSummary(s)}</td>
           <td>${s.role || ''}</td>
           <td style="font-family:var(--mono);">${s.clock_in?.slice(0,5) || ''}</td>
@@ -3015,11 +3073,14 @@ function renderReport(from, to, outlet) {
           <td style="font-family:var(--mono);">${breakLabel(breakMinsForShift(s))}</td>
         </tr>`;
       }).join('')}
-      <tr>
-        <td style="font-weight:700;">TOTAL</td><td></td><td></td>
-        <td style="font-family:var(--mono);font-weight:700;">${totalHours.toFixed(2).replace(/\.00$/, '')}</td>
-        <td></td><td style="font-family:var(--mono);font-weight:700;">${reportMoney(totalPayout, outlet)}</td>
-        <td style="font-family:var(--mono);font-weight:700;">${reportMoney(totalNetPayout, outlet)}</td>
+      <tr style="font-weight:700;background:var(--bg3);">
+        <td>TOTAL</td><td></td><td></td>
+        <td style="font-family:var(--mono);">${totalHours.toFixed(2).replace(/\.00$/, '')}</td>
+        <td></td>
+        <td style="font-family:var(--mono);">${reportMoney(totalPayout, outlet)}</td>
+        <td style="font-family:var(--mono);">${reportMoney(totalNetPayout, outlet)}</td>
+        <td style="font-family:var(--mono);color:var(--teal);">${totalTransport > 0 ? reportMoney(totalTransport, outlet) : '—'}</td>
+        <td style="font-family:var(--mono);">${reportMoney(totalNetPayout + totalTransport, outlet)}</td>
         <td></td><td></td><td></td><td></td><td></td>
       </tr>
     </tbody>
@@ -3028,15 +3089,18 @@ function renderReport(from, to, outlet) {
 
 function exportReportCsv() {
   if (!currentReportRows.length) { toast('Generate a report first', 'error'); return; }
-  const header = ['Date','Employee','Outlet','Hours Worked','Rate','Payout','Net Payout','Summary','Role / Payroll Notes','In','Out','Break'];
+  const header = ['Date','Employee','Outlet','Hours Worked','Rate','Payout','Net Payout','Transport Claim','Total Billed to Client','Summary','Role / Payroll Notes','In','Out','Break'];
   const rows = currentReportRows.map(s => {
     const hours = parseFloat(calcShiftHours(s) || 0);
-    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours, parseFloat(s.rate || 0), payoutForShift(s).toFixed(2), netPaymentForShift(s).toFixed(2), payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
+    const tc = transportClaim(s);
+    const net = netPaymentForShift(s);
+    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours, parseFloat(s.rate || 0), payoutForShift(s).toFixed(2), net.toFixed(2), tc > 0 ? tc.toFixed(2) : '', (net).toFixed(2), payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
   });
   const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
   const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
-  rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalNetPayout.toFixed(2),'','','','','']);
+  const totalTransport = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
+  rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalNetPayout.toFixed(2),totalTransport > 0 ? totalTransport.toFixed(2) : '',(totalNetPayout).toFixed(2),'','','','','']);
   const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -3201,32 +3265,47 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     // Rate at col[17] (integer like "15" or "18")
     const rate = importParseRate(cols[17]) || 0;
 
-    // Comments at col[21]: detect late & cancellation penalties, and waivers
-    const comment = (cols[21] || '').trim().toLowerCase();
+    // Comments at col[21]: detect late & cancellation penalties, waivers, special rates
+    const comment = (cols[21] || '').trim();
     const WAIVER_RE = /waiv|waived|not deduct|no deduct|will not deduct|no penalt|penalt.*waiv|exempt|forgiv/i;
     const LATE_RE   = /late\s*\d+\s*min|late\s*\d+m|arrived.*late|clocked.*late|\d+\s*min.*late/i;
-    const CANCEL_RE = /cancel.*penalt|penalt.*cancel|deduct.*cancel|cancel.*deduct|\$15.*cancel/i;
+    // Match "deduct ... cancel", "cancel ... penalt", "$15 cancel", "deduct $N for ... cancel"
+    const CANCEL_RE = /cancel.*penalt|penalt.*cancel|deduct.*cancel|cancel.*deduct|\$\d+.*cancel|deduct.{0,30}cancel/i;
+    const SPECIAL_RATE_RE = /special\s+rate\s*\$?(\d+\.?\d*)/i;
 
-    const isWaived = WAIVER_RE.test(cols[21] || '');
+    const isWaived = WAIVER_RE.test(comment);
+
+    // Special rate override from comment (e.g. "Special rate $17/hr")
+    const specialRateMatch = SPECIAL_RATE_RE.exec(comment);
+    const specialRate = specialRateMatch ? parseFloat(specialRateMatch[1]) : null;
 
     // Deductions at col[22] — numeric penalty (e.g. "15")
     const dedRaw = (cols[22] || '').trim();
     let deduction = /^\d+(\.\d+)?$/.test(dedRaw) ? parseFloat(dedRaw) : 0;
 
-    // Detect late penalty from comment if not already in col[22]
-    let latePenalty = 0;
-    if (!isWaived && LATE_RE.test(cols[21] || '')) {
-      // If the comment mentions late but col[22] is not set, set default late penalty
-      if (!deduction) latePenalty = 2.5; // minimum 1 block
+    // Also check if comment itself contains a dollar amount for deduction
+    // e.g. "Deduct $15 for 16th cancellation" when col[22] is empty
+    if (!deduction && !isWaived) {
+      const commentDedMatch = /deduct\s*\$?(\d+\.?\d*)/i.exec(comment);
+      if (commentDedMatch) deduction = parseFloat(commentDedMatch[1]);
     }
 
-    // Cancellation penalty from comment
+    // Detect late penalty from comment
+    let latePenalty = 0;
+    if (!isWaived && LATE_RE.test(comment)) {
+      if (!deduction) latePenalty = 2.5;
+    }
+
+    // Cancellation penalty: any numeric deduction on a row with cancel-related comment
+    // OR a numeric value in col[22] even without cancel keyword
     let cancelPenalty = 0;
-    if (!isWaived && CANCEL_RE.test(cols[21] || '') && deduction) {
-      cancelPenalty = deduction;
-      deduction = 0;
-    } else if (!isWaived && deduction) {
-      cancelPenalty = deduction; // col[22] numeric = cancellation deduction
+    if (!isWaived) {
+      if (CANCEL_RE.test(comment) && deduction) {
+        cancelPenalty = deduction;
+        deduction = 0;
+      } else if (deduction) {
+        cancelPenalty = deduction; // any col[22] numeric = deduction
+      }
     }
 
     // Waiver overrides everything
@@ -3252,7 +3331,8 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     const outletFull = (cols[9] || '').trim();
     const roleRaw = importDetectRole(outletFull);
 
-    // If rate is 0, fall back to rate rules
+    // Base rate = col[17] (what client is billed / default worker payout)
+    // If col[17] is missing, fall back to rate rules
     let resolvedRate = rate;
     if (!resolvedRate && outletMatch) {
       const dateObj = new Date(dateStr + 'T00:00:00');
@@ -3260,6 +3340,30 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       resolvedRate = suggested?.rate || 12;
     }
     if (!resolvedRate) resolvedRate = 12;
+
+    // SR fields: only populated when a special rate is detected in the comment
+    // e.g. "Special rate $17/hr" with col[17]=15 means:
+    //   client billed at $15 (rate), worker paid $17 (sr_rate)
+    //   company absorbs ($17 - $15) × hours = sr_absorbed
+    let srWorker  = null;
+    let srRate    = null;
+    let srHours   = null;
+    let srAbsorbed = null;
+    if (specialRate && specialRate > resolvedRate) {
+      // Net hours = col[5] (hrs field) if available, else compute from times minus break
+      const hrsCol = parseFloat((cols[5] || '').trim()) || null;
+      const computedHrs = hrsCol !== null ? hrsCol :
+        (() => {
+          const startM = timeToMins(clockIn);
+          const endM   = timeToMins(clockOut);
+          if (!startM && !endM) return null;
+          return Math.max(0, (endM - startM) / 60 - breakMins / 60);
+        })();
+      srWorker   = workerRaw + ' (special rate)';
+      srRate     = specialRate;
+      srHours    = computedHrs;
+      srAbsorbed = computedHrs !== null ? parseFloat(((specialRate - resolvedRate) * computedHrs).toFixed(2)) : null;
+    }
 
     parsed.push({
       _workerRaw:         workerRaw,
@@ -3284,10 +3388,22 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       cancelled:           false,
       late_penalty:        latePenalty,
       cancellation_penalty: cancelPenalty,
+      sr_worker:           srWorker,
+      sr_rate:             srRate,
+      sr_hours:            srHours,
+      sr_absorbed:         srAbsorbed,
       _waived:             isWaived,
+      _specialRate:        specialRate,   // for preview display
     });
   }
   return parsed;
+}
+
+function timeToMins(timeStr) {
+  // Convert "HH:MM" to total minutes since midnight
+  if (!timeStr) return 0;
+  const [h, m] = timeStr.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
 }
 
 function importDetectRole(outletFullName) {
@@ -3562,12 +3678,18 @@ function renderImportPreview() {
       outletCell = `<td>${escapeHtml(r.outlet)}</td>`;
     }
 
-    // ── Rate cell (editable) ──
-    const rateCell = `<td>
-      <input type="number" step="0.5" min="0" value="${parseFloat(r.rate||12).toFixed(2)}"
-        style="width:64px;font-size:12px;padding:3px 5px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);"
-        onchange="importRows[${idx}].rate=parseFloat(this.value)||12;">
-    </td>`;
+    // ── Rate cell (editable) — shows SR badge if special rate detected ──
+    const rateCell = r._specialRate && r._specialRate > r.rate
+      ? `<td>
+          <div style="font-family:var(--mono);font-size:12px;">\$${parseFloat(r.rate).toFixed(2)}<span style="color:var(--text3);font-size:10px;"> client</span></div>
+          <div style="font-family:var(--mono);font-size:12px;color:var(--teal);font-weight:600;">\$${parseFloat(r._specialRate).toFixed(2)}<span style="color:var(--text3);font-weight:400;font-size:10px;"> worker</span></div>
+          ${r.sr_absorbed != null ? `<div style="font-size:10px;color:var(--amber);">SR: \$${r.sr_absorbed.toFixed(2)} absorbed</div>` : ''}
+        </td>`
+      : `<td>
+          <input type="number" step="0.5" min="0" value="${parseFloat(r.rate||12).toFixed(2)}"
+            style="width:64px;font-size:12px;padding:3px 5px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);"
+            onchange="importRows[${idx}].rate=parseFloat(this.value)||12;">
+        </td>`;
 
     // ── Penalty cell ──
     const latePen   = parseFloat(r.late_penalty||0);
@@ -3780,6 +3902,32 @@ async function confirmImportBookings() {
     // Skip rows marked cancelled in the preview
     if (r._cancelled) { skipped++; continue; }
 
+    // ── Overlap check: warn if same worker has a shift on same day with overlapping times ──
+    if (r.worker_name && r.worker_name !== 'Available') {
+      const existingShifts = allShifts.filter(s =>
+        s.shift_date === r.shift_date &&
+        s.worker_name?.trim().toLowerCase() === r.worker_name.trim().toLowerCase() &&
+        !s.cancelled
+      );
+      const newStart = timeToMins(r.scheduled_start);
+      const newEnd   = timeToMins(r.scheduled_end);
+      const overlap  = existingShifts.find(s => {
+        const eStart = timeToMins(s.scheduled_start);
+        const eEnd   = timeToMins(s.scheduled_end);
+        return newStart < eEnd && newEnd > eStart; // overlap condition
+      });
+      if (overlap) {
+        const skip = !confirm(
+          `⚠️ Overlap detected!\n\n` +
+          `${r.worker_name} already has a shift on ${r.shift_date}\n` +
+          `Existing: ${overlap.scheduled_start}–${overlap.scheduled_end} at ${overlap.outlet}\n` +
+          `New:      ${r.scheduled_start}–${r.scheduled_end} at ${r.outlet}\n\n` +
+          `Click OK to import anyway, or Cancel to skip this row.`
+        );
+        if (skip) { skipped++; continue; }
+      }
+    }
+
     // Build the shift payload
     const payload = {
       shift_date:       r.shift_date,
@@ -3797,9 +3945,10 @@ async function confirmImportBookings() {
       late_penalty:     parseFloat(r.late_penalty || 0),
       cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
       mc_url:           null,
-      sr_worker:        null,
-      sr_rate:          null,
-      sr_absorbed:      null,
+      sr_worker:        r.sr_worker   || null,
+      sr_rate:          r.sr_rate     || null,
+      sr_hours:         r.sr_hours    || null,
+      sr_absorbed:      r.sr_absorbed || null,
       updated_at:       new Date().toISOString(),
     };
 
@@ -3823,7 +3972,14 @@ async function confirmImportBookings() {
   if (saved > 0) {
     logActivity('Import bookings', `Imported ${saved} shift${saved !== 1 ? 's' : ''}${skipped ? `, ${skipped} skipped` : ''}`, 'import', '');
     importRows = [];
-    document.getElementById('import-paste').value = '';
+    const pasteEl = document.getElementById('import-paste');
+    if (pasteEl) pasteEl.value = '';
+    const fileEl = document.getElementById('import-file');
+    if (fileEl) fileEl.value = '';
+    const countEl = document.getElementById('import-count');
+    if (countEl) countEl.textContent = '';
+    const metricsEl = document.getElementById('import-metrics');
+    if (metricsEl) metricsEl.innerHTML = '';
     renderImportPreview();
     await loadShifts();
   }
