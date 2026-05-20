@@ -3602,7 +3602,7 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
 function parseImportText(text) {
   const lines = importSplitLines(text);
   const nonEmpty = lines.filter(l => l.trim());
-  if (nonEmpty.length < 2) return [];
+  if (!nonEmpty.length) return [];
 
   const defaultCountry = document.getElementById('import-country')?.value || 'Singapore';
   const importMode     = document.getElementById('import-mode')?.value || 'auto';
@@ -3634,7 +3634,19 @@ function parseImportPaste() {
   if (!text.trim()) { toast('Please paste data first', 'error'); return; }
   const rows = parseImportText(text);
   if (!rows || !rows.length) {
-    toast('No valid rows detected. Supported formats: ShiftOps daily sheet (paste directly from Sheets) or any spreadsheet with Date/Worker/Outlet/Start/End/Rate column headers.', 'error');
+    // Give a more specific error based on what the text looks like
+    const firstLine = text.trim().split('\n')[0];
+    const hasDate = /\d{1,2}\s+[A-Za-z]+\s+20\d{2}|20\d{2}-\d{2}-\d{2}/.test(firstLine);
+    const hasTabs = firstLine.includes('\t');
+    let hint = 'No valid rows detected.';
+    if (hasDate && hasTabs) {
+      hint = 'Data detected but no rows parsed — check that the date format is "17 May 2026" and times are like "5:00 pm".';
+    } else if (!hasTabs) {
+      hint = 'No tabs detected — copy the rows directly from Google Sheets or Excel (not as plain text).';
+    } else {
+      hint = 'No valid rows detected. Paste rows directly from your ShiftOps Google Sheet.';
+    }
+    toast(hint, 'error');
     return;
   }
   importRows = rows;
@@ -3832,7 +3844,8 @@ function renderImportPreview() {
         <input type="number" step="0.5" min="0" value="${totalPen.toFixed(2)}"
           style="width:64px;font-size:12px;padding:3px 5px;background:var(--bg3);color:var(--text);border:1px solid var(--red);border-radius:4px;font-family:var(--mono);"
           onchange="importRows[${idx}].cancellation_penalty=parseFloat(this.value)||0;importRows[${idx}].late_penalty=0;">
-        <div class="sub-text" style="color:var(--red);margin-top:1px;">${latePen>0&&cancelPen>0?'late+cancel':latePen>0?'late':'cancel'}</div>
+        <div class="sub-text" style="color:var(--red);margin-top:1px;">${latePen>0&&cancelPen>0?'late+cancel':latePen>0?'late':'deduction'}</div>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:1px;">shift kept active</div>
       </td>`;
     } else {
       penCell = `<td style="color:var(--text3);font-size:12px;">—</td>`;
@@ -4054,7 +4067,14 @@ async function confirmImportBookings() {
 
   for (const r of importRows) {
     // Always skip unmapped rows — user must explicitly map or add before confirming
-    if (r._hasWorkerMismatch || r._hasOutletMismatch) { skipped++; continue; }
+    if (r._hasWorkerMismatch || r._hasOutletMismatch) {
+      skipped++;
+      const pen = parseFloat(r.cancellation_penalty||0) + parseFloat(r.late_penalty||0);
+      if (pen > 0) {
+        toast(`⚠️ Skipped ${r._workerRaw} — unmapped, $${pen.toFixed(2)} penalty NOT saved`, 'error');
+      }
+      continue;
+    }
 
     // Skip rows marked cancelled in the preview
     if (r._cancelled) { skipped++; continue; }
@@ -4112,6 +4132,7 @@ async function confirmImportBookings() {
     const { error } = await supabaseClient.from('shifts').insert(payload);
     if (error) {
       console.error('Import row failed:', error.message, payload);
+      toast(`Failed to save ${r.worker_name}: ${error.message}`, 'error');
       skipped++;
     } else {
       saved++;
