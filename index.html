@@ -1493,13 +1493,16 @@ function paymentDisplay(s) {
   // Special rate for own member (sr_rate set, sr_worker null)
   const srRateVal = !s.sr_worker && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate||0) ? parseFloat(s.sr_rate) : 0;
   if (srRateVal) {
-    const workerPay = parseFloat(calcShiftHours(s)||0) * srRateVal;
-    const tc2 = transportClaim(s);
+    // gross = client billing (hours × base rate), workerPay = what worker receives (hours × sr_rate)
+    const clientBill = gross; // hours × s.rate = $135
+    const workerPay  = parseFloat(calcShiftHours(s)||0) * srRateVal; // hours × $17 = $153
+    const tc2  = transportClaim(s);
     const netSR = Math.max(0, workerPay - shiftPenaltyAmount(s)) + tc2;
-    return `<div>${moneyForShift(workerPay, s)}</div>
-      <div class="sub-text">${hours||0}h × ${currencySymbolForOutlet(s.outlet)}${srRateVal.toFixed(2)} <span style="color:var(--teal);">(special rate)</span></div>
-      <div class="sub-text">Client billed: ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr · SR absorbed: ${moneyForShift(srFee, s)}</div>
-      <div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${moneyForShift(netSR, s)}</div>
+    return `<div>${moneyForShift(clientBill, s)}</div>
+      <div class="sub-text">${hours||0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr <span style="color:var(--text3);">(client rate)</span></div>
+      <div class="sub-text" style="margin-top:3px;">Worker pay: <strong>${moneyForShift(workerPay, s)}</strong> <span style="color:var(--teal);">(${currencySymbolForOutlet(s.outlet)}${srRateVal.toFixed(2)}/hr special)</span></div>
+      <div class="sub-text">SR absorbed: ${moneyForShift(srFee, s)}</div>
+      <div style="margin-top:4px;color:var(--green);font-weight:600;">Net to worker: ${moneyForShift(netSR, s)}</div>
       ${penalty>0?`<div class="sub-text">Less deduction: ${moneyForShift(penalty, s)}</div>`:''}
       <div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
   }
