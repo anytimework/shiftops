@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: Import hours safety fix v4 — robust imported working-hours fallback for special-rate upload rows -->
+<!-- Build patch: Import hours safety fix v5 — quarter-hour payroll and SR absorbed normalization -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1301,15 +1301,21 @@ function quantizeClockOutTime(start, end) {
   let endM = toMins(end);
   // Overnight support: 21:00 to 23:59 stays same day, 21:00 to 00:00 becomes next day.
   if (endM <= startM) endM += 1440;
-  // Payroll can only be counted in 15-minute blocks, so 23:59 is counted as 00:00.
-  return minsToTime(Math.ceil(endM / 15) * 15);
+  return minsToTime(quantizeClockOutMins(endM));
+}
+function quantizeClockOutMins(endM) {
+  const previousBlock = Math.floor(endM / 15) * 15;
+  // Clock-out has a 5-minute grace period after every 15-minute block:
+  // 15:01-15:05 counts as 15:00, while 15:06+ counts as 15:15.
+  if (endM - previousBlock <= 5) return previousBlock;
+  return Math.ceil(endM / 15) * 15;
 }
 function rawDurationHoursQuantized(start, end) {
   if (!start || !end) return null;
   let startM = toMins(start);
   let endM = toMins(end);
   if (endM <= startM) endM += 1440;
-  endM = Math.ceil(endM / 15) * 15;
+  endM = quantizeClockOutMins(endM);
   const d = endM - startM;
   return d > 0 ? d / 60 : null;
 }
@@ -1324,6 +1330,14 @@ function formatHourValue(hours) {
   const n = Number(hours);
   if (!isFinite(n)) return null;
   return n.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+function normalizeBillableHours(hours) {
+  const n = Number(hours);
+  if (!isFinite(n)) return null;
+  return Math.round(n * 4) / 4;
+}
+function isOwnMemberSpecialRate(s) {
+  return !s?.sr_worker && parseFloat(s?.sr_rate || 0) > parseFloat(s?.rate || 0);
 }
 function minsToTime(mins) {
   mins = ((parseInt(mins, 10) || 0) + 1440) % 1440;
@@ -1374,13 +1388,13 @@ function calcShiftHours(s) {
   // longest defensible value so Harshaah-style 12:00–23:00 rows with a 1h break
   // pay 10h, not 1h.
   const importedSrHours = parseFloat(s.sr_hours || 0);
-  const hasOwnMemberSpecialRate = !s.sr_worker && parseFloat(s.sr_rate || 0) > parseFloat(s.rate || 0);
+  const hasOwnMemberSpecialRate = isOwnMemberSpecialRate(s);
   if (hasOwnMemberSpecialRate) {
-    addHourCandidate(importedSrHours);
+    addHourCandidate(normalizeBillableHours(importedSrHours));
     const srDelta = parseFloat(s.sr_rate || 0) - parseFloat(s.rate || 0);
     const srAbsorbed = parseFloat(s.sr_absorbed || 0);
     if (srDelta > 0 && srAbsorbed > 0) {
-      addHourCandidate(srAbsorbed / srDelta);
+      addHourCandidate(normalizeBillableHours(srAbsorbed / srDelta));
     }
   }
 
@@ -1527,7 +1541,7 @@ function payrollSummary(s) {
     ? parseFloat(s.sr_rate) : parseFloat(s.rate || 0);
   const rate = effectiveRate.toFixed(0);
   const workerTotal = Number(hours) * effectiveRate;
-  const total = workerTotal.toFixed(0);
+  const total = workerTotal.toFixed(2);
   const tc = transportClaim(s);
   const tcSuffix = tc > 0 ? (country === 'Malaysia' ? ` + RM${tc.toFixed(2)} transport claim` : ` + SG$${tc.toFixed(2)} transport claim`) : '';
   const cancelPen = !s.cancelled ? parseFloat(s.cancellation_penalty || 0) : 0;
@@ -1535,7 +1549,7 @@ function payrollSummary(s) {
   if (country === 'Malaysia') {
     return `${malaysiaSafeDate(s.shift_date)} ${s.worker_name} ${cleanHourText(hours)} work at RM${rate} per hr total RM${total}${penSuffix}${tcSuffix}`;
   }
-  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${Number(hours).toFixed(Number(hours) % 1 === 0 ? 1 : 2).replace(/0$/, '')}hrs work at SG${rate}/hr = SG${total}${penSuffix}${tcSuffix}`;
+  return `${formatShortDate(s.shift_date)} ${s.worker_name} ${formatHourValue(hours)}hrs work at SG${rate}/hr = SG${total}${penSuffix}${tcSuffix}`;
 }
 function simplePayrollText(s) {
   const hours = calcShiftHours(s);
@@ -1548,6 +1562,14 @@ function simplePayrollText(s) {
 function payoutForShift(s) {
   const hours = parseFloat(calcShiftHours(s) || 0);
   return hours * parseFloat(s.rate || 0);
+}
+function srAbsorbedForShift(s) {
+  if (isOwnMemberSpecialRate(s)) {
+    const hours = parseFloat(calcShiftHours(s) || 0);
+    const delta = parseFloat(s.sr_rate || 0) - parseFloat(s.rate || 0);
+    return Math.max(0, hours * delta);
+  }
+  return parseFloat(s.sr_absorbed || 0);
 }
 function shiftPenaltyAmount(s) {
   if (s.cancelled) return s.mc_url ? 0 : parseFloat(s.cancellation_penalty ?? 15) || 0;
@@ -1708,7 +1730,7 @@ function paymentDisplay(s) {
   const net = netPaymentForShift(s);
   const penalty = shiftPenaltyAmount(s);
   const pnote = payrollStartNote(s);
-  const srFee = parseFloat(s.sr_absorbed || 0);
+  const srFee = srAbsorbedForShift(s);
   if (!s.clock_out && !s.cancelled) {
     const est = estimatedPaymentForShift(s);
     return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">${isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing'}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${srFee?` · Extra fee ${moneyForShift(srFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
@@ -2143,7 +2165,7 @@ function matchesMetricFilter(s) {
   if (activeMetricFilter === 'late') return isPayableShift(s) && calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late';
   if (activeMetricFilter === 'cancelled') return !!s.cancelled;
   if (activeMetricFilter === 'penalties') return shiftPenaltyAmount(s) > 0;
-  if (activeMetricFilter === 'sr_absorbed') return parseFloat(s.sr_absorbed || 0) > 0 || !!s.sr_worker;
+  if (activeMetricFilter === 'sr_absorbed') return srAbsorbedForShift(s) > 0 || !!s.sr_worker;
   return true;
 }
 
@@ -2156,8 +2178,8 @@ function setMetricFilter(filter) {
 }
 
 function srDisplay(s) {
-  const fee = parseFloat(s.sr_absorbed || 0);
-  const hasSpecialRate = !s.sr_worker && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate||0);
+  const fee = srAbsorbedForShift(s);
+  const hasSpecialRate = isOwnMemberSpecialRate(s);
   if (!s.sr_worker && !fee && !hasSpecialRate) return '<span class="penalty-none">—</span>';
   const label = s.sr_worker ? escapeHtml(s.sr_worker) : (hasSpecialRate ? `Special rate ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.sr_rate).toFixed(0)}/hr` : 'SR');
   const feeLine = fee ? `<div style="color:var(--amber);font-weight:700;">${moneyForShift(fee, s)}</div>` : '<div class="sub-text">No extra fee</div>';
@@ -2584,7 +2606,7 @@ function renderMetrics() {
   const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = cancellationCountForLoadedShifts();
-  const srAbsorbed = allShifts.filter(s => s.sr_absorbed).reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
+  const srAbsorbed = allShifts.reduce((a,s) => a + srAbsorbedForShift(s), 0);
   const latePenalties = allShifts.reduce((a,s) => { const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)); return a + (s.cancelled ? 0 : l.penalty); }, 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   // Also count prior-cancellation deductions on active (non-cancelled) imported shifts
@@ -3760,7 +3782,7 @@ function renderReport(from, to, outlet) {
   const reportTotalPayoutByCountry = splitAmountsByCountry(currentReportRows, payoutForShift);
   const reportNetPayoutByCountry = splitAmountsByCountry(currentReportRows, netPaymentForShift);
   const totalTransportMetric = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
-  const totalSrMetric = currentReportRows.reduce((a,s) => a + parseFloat(s.sr_absorbed || 0), 0);
+  const totalSrMetric = currentReportRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
   const totalWorkerPayMetric = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   const totalClientBillMetric = totalPayout + totalTransportMetric;
   document.getElementById('report-metrics').innerHTML = `
@@ -3777,7 +3799,7 @@ function renderReport(from, to, outlet) {
     return;
   }
   const totalTransport   = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
-  const totalSrAbsorbed  = currentReportRows.reduce((a,s) => a + parseFloat(s.sr_absorbed || 0), 0);
+  const totalSrAbsorbed  = currentReportRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
   const totalWorkerPay   = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   // Client billing = base payout (hours × client rate) + transport — NOT worker pay
   const totalClientBill  = currentReportRows.reduce((a,s) => a + payoutForShift(s) + transportClaim(s), 0);
@@ -3797,7 +3819,7 @@ function renderReport(from, to, outlet) {
         const tc      = transportClaim(s);
         const clientBilling = payoutForShift(s);          // hours × s.rate (client rate)
         const workerPay     = netPaymentForShift(s);       // what worker actually receives
-        const srAbs   = parseFloat(s.sr_absorbed || 0);
+        const srAbs   = srAbsorbedForShift(s);
         const clientTotal   = clientBilling + tc;          // what client is invoiced
         const srCell  = showSrCol
           ? `<td style="font-family:var(--mono);color:var(--amber);">${srAbs > 0 ? moneyForShift(srAbs, s) : '—'}</td>`
@@ -3843,7 +3865,7 @@ function exportReportCsv() {
     const tc           = transportClaim(s);
     const clientBilling = payoutForShift(s);
     const workerPay    = netPaymentForShift(s);
-    const srAbs        = parseFloat(s.sr_absorbed || 0);
+    const srAbs        = srAbsorbedForShift(s);
     const clientTotal  = clientBilling + tc;
     return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours,
       parseFloat(s.rate || 0), clientBilling.toFixed(2), workerPay.toFixed(2),
@@ -3854,7 +3876,7 @@ function exportReportCsv() {
   const totalHours       = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout      = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
   const totalWorkerPay   = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
-  const totalSrAbsorbed  = currentReportRows.reduce((a,s) => a + parseFloat(s.sr_absorbed || 0), 0);
+  const totalSrAbsorbed  = currentReportRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
   const totalTransport   = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
   const totalClientBill  = totalPayout + totalTransport;
   rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalWorkerPay.toFixed(2),
@@ -4174,7 +4196,9 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       if (adjustedEndM <= startM) adjustedEndM += 1440;
       return Math.max(0, (adjustedEndM - startM) / 60 - breakMins / 60);
     })();
-    const hourImportCandidates = [hrsCol, timeDerivedHrs].filter(h => isFinite(Number(h)) && Number(h) > 0);
+    const hourImportCandidates = [hrsCol, timeDerivedHrs]
+      .map(normalizeBillableHours)
+      .filter(h => isFinite(Number(h)) && Number(h) > 0);
     const computedHrs = hourImportCandidates.length ? Math.max(...hourImportCandidates) : null;
 
     if (isThirdParty) {
