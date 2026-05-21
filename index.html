@@ -1024,7 +1024,7 @@ function switchPage(name, btn) {
   if (name === 'reports') initReportsPage();
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
-  if (name === 'activity') renderActivityLog();
+  if (name === 'activity') { loadActivityLog(); }
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -1038,69 +1038,185 @@ function toast(msg, type = 'success') {
 }
 
 // ── Activity log ──────────────────────────────────────────────
+// ── Activity Log ─────────────────────────────────────────────
+// Stored in Supabase activity_logs table so all users share the same log.
+// Falls back to localStorage if Supabase table doesn't exist yet.
+
 function activityStorageKey() { return 'shiftops_activity_log_v2'; }
 let activityLogMemory = [];
+let activityLogFromCloud = false; // true once cloud fetch succeeded
+
 function readLocalActivityLog() {
   try {
     const saved = JSON.parse(localStorage.getItem(activityStorageKey()) || '[]');
     activityLogMemory = Array.isArray(saved) ? saved : [];
     return activityLogMemory;
-  } catch(e) {
-    return activityLogMemory || [];
-  }
+  } catch(e) { return activityLogMemory || []; }
 }
 function writeLocalActivityLog(rows) {
-  const cleanRows = (rows || []).slice(0, 300);
-  activityLogMemory = cleanRows;
-  try { localStorage.setItem(activityStorageKey(), JSON.stringify(cleanRows)); } catch(e) {}
+  const clean = (rows || []).slice(0, 500);
+  activityLogMemory = clean;
+  try { localStorage.setItem(activityStorageKey(), JSON.stringify(clean)); } catch(e) {}
 }
-function logActivity(action, details = '', refType = '', refId = '') {
+
+async function loadActivityLog() {
+  // Try fetching from Supabase first (all users' logs)
+  try {
+    const { data, error } = await supabaseClient
+      .from('activity_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(300);
+    if (!error && data) {
+      activityLogFromCloud = true;
+      allActivityLogs = data;
+      // Also merge into local so offline still works
+      writeLocalActivityLog(data);
+      renderActivityLog();
+      return;
+    }
+  } catch(e) {}
+  // Fallback to localStorage
+  allActivityLogs = readLocalActivityLog();
+  renderActivityLog();
+}
+
+async function logActivity(action, details = '', refType = '', refId = '', extra = {}) {
   const row = {
     id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     action,
     details,
-    ref_type: refType,
-    ref_id: refId,
-    created_by: currentInternalUser || 'Unknown',
-    created_at: new Date().toISOString()
+    ref_type:    refType,
+    ref_id:      refId,
+    shift_date:  extra.shift_date  || null,
+    worker_name: extra.worker_name || null,
+    outlet:      extra.outlet      || null,
+    created_by:  currentInternalUser || 'Unknown',
+    created_at:  new Date().toISOString(),
   };
 
+  // Save to local immediately so UI updates instantly
   const rows = readLocalActivityLog();
   rows.unshift(row);
   writeLocalActivityLog(rows);
   allActivityLogs = rows;
   renderActivityLog();
 
-  // Optional cloud backup: if you create a Supabase table named activity_logs,
-  // this saves there too. It will not block the local activity page.
+  // Save to Supabase so other users see it
   try {
-    if (supabaseClient) supabaseClient.from('activity_logs').insert(row).then(() => {}).catch(() => {});
+    if (supabaseClient) {
+      await supabaseClient.from('activity_logs').insert(row);
+    }
   } catch(e) {}
 }
+
+function activityTimeLabel(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  const now = new Date();
+  const diffMs = now - d;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHrs  = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  // Show "X mins ago" / "X hrs ago" / "Yesterday" / "DD Mon"
+  if (diffMins < 1)   return 'Just now';
+  if (diffMins < 60)  return `${diffMins}m ago`;
+  if (diffHrs  < 24)  return `${diffHrs}h ago`;
+  if (diffDays === 1) return 'Yesterday';
+  return d.toLocaleDateString('en-SG', { day:'numeric', month:'short' });
+}
+
+function activityIcon(action) {
+  const a = (action || '').toLowerCase();
+  if (a.includes('clock in'))  return '🟢';
+  if (a.includes('clock out')) return '🔴';
+  if (a.includes('cancel'))    return '🚫';
+  if (a.includes('import'))    return '⬆️';
+  if (a.includes('shift added') || a.includes('future booking')) return '➕';
+  if (a.includes('edit') || a.includes('updated') || a.includes('moved')) return '✏️';
+  if (a.includes('worker'))    return '👤';
+  if (a.includes('outlet'))    return '🏪';
+  if (a.includes('sr') || a.includes('replacement')) return '🔄';
+  return '📋';
+}
+
 function renderActivityLog() {
-  const rows = readLocalActivityLog();
-  allActivityLogs = rows;
+  const rows = (allActivityLogs || readLocalActivityLog());
   const count = document.getElementById('activity-count');
-  if (count) count.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}`;
+  if (count) count.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}${activityLogFromCloud ? '' : ' (local only)'}`;
   const body = document.getElementById('activity-body');
   if (!body) return;
   if (!rows.length) {
-    body.innerHTML = '<div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet. Actions like adding shifts, clocking in/out, cancellations, replacements, imports and edits will appear here.</p></div>';
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet. Actions like adding shifts, clocking in/out, cancellations, edits and imports will appear here.</p></div>';
     return;
   }
-  body.innerHTML = `<table><thead><tr><th>Date / time</th><th>Done by</th><th>Action</th><th>Details</th></tr></thead><tbody>${rows.map(r => `
-    <tr>
-      <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${new Date(r.created_at).toLocaleString()}</td>
-      <td><span class="badge badge-blue">${escapeHtml(r.created_by || 'Unknown')}</span></td>
-      <td><span class="activity-action">${escapeHtml(r.action || '')}</span></td>
-      <td class="activity-line">${escapeHtml(r.details || '')}</td>
-    </tr>`).join('')}</tbody></table>`;
+  body.innerHTML = `<table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="border-bottom:1px solid var(--border);">
+      <th style="padding:8px 12px;text-align:left;font-size:11px;color:var(--text2);white-space:nowrap;width:90px;">Time</th>
+      <th style="padding:8px 12px;text-align:left;font-size:11px;color:var(--text2);width:70px;">By</th>
+      <th style="padding:8px 12px;text-align:left;font-size:11px;color:var(--text2);">What happened</th>
+    </tr></thead>
+    <tbody>
+      ${rows.map(r => {
+        const hasLink = r.ref_id && r.shift_date;
+        const rowStyle = hasLink
+          ? 'cursor:pointer;transition:background 0.15s;'
+          : '';
+        const onclick = hasLink
+          ? `onclick="jumpToShift('${r.shift_date}','${r.ref_id}')" onmouseenter="this.style.background='var(--bg3)'" onmouseleave="this.style.background=''"` 
+          : '';
+        const icon = activityIcon(r.action);
+        const timeStr = activityTimeLabel(r.created_at);
+        const fullTime = new Date(r.created_at).toLocaleString('en-SG', {
+          day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'
+        });
+        return `<tr style="${rowStyle}border-bottom:1px solid var(--border2);" ${onclick} title="${hasLink ? 'Click to view shift' : ''}">
+          <td style="padding:10px 12px;font-family:var(--mono);font-size:11px;color:var(--text2);white-space:nowrap;" title="${fullTime}">${timeStr}</td>
+          <td style="padding:10px 12px;">
+            <span style="font-size:11px;font-weight:600;color:var(--teal);">${escapeHtml(r.created_by || '?')}</span>
+          </td>
+          <td style="padding:10px 12px;">
+            <div style="display:flex;align-items:flex-start;gap:8px;">
+              <span style="font-size:14px;line-height:1.4;flex-shrink:0;">${icon}</span>
+              <div>
+                <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.4;">${escapeHtml(r.action || '')}</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px;line-height:1.5;">${escapeHtml(r.details || '')}</div>
+                ${hasLink ? '<div style="font-size:10px;color:var(--teal);margin-top:3px;">↗ Click to view shift</div>' : ''}
+              </div>
+            </div>
+          </td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
 }
+
+function jumpToShift(shiftDate, shiftId) {
+  // Navigate to the Attendance page on the correct date
+  if (!shiftDate) return;
+  // Parse and set currentDate
+  const d = new Date(shiftDate + 'T00:00:00');
+  if (isNaN(d)) return;
+  currentDate = d;
+  switchPage('attendance', document.querySelector('.nav-item[onclick*="attendance"]'));
+  // After the page renders, highlight the shift row
+  setTimeout(() => {
+    const row = document.getElementById(`row-${shiftId}`);
+    if (row) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row.style.transition = 'outline 0s';
+      row.style.outline = '2px solid var(--teal)';
+      setTimeout(() => { row.style.outline = ''; }, 2500);
+    }
+  }, 400);
+}
+
 function clearActivityLog() {
-  if (!confirm('Clear the local activity log on this device?')) return;
+  if (!confirm('Clear the local activity log on this device? (Cloud logs from other users are not affected.)')) return;
   writeLocalActivityLog([]);
+  allActivityLogs = [];
   renderActivityLog();
-  toast('Activity log cleared');
+  toast('Local activity log cleared');
 }
 
 // ── Penalty logic ─────────────────────────────────────────────
@@ -2146,7 +2262,11 @@ async function confirmClockIn(id) {
     clock_in: ci, late_penalty: lp, updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Clock-in failed: ' + error.message, 'error'); return; }
-  await logActivity('Clock in', `${s.worker_name} at ${s.outlet} clocked in at ${ci}`, 'shift', id);
+  await logActivity(
+    'Clocked in',
+    `${s.worker_name} clocked in at ${ci} for shift at ${s.outlet} (scheduled ${s.scheduled_start?.slice(0,5)||'?'})`,
+    'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
+  );
   toast(`${s.worker_name} clocked in at ${ci}`);
   await loadShifts();
 }
@@ -2187,7 +2307,11 @@ async function confirmClockOut(id) {
     clock_out: co, updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Clock-out failed: ' + error.message, 'error'); return; }
-  await logActivity('Clock out', `${s.worker_name} at ${s.outlet} clocked out at ${co}`, 'shift', id);
+  await logActivity(
+    'Clocked out',
+    `${s.worker_name} clocked out at ${co} — shift at ${s.outlet} (${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'})`,
+    'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
+  );
   toast(`${s.worker_name} clocked out at ${co}`);
   await loadShifts();
 }
@@ -2258,7 +2382,12 @@ async function saveRow(id) {
   }).eq('id', id);
   if (error) { toast('Failed to save: ' + error.message, 'error'); return; }
   const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
-  await logActivity('Attendance updated', `${s.worker_name || 'Available'} at ${s.outlet || '—'} — in ${ci||'—'}, out ${co||'—'}, break ${br}m${tcNote}`, 'shift', id);
+  const _dateFmt = s.shift_date ? new Date(s.shift_date+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}) : '';
+  await logActivity(
+    'Edited shift',
+    `${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}`,
+    'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
+  );
   toast('Saved!');
   await loadShifts();
 }
@@ -2505,7 +2634,15 @@ async function addShift() {
     await supabaseClient.from('workers').insert({ name, country: selectedCountry });
     await loadWorkers();
   }
-  await logActivity('Shift added', `${name} at ${outletName} on ${formatDate(currentDate)} ${sched}${schedEnd ? '–' + schedEnd : ''}`, 'shift', '');
+  const _addDateFmt = new Date(formatDate(currentDate)+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'});
+  const _isPast = formatDate(currentDate) < new Date().toISOString().slice(0,10);
+  const _isFuture = formatDate(currentDate) > new Date().toISOString().slice(0,10);
+  const _bookingType = _isFuture ? 'Future booking created' : _isPast ? 'Past booking created' : 'Shift added';
+  await logActivity(
+    _bookingType,
+    `${name} at ${outletName} on ${_addDateFmt} ${sched}${schedEnd ? '–'+schedEnd : ''}${breakMins ? ' ('+breakMins+'m break)' : ''}`,
+    'shift', '', { shift_date: formatDate(currentDate), worker_name: name, outlet: outletName }
+  );
   toast('Shift added!');
   closeAddModal();
   await loadShifts();
@@ -2579,7 +2716,12 @@ async function confirmCancel() {
   if (isOutletBypass) {
     const { error } = await hardDeleteShift(pendingCancelId);
     if (error) { toast('Failed to delete outlet-cancelled shift: ' + error.message, 'error'); return; }
-    await logActivity('Outlet cancellation', `${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${s.shift_date || formatDate(currentDate)} removed from schedule`, 'shift', pendingCancelId);
+    const _ocDate = new Date((s.shift_date || formatDate(currentDate))+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'});
+    await logActivity(
+      'Outlet cancellation',
+      `Shift for ${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_ocDate} was cancelled by outlet and removed from schedule.`,
+      'shift', pendingCancelId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
+    );
     closeCancelModal();
     await loadShifts();
     toast('Outlet-cancelled shift removed from schedule');
@@ -2626,7 +2768,13 @@ async function confirmCancel() {
 
   if (error) { toast('Failed to return slot to Available: ' + error.message, 'error'); return; }
 
-  await logActivity('Worker cancellation', `${originalWorker || 'Worker'} cancelled ${s.outlet || '—'} on ${s.shift_date || formatDate(currentDate)} ${s.scheduled_start?.slice(0,5) || ''}${isMcWaiver ? ' (MC uploaded, penalty waived)' : ' ($15 penalty)'}; slot returned to Available`, 'shift', pendingCancelId);
+  const _wcDateFmt = (s.shift_date || formatDate(currentDate));
+  const _wcDate = new Date(_wcDateFmt+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'});
+  await logActivity(
+    'Shift cancelled',
+    `${originalWorker || 'Worker'} cancelled shift at ${s.outlet || '—'} on ${_wcDate} ${s.scheduled_start?.slice(0,5)||''}${isMcWaiver ? ' — MC uploaded, no penalty' : ' — $15 penalty applied'}. Slot returned to Available.`,
+    'shift', pendingCancelId, { shift_date: s.shift_date, worker_name: originalWorker, outlet: s.outlet }
+  );
 
   await loadWorkers();
   closeCancelModal();
@@ -4362,7 +4510,7 @@ async function confirmImportBookings() {
   toast(msg, saved > 0 ? 'success' : 'error');
 
   if (saved > 0) {
-    logActivity('Import bookings', `Imported ${saved} shift${saved !== 1 ? 's' : ''}${skipped ? `, ${skipped} skipped` : ''}`, 'import', '');
+    logActivity('Import bookings', `Bulk imported ${saved} shift${saved !== 1 ? 's' : ''}${skipped ? ` (${skipped} skipped — unmapped or overlap)` : ''}`, 'import', '');
     importRows = [];
     const pasteEl = document.getElementById('import-paste');
     if (pasteEl) pasteEl.value = '';
