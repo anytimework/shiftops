@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v15 — no-date ShiftOps rows, special-rate import fixes and flexible natural imports -->
+<!-- Build patch: v16 — Five Guys outlet aliases, no-date ShiftOps rows and flexible imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4121,6 +4121,31 @@ function cleanOutletName(raw) {
   return raw.replace(ROLE_SUFFIXES, '').trim();
 }
 
+function importOutletAlias(raw) {
+  const n = String(raw || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/\bfive guys\b/.test(n) && /\bkitchen\b/.test(n)) return 'Five Guys iON Mall';
+  if (/\bfive guys\b/.test(n) && /\bcashier\b/.test(n)) return 'Five Guys Plaza Singapura';
+  return '';
+}
+
+function resolveImportOutlet(rawOutlet, threshold = 0.35) {
+  const raw = cleanOutletName(rawOutlet || '');
+  const alias = importOutletAlias(rawOutlet) || importOutletAlias(raw);
+  const exactName = alias || raw;
+  const exact = allOutlets.find(o => o.name.trim().toLowerCase() === exactName.toLowerCase());
+  const fuzzy = !exact && !alias ? importBestMatch(raw, allOutlets.map(o => o.name), threshold) : null;
+  const autoMatch = fuzzy?.autoSelect ? allOutlets.find(o => o.name === fuzzy.name) : null;
+  const match = exact || autoMatch || null;
+  return {
+    raw,
+    alias,
+    name: match?.name || alias || raw,
+    match,
+    fuzzy: alias ? { name: alias, score: 1, autoSelect: true } : fuzzy,
+    autoMatch: !!alias || !!autoMatch
+  };
+}
+
 // ── Detect format ───────────────────────────────────────────
 
 function detectImportFormat(lines) {
@@ -4333,18 +4358,9 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       : null;
     const workerMatch = workerExact || workerAutoMatch || null;
 
-    // Resolve outlet — exact first, then fuzzy
-    const outletExact = allOutlets.find(o =>
-      o.name.trim().toLowerCase() === outletRaw.toLowerCase()
-    );
-    const outletFuzzy = !outletExact
-      ? importBestMatch(outletRaw, allOutlets.map(o => o.name))
-      : null;
-    // Auto-apply if clear single match; otherwise keep as mismatch for user to confirm
-    const outletAutoMatch = outletFuzzy?.autoSelect
-      ? allOutlets.find(o => o.name === outletFuzzy.name)
-      : null;
-    const outletMatch = outletExact || outletAutoMatch || null;
+    // Resolve outlet — custom aliases first, then exact/fuzzy.
+    const outletInfo = resolveImportOutlet(outletRaw);
+    const outletMatch = outletInfo.match;
 
     // Auto-detect role from outlet name suffix/tags before it was cleaned
     const outletFull = (cols[idx.outlet] || '').trim();
@@ -4424,14 +4440,14 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       _hasWorkerMismatch: !!workerRaw && !workerMatch,
       _hasOutletMismatch: !!outletRaw && !outletMatch,
       _workerAutoMatched: !!workerAutoMatch,   // auto-applied fuzzy — show edit option
-      _outletAutoMatched: !!outletAutoMatch,   // auto-applied fuzzy — show edit option
+      _outletAutoMatched: !!outletInfo.autoMatch,   // auto-applied fuzzy/alias — show edit option
       _suggestedWorker:   workerFuzzy?.name || null,
-      _suggestedOutlet:   outletFuzzy?.name || null,
+      _suggestedOutlet:   outletInfo.fuzzy?.name || outletInfo.alias || null,
       _deduction:         deduction,
 
       shift_date:          dateStr,
       worker_name:         isAvailableImportSlot ? 'Available' : (workerMatch?.name || workerRaw),
-      outlet:              outletMatch?.name || outletRaw,
+      outlet:              outletInfo.name || outletRaw,
       role:                roleRaw,
       scheduled_start:     clockIn,   // these ARE the scheduled times in this format
       scheduled_end:       clockOut,
@@ -4594,7 +4610,8 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
 
     const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
     const workerMatch = workerRaw ? allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase()) : null;
-    const outletMatch = allOutlets.find(o => o.name.trim().toLowerCase() === outletRaw.toLowerCase());
+    const outletInfo = resolveImportOutlet(outletRaw);
+    const outletMatch = outletInfo.match;
 
     let resolvedRate = rateRaw;
     if (!resolvedRate && outletMatch) {
@@ -4608,9 +4625,11 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
       _workerMatch: workerMatch?.name||null, _outletMatch: outletMatch?.name||null,
       _hasWorkerMismatch: !!workerRaw && !workerMatch,
       _hasOutletMismatch: !!outletRaw && !outletMatch,
+      _outletAutoMatched: !!outletInfo.autoMatch,
+      _suggestedOutlet: outletInfo.fuzzy?.name || outletInfo.alias || null,
       _deduction: 0,
       shift_date: dateStr, worker_name: isAvailableImportSlot ? 'Available' : (workerMatch?.name||workerRaw||'Available'),
-      outlet: outletMatch?.name||outletRaw||'', role: normaliseRole(roleRaw),
+      outlet: outletInfo.name||outletRaw||'', role: normaliseRole(roleRaw),
       scheduled_start: startRaw||'09:00', scheduled_end: endRaw||'17:00',
       rate: resolvedRate, break_mins: breakMins,
       clock_in: finalClockIn, clock_out: finalClockOut,
@@ -4726,12 +4745,8 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
   const weekContext = naturalWeekContext(text, year);
   const explicitDateContext = naturalExplicitDateContext(text, year);
   const resolveNaturalOutlet = (rawOutlet) => {
-    const raw = cleanOutletName(rawOutlet || outletRaw) || 'Unknown outlet';
-    const exact = allOutlets.find(o => o.name.trim().toLowerCase() === raw.toLowerCase());
-    const fuzzy = !exact ? importBestMatch(raw, allOutlets.map(o => o.name), 0.25) : null;
-    const autoMatch = fuzzy?.autoSelect ? allOutlets.find(o => o.name === fuzzy.name) : null;
-    const match = exact || autoMatch || null;
-    return { raw, match, fuzzy, autoMatch, name: match?.name || raw };
+    const info = resolveImportOutlet(rawOutlet || outletRaw, 0.25);
+    return { ...info, name: info.name || 'Unknown outlet' };
   };
 
   let currentShiftDate = explicitDateContext || null;
