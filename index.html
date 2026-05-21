@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v21 — penalty waivers respected, late clock-in payroll fix and flexible imports -->
+<!-- Build patch: v22 — country-split penalties and SR absorbed cards, penalty waivers respected -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2754,12 +2754,16 @@ function renderMetrics() {
   const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = cancellationCountForLoadedShifts();
-  const srAbsorbed = allShifts.reduce((a,s) => a + srAbsorbedForShift(s), 0);
   const latePenalties = allShifts.reduce((a,s) => a + effectiveLatePenalty(s), 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   // Also count prior-cancellation deductions on active (non-cancelled) imported shifts
   const priorCancelPenalties = allShifts.filter(s => !s.cancelled).reduce((a,s) => a + parseFloat(s.cancellation_penalty || 0), 0);
   const totalPenalties = latePenalties + cancelPenalties + priorCancelPenalties;
+  const penaltyByCountry = splitAmountsByCountry(allShifts, s => s.cancelled
+    ? shiftPenaltyAmount(s)
+    : effectiveLatePenalty(s) + parseFloat(s.cancellation_penalty || 0));
+  const srAbsorbedByCountry = splitAmountsByCountry(allShifts, srAbsorbedForShift);
+  const srAbsorbedTotal = srAbsorbedByCountry.Singapore + srAbsorbedByCountry.Malaysia;
   const totalPaidOutRows = payableShifts.filter(s => s.clock_out);
   const estimatedPayoutRows = payableShifts.filter(s => !s.clock_out);
   const totalPaidOutByCountry = splitAmountsByCountry(totalPaidOutRows, totalPaymentForShift);
@@ -2778,8 +2782,8 @@ function renderMetrics() {
     ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
     ${card('late','Late', late, late>0?'red':'green')}
     ${card('cancelled','Cancelled', cancelled, cancelled>0?'red':'')}
-    ${card('penalties','Penalties', '$'+totalPenalties.toFixed(2), totalPenalties>0?'red':'green')}
-    ${card('sr_absorbed','SR absorbed', '$'+srAbsorbed.toFixed(2), srAbsorbed>0?'amber':'')}
+    ${card('penalties','Penalties', countrySplitMetric(penaltyByCountry, totalPenalties>0?'red':'green'), '')}
+    ${card('sr_absorbed','SR absorbed', countrySplitMetric(srAbsorbedByCountry, srAbsorbedTotal>0?'amber':'green'), '')}
   `;
 }
 
