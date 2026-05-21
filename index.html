@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: Import 3rd Party auto-detection + SR absorbed default fee + imported-hours safety fix -->
+<!-- Build patch: Import hours safety fix v2 — scheduled duration overrides wrong short calculated hours for imported completed rows -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1347,12 +1347,14 @@ function calcShiftHours(s) {
   // Main payroll calculation: actual clock-in/out, with 5-min grace and 15-min rounding.
   let actualHours = calcHours(payrollStartTime(s), co, breakMins);
 
-  // Import safety fix:
-  // Some pasted/imported Google Sheet rows can visually show 12:00–23:00 but still
-  // calculate as 1h because the imported time fields are interpreted inconsistently
-  // after saving/loading. If the shift was imported with clock-in/out equal to the
-  // scheduled start/end, the scheduled duration is the safest source of truth.
-  if (schedStart && schedEnd && ci && co && ci === schedStart && co === schedEnd) {
+  // Import safety fix v2:
+  // Imported Google Sheet rows sometimes save/display correctly as 12:00–23:00,
+  // but the payroll hour calculation can still fall back to a wrong short duration
+  // on older imported rows. For completed imports, the scheduled start/end are the
+  // original sheet In/Out times, so use the scheduled duration whenever it is longer
+  // than the calculated actual duration. This fixes cases like Harshaah 12:00–23:00
+  // with 1h break, which must be 10h, not 1h.
+  if (schedStart && schedEnd && ci && co) {
     const scheduledHours = calcHours(schedStart, schedEnd, breakMins);
     if (scheduledHours !== null && (actualHours === null || Number(actualHours) < Number(scheduledHours))) {
       actualHours = scheduledHours;
