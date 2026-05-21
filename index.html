@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: Import 3rd Party auto-detection + SR absorbed default fee -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4104,7 +4105,14 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     //   → sr_rate = 17 (what worker gets), sr_absorbed = extra cost company pays
     //   → rate stays 15 (client billing rate)
     const THIRD_PARTY_RE = /3rd.?party|third.?party|platform|agency|outsourc/i;
-    const isThirdParty = THIRD_PARTY_RE.test(comment) || THIRD_PARTY_RE.test(cols[8] || '');
+    // Check multiple imported columns because "3rd Party" can appear under the
+    // worker/source/provider/comment area depending on how the sheet was copied.
+    const thirdPartySourceText = [
+      workerRaw,
+      comment,
+      ...cols.slice(0, 24)
+    ].filter(Boolean).join(' ');
+    const isThirdParty = THIRD_PARTY_RE.test(thirdPartySourceText);
 
     let srWorker  = null;
     let srRate    = null;
@@ -4121,10 +4129,11 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       })();
 
     if (isThirdParty) {
-      // 3rd party: flat fee absorbed, worker IS the external worker
+      // 3rd party: flat fee absorbed, worker IS the external worker.
+      // Default is $10/RM10 unless the comment explicitly says another fee.
       const feeMatch = /\$?(\d+\.?\d*)\s*(?:fee|flat|per shift)/i.exec(comment);
       const flatFee = feeMatch ? parseFloat(feeMatch[1]) : 10;
-      srWorker  = workerRaw;
+      srWorker  = workerRaw || '3rd Party';
       srRate    = resolvedRate;
       srHours   = 0;            // fixed fee model
       srAbsorbed = flatFee;
@@ -4703,6 +4712,16 @@ function openImportNewWorkerModal(idx) {
   document.getElementById('inw-phone').value = '';
   document.getElementById('inw-method').value = 'PayNow';
   document.getElementById('inw-bank').value = '';
+  const isThirdParty = Number(importRows[idx]?.sr_absorbed || 0) > 0 ||
+    /3rd.?party|third.?party|platform|agency|outsourc/i.test([
+      importRows[idx]?._workerRaw,
+      importRows[idx]?.worker_name,
+      importRows[idx]?.sr_worker
+    ].filter(Boolean).join(' '));
+  const thirdPartyBox = document.getElementById('inw-third-party');
+  const srFeeInput = document.getElementById('inw-sr-fee');
+  if (thirdPartyBox) thirdPartyBox.checked = !!isThirdParty;
+  if (srFeeInput) srFeeInput.value = Number(importRows[idx]?.sr_absorbed || 10).toFixed(2);
   document.getElementById('import-new-worker-modal').classList.add('open');
 }
 
@@ -4720,6 +4739,10 @@ function openImportNewOutletModal(idx) {
 async function saveImportNewWorker() {
   const name = document.getElementById('inw-name').value.trim();
   if (!name) { toast('Enter worker name', 'error'); return; }
+
+  const markAsThirdParty = !!document.getElementById('inw-third-party')?.checked;
+  const srFee = parseFloat(document.getElementById('inw-sr-fee')?.value || '10') || 10;
+
   const payload = {
     name,
     country:      document.getElementById('inw-country').value,
@@ -4738,12 +4761,18 @@ async function saveImportNewWorker() {
         r.worker_name = data.name;
         r._workerMatch = data.name;
         r._hasWorkerMismatch = false;
+        if (markAsThirdParty) {
+          r.sr_worker = data.name;
+          r.sr_rate = parseFloat(r.rate || 0) || null;
+          r.sr_hours = 0;
+          r.sr_absorbed = srFee;
+        }
       }
     });
     _importNewWorkerIdx = null;
   }
   document.getElementById('import-new-worker-modal').classList.remove('open');
-  toast(`Worker "${data.name}" created and mapped!`);
+  toast(`Worker "${data.name}" created and mapped${markAsThirdParty ? ` as 3rd party SR ${srFee.toFixed(2)}` : ''}!`);
   renderImportPreview();
 }
 
@@ -5023,6 +5052,15 @@ setInterval(async () => {
         </select>
       </div>
       <div class="form-row"><label>Account / PayNow no.</label><input id="inw-bank" class="form-input" placeholder="e.g. 98765432"></div>
+      <div class="form-row" style="background:var(--amber-dim);border:1px solid rgba(245,166,35,0.22);border-radius:var(--radius);padding:10px 12px;">
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;color:var(--amber);">
+          <input type="checkbox" id="inw-third-party" style="width:auto;">
+          3rd party worker / platform manpower
+        </label>
+        <label>SR absorbed fee</label>
+        <input id="inw-sr-fee" class="form-input" type="number" step="0.50" min="0" value="10.00">
+        <div class="sub-text" style="margin-top:6px;line-height:1.45;">When ticked, imported rows for this worker will save SR absorbed as 10 by default.</div>
+      </div>
     </div>
     <div style="padding:0 18px 18px;display:flex;gap:10px;justify-content:flex-end;">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-new-worker-modal').classList.remove('open')">Cancel</button>
@@ -5056,4 +5094,3 @@ setInterval(async () => {
 </div>
 </body>
 </html>
-  
