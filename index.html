@@ -151,6 +151,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 /* Dim rows */
 .row-cancelled td { opacity: 0.5; }
+.row-paid { background: rgba(52,199,123,0.05) !important; }
+.row-paid td:not(:last-child) { opacity: 0.7; }
 .row-suspended td { opacity: 0.4; }
 
 /* Modal overlay */
@@ -675,6 +677,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <option value="outlet_bypass">Outlet cancelled shift - delete slot completely</option>
       </select>
       <div id="cancel-type-note" class="sub-text" style="margin-top:6px;line-height:1.5;">Penalty applies and counts toward worker suspension.</div>
+      <div id="manual-penalty-row" style="margin-top:8px;display:flex;align-items:center;gap:8px;">
+        <label style="font-size:12px;color:var(--text2);margin:0;white-space:nowrap;">Custom penalty $</label>
+        <input type="number" id="cancel-penalty-override" min="0" step="0.50" placeholder="15.00 default"
+          style="width:130px;font-size:12px;padding:4px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
+        <span style="font-size:11px;color:var(--text3);">Leave blank for $15</span>
+      </div>
     </div>
     <div class="divider"></div>
     <div id="mc-upload-section">
@@ -2021,7 +2029,9 @@ function penaltyDisplay(s) {
   const parts = [];
   if (latePen > 0)   parts.push(`Late: -${moneyForShift(latePen, s)}`);
   if (cancelPen > 0) parts.push(`Prev cancel: -${moneyForShift(cancelPen, s)}`);
-  return `<span class="penalty-red">-${moneyForShift(total, s)}</span><div class="sub-text" style="color:var(--red);font-size:10px;">${parts.join(' · ')}</div>`;
+  return `<span class="penalty-red">-${moneyForShift(total, s)}</span>
+    <div class="sub-text" style="color:var(--red);font-size:10px;">${parts.join(' · ')}</div>
+    ${cancelPen > 0 && !s.cancelled ? `<button onclick="removePenaltyFromShift('${s.id}')" style="margin-top:3px;font-size:10px;padding:1px 6px;background:none;border:1px solid var(--border2);border-radius:3px;color:var(--text3);cursor:pointer;">✕ Remove</button>` : ''}`;
 }
 
 
@@ -2076,7 +2086,14 @@ function renderTable() {
   renderStandbyDayPanel();
   if (attendanceView === 'week') { renderWeeklyGrid(); return; }
   const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
-  const rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  let rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  // When viewing Total Payment tab, sort by clock_out descending (most recently clocked-out first)
+  if (activeMetricFilter === 'paid_out') {
+    rows = [...rows].sort((a, b) => {
+      const at = a.clock_out || '00:00'; const bt = b.clock_out || '00:00';
+      return bt.localeCompare(at);
+    });
+  }
   document.getElementById('shift-count').textContent = rows.length ? `${rows.length} ${metricFilterLabel()}` : metricFilterLabel();
   if (!rows.length) {
     document.getElementById('table-body-wrap').innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div><p>No shifts for this day.<br>Click <strong>+ Add shift</strong> to get started.</p></div>';
@@ -2099,7 +2116,7 @@ function renderTable() {
             ? `<div class="sr-tag" style="color:var(--teal);border-color:rgba(41,184,204,0.3);background:rgba(41,184,204,0.1);">★ Special rate ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.sr_rate).toFixed(0)}/hr</div>`
             : '';
         const isCancelled = s.cancelled;
-        const rowClass = isCancelled ? 'row-cancelled' : '';
+        const rowClass = isCancelled ? 'row-cancelled' : (s.is_paid ? 'row-paid' : '');
         let actions = '';
         if (isCancelled) {
           const srAction = s.sr_worker
@@ -2112,9 +2129,17 @@ function renderTable() {
             : '';
           const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
           const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
+          const showPaidTick = !isAvailable && !!s.clock_out && !s.cancelled;
+          const isPaid = !!s.is_paid;
           actions = `<div class="action-stack">
             ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
             ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
+            ${showPaidTick ? `<button onclick="togglePaid('${s.id}',${isPaid})"
+              style="font-size:11px;padding:3px 8px;border:1px solid ${isPaid ? 'var(--green)' : 'var(--border2)'};
+              background:${isPaid ? 'rgba(52,199,123,0.15)' : 'transparent'};
+              color:${isPaid ? 'var(--green)' : 'var(--text3)'};border-radius:4px;cursor:pointer;white-space:nowrap;font-weight:600;"
+              title="${isPaid ? 'Mark as unpaid' : 'Mark as paid'}">
+              ${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
             ${replacementAction}
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
@@ -2558,6 +2583,82 @@ function activityBannerPrev() {
   renderBannerEntry();
 }
 
+// ── Payroll paid tick ─────────────────────────────────────────
+
+async function togglePaid(id, currentlyPaid) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const newPaid = !currentlyPaid;
+  const { error } = await supabaseClient
+    .from('shifts')
+    .update({ is_paid: newPaid, updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  toast(newPaid
+    ? `✓ ${s.worker_name} marked as paid`
+    : `${s.worker_name} marked as unpaid`);
+  await logActivity(
+    newPaid ? 'Payroll paid' : 'Payroll unpaid',
+    `${s.worker_name} at ${s.outlet} ${s.shift_date} marked as ${newPaid ? 'paid' : 'unpaid'}`,
+    'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
+  );
+  await loadShifts();
+}
+
+// ── Penalty management ───────────────────────────────────────
+
+async function applyPenaltyToNextShift(workerName, amount) {
+  const today = new Date().toISOString().slice(0,10);
+  // Find the next upcoming shift for this worker (future date, not cancelled)
+  const { data, error } = await supabaseClient
+    .from('shifts')
+    .select('id, shift_date, outlet, scheduled_start, cancellation_penalty')
+    .eq('worker_name', workerName)
+    .eq('cancelled', false)
+    .gte('shift_date', today)
+    .order('shift_date', { ascending: true })
+    .order('scheduled_start', { ascending: true })
+    .limit(1);
+
+  if (error || !data?.length) {
+    toast(`No upcoming shift found for ${workerName} — penalty not applied`, 'error');
+    return;
+  }
+  const nextShift = data[0];
+  const existing = parseFloat(nextShift.cancellation_penalty || 0);
+  const newTotal  = existing + amount;
+  const { error: e2 } = await supabaseClient
+    .from('shifts')
+    .update({ cancellation_penalty: newTotal, updated_at: new Date().toISOString() })
+    .eq('id', nextShift.id);
+  if (e2) { toast('Failed to apply penalty: ' + e2.message, 'error'); return; }
+  const shiftLabel = `${nextShift.outlet} on ${nextShift.shift_date} ${nextShift.scheduled_start?.slice(0,5)||''}`;
+  toast(`$${amount.toFixed(2)} penalty applied to ${workerName}'s next shift — ${shiftLabel}`);
+  await logActivity(
+    'Penalty applied',
+    `$${amount.toFixed(2)} cancellation penalty applied to ${workerName}'s shift at ${nextShift.outlet} on ${nextShift.shift_date}`,
+    'shift', nextShift.id, { shift_date: nextShift.shift_date, worker_name: workerName, outlet: nextShift.outlet }
+  );
+  await loadShifts();
+}
+
+async function removePenaltyFromShift(shiftId) {
+  const s = allShifts.find(x => x.id === shiftId);
+  if (!s) return;
+  const pen = parseFloat(s.cancellation_penalty || 0);
+  if (!pen) { toast('No penalty to remove on this shift', 'error'); return; }
+  if (!confirm(`Remove $${pen.toFixed(2)} cancellation penalty from ${s.worker_name}'s shift?`)) return;
+  const { error } = await supabaseClient
+    .from('shifts')
+    .update({ cancellation_penalty: 0, updated_at: new Date().toISOString() })
+    .eq('id', shiftId);
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  toast(`Penalty removed from ${s.worker_name}'s shift`);
+  await logActivity('Penalty removed', `$${pen.toFixed(2)} penalty removed from ${s.worker_name} at ${s.outlet}`, 'shift', shiftId,
+    { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  await loadShifts();
+}
+
 // ── Add shift ─────────────────────────────────────────────────
 function toggleThirdPartyBooking() {
   const checked = document.getElementById('f-third-party')?.checked;
@@ -2761,6 +2862,8 @@ function updateCancelTypeUI() {
   const mc = document.getElementById('mc-upload-section');
   const note = document.getElementById('cancel-type-note');
   if (mc) mc.style.display = type === 'worker_mc' ? 'block' : 'none';
+  const penRow = document.getElementById('manual-penalty-row');
+  if (penRow) penRow.style.display = type === 'worker_penalty' ? 'flex' : 'none';
   if (type !== 'worker_mc') removeMc();
   if (note) {
     if (type === 'worker_penalty') note.textContent = 'Worker cancellation: records cancellation, counts toward suspension, and returns the slot to Available.';
@@ -2791,6 +2894,11 @@ async function confirmCancel() {
   const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
   const isOutletBypass = type === 'outlet_bypass';
   const isMcWaiver = type === 'worker_mc';
+  const isPenalty  = type === 'worker_penalty';
+  const penaltyOverrideRaw = document.getElementById('cancel-penalty-override')?.value;
+  const penaltyAmount = (isPenalty && penaltyOverrideRaw && parseFloat(penaltyOverrideRaw) >= 0)
+    ? parseFloat(penaltyOverrideRaw)
+    : 15;
   if (isMcWaiver && !mcDataUrl) {
     toast('Please upload MC, or choose worker penalty / outlet cancellation', 'error');
     return;
@@ -2856,14 +2964,27 @@ async function confirmCancel() {
   const _wcDate = new Date(_wcDateFmt+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'});
   await logActivity(
     'Shift cancelled',
-    `${originalWorker || 'Worker'} cancelled shift at ${s.outlet || '—'} on ${_wcDate} ${s.scheduled_start?.slice(0,5)||''}${isMcWaiver ? ' — MC uploaded, no penalty' : ' — $15 penalty applied'}. Slot returned to Available.`,
+    `${originalWorker || 'Worker'} cancelled shift at ${s.outlet || '—'} on ${_wcDate} ${s.scheduled_start?.slice(0,5)||''}${isMcWaiver ? ' — MC uploaded, no penalty' : ` — $${penaltyAmount.toFixed(2)} penalty applied`}. Slot returned to Available.`,
     'shift', pendingCancelId, { shift_date: s.shift_date, worker_name: originalWorker, outlet: s.outlet }
   );
 
   await loadWorkers();
   closeCancelModal();
   await loadShifts();
-  toast(isMcWaiver ? 'Worker cancellation recorded; slot returned to Available' : 'Worker cancellation recorded; slot returned to Available');
+  toast(isMcWaiver ? 'Worker cancellation recorded; slot returned to Available' : `Worker cancellation recorded ($${penaltyAmount.toFixed(2)} penalty)`);
+
+  // Offer to apply penalty to worker's next upcoming shift
+  if (isPenalty && penaltyAmount > 0 && originalWorker && originalWorker !== 'Available') {
+    setTimeout(async () => {
+      const apply = confirm(
+        `Apply $${penaltyAmount.toFixed(2)} cancellation penalty to ${originalWorker}'s next upcoming shift?
+
+Click OK to deduct from their next shift payout.
+Click Cancel to skip (you can add it manually later via the penalty column).`
+      );
+      if (apply) await applyPenaltyToNextShift(originalWorker, penaltyAmount);
+    }, 600);
+  }
 }
 
 // ── Service recovery ──────────────────────────────────────────
@@ -4687,6 +4808,8 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 });
 
 // ── Start ─────────────────────────────────────────────────────
+// Note: run this SQL in Supabase if is_paid column doesn't exist:
+// ALTER TABLE shifts ADD COLUMN IF NOT EXISTS is_paid boolean DEFAULT false;
 initSupabase();
 
 // Auto-refresh activity banner every 30 seconds
