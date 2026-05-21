@@ -1601,6 +1601,10 @@ function netPaymentForShift(s) {
   }
   return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s)) + tc;
 }
+function totalPaymentForShift(s) {
+  const thirdPartyFee = s?.sr_worker ? srAbsorbedForShift(s) : 0;
+  return netPaymentForShift(s) + thirdPartyFee;
+}
 function isPayableShift(s) {
   const workerName = String(s?.worker_name || '').trim().toLowerCase();
   return workerName && workerName !== 'available' && !s?.cancelled;
@@ -2614,7 +2618,7 @@ function renderMetrics() {
   const totalPenalties = latePenalties + cancelPenalties + priorCancelPenalties;
   const totalPaidOutRows = payableShifts.filter(s => s.clock_out);
   const estimatedPayoutRows = payableShifts.filter(s => !s.clock_out);
-  const totalPaidOutByCountry = splitAmountsByCountry(totalPaidOutRows, netPaymentForShift);
+  const totalPaidOutByCountry = splitAmountsByCountry(totalPaidOutRows, totalPaymentForShift);
   const estimatedPayoutByCountry = splitAmountsByCountry(estimatedPayoutRows, estimatedPaymentForShift);
   const estimatedPayoutTotal = estimatedPayoutByCountry.Singapore + estimatedPayoutByCountry.Malaysia;
 
