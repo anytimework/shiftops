@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v13 — sentence-style flexible imports, available slots and mobile layout -->
+<!-- Build patch: v14 — broader natural-language imports, suggestions for new workers/clients and mobile layout -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4589,6 +4589,10 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
 function inferNaturalImportOutlet(text) {
   const lines = String(text || '').split(/\n+/).map(l => l.trim()).filter(Boolean);
   const intro = lines.find(l => /@\w+/.test(l)) || lines[0] || '';
+  const mentionParen = intro.match(/@\S+(?:\s+\S+)?\s*\(([^)]+)\)/);
+  if (mentionParen?.[1]) return cleanOutletName(mentionParen[1]) || mentionParen[1].trim();
+  const forAt = String(text || '').match(/\b(?:for|at)\s+([A-Z][A-Za-z0-9&'(). -]{2,})(?:[.!?,\n]|$)/);
+  if (forAt?.[1]) return cleanOutletName(forAt[1]) || forAt[1].trim();
   let outlet = intro
     .replace(/^(hi|hello|dear)\s+/i, '')
     .replace(/@\S+\s*/i, '')
@@ -4634,6 +4638,11 @@ function naturalWeekContext(text, year) {
   return { month: match[1], startIso, startDay: parseInt(match[2], 10), endDay: parseInt(match[3], 10) };
 }
 
+function naturalExplicitDateContext(text, year) {
+  const match = String(text || '').match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)?\s*\(?\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s*\)?/i);
+  return match ? naturalDateToIso(match[1], match[2], year) : null;
+}
+
 function dateForWeekdayInContext(weekdayName, context) {
   if (!context) return null;
   const weekOffset = { mon:0, tue:1, wed:2, thu:3, fri:4, sat:5, sun:6 }[String(weekdayName || '').toLowerCase().slice(0,3)];
@@ -4674,6 +4683,7 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
   const defaultRoleRaw = inferNaturalImportRole(text);
   const year = naturalImportYear(text);
   const weekContext = naturalWeekContext(text, year);
+  const explicitDateContext = naturalExplicitDateContext(text, year);
   const resolveNaturalOutlet = (rawOutlet) => {
     const raw = cleanOutletName(rawOutlet || outletRaw) || 'Unknown outlet';
     const exact = allOutlets.find(o => o.name.trim().toLowerCase() === raw.toLowerCase());
@@ -4683,7 +4693,7 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
     return { raw, match, fuzzy, autoMatch, name: match?.name || raw };
   };
 
-  let currentShiftDate = null;
+  let currentShiftDate = explicitDateContext || null;
   const parsed = [];
   const addNaturalRosterRow = (dateStr, startRaw, endRaw, workerRawInput, roleOverride = '', outletOverride = '') => {
     if (!dateStr || !startRaw || !endRaw) return;
@@ -4756,6 +4766,15 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
         handledSegment = true;
       }
       if (handledSegment) continue;
+    }
+
+    const workerBeforeTimeMatch = line.match(/(?:(next|this)\s+week\s+)?(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s+\d{1,2}(?:st|nd|rd|th)?)?\s+(.+?)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)).*?\b(?:for|at)\s+(.+?)\s*$/i);
+    if (workerBeforeTimeMatch) {
+      const dateStr = dateForRelativeWeekday(workerBeforeTimeMatch[1] || '', workerBeforeTimeMatch[2]);
+      const workerName = workerBeforeTimeMatch[3].replace(/\b(?:please|help|to|get|need|looking|for|pt|staff|worker)\b/ig, ' ').replace(/\s+/g, ' ').trim();
+      const outletForSegment = workerBeforeTimeMatch[6].replace(/[.。!]+$/,'').trim();
+      addNaturalRosterRow(dateStr, importParseTime(workerBeforeTimeMatch[4]), importParseTime(workerBeforeTimeMatch[5]), workerName, defaultRoleRaw, outletForSegment);
+      continue;
     }
 
     const sentenceMatch = line.match(/(?:(next|this)\s+week\s+)?(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?).*?(?:\d+\s*x\s*)?(?:(pt|part[\s-]*timer|service crew|foh|cdp|chef de partie|chef|barista|dishwasher|kitchen assistant|kitchen)\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)).*?\b(?:for|at)\s+(.+?)\s*$/i);
@@ -4987,7 +5006,7 @@ function renderImportPreview() {
             onclick="onImportWorkerSelect(${idx},'${escapeAttr(wSuggestName)}')">✓</button>
         </div>` : ''}
         ${searchDropdown('worker', idx, 'import-w-list-'+idx)}
-        <div class="sub-text" style="color:var(--text3);margin-top:3px;font-size:10px;">Skipped until mapped</div>
+        <div class="sub-text" style="color:var(--text3);margin-top:3px;font-size:10px;">Use suggestion or + New before saving</div>
       </td>`;
     } else {
       workerCell = `<td style="font-weight:500;">${escapeHtml(r.worker_name)}</td>`;
@@ -5017,7 +5036,7 @@ function renderImportPreview() {
             onclick="onImportOutletSelect(${idx},'${escapeAttr(oSuggestName)}')">✓</button>
         </div>` : ''}
         ${searchDropdown('outlet', idx, 'import-o-list-'+idx)}
-        <div class="sub-text" style="color:var(--text3);margin-top:3px;font-size:10px;">Skipped until mapped</div>
+        <div class="sub-text" style="color:var(--text3);margin-top:3px;font-size:10px;">Use suggestion or + New before saving</div>
       </td>`;
     } else {
       outletCell = `<td>${escapeHtml(r.outlet)}</td>`;
@@ -5065,7 +5084,7 @@ function renderImportPreview() {
     if (r._hasWorkerMismatch || r._hasOutletMismatch) {
       statusCell = `<td>
         <span class="badge badge-amber">⚠️ Unmapped</span>
-        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Will be skipped</div>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Map or add as new before saving</div>
       </td>`;
     } else if (r._cancelled) {
       statusCell = `<td>
@@ -5100,7 +5119,7 @@ function renderImportPreview() {
   const activeCount = importRows.filter(r => !r._cancelled && !r._hasWorkerMismatch && !r._hasOutletMismatch).length;
   const unmappedCount = importRows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
   const unmappedNote = unmappedCount > 0
-    ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${unmappedCount} row${unmappedCount!==1?'s':''} unmapped — will be skipped.</span>`
+    ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${unmappedCount} row${unmappedCount!==1?'s':''} need mapping — use a suggestion or + New.</span>`
     : '';
   body.innerHTML = `
     <div style="overflow-x:auto;">
