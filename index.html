@@ -375,7 +375,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="main">
     <!-- ATTENDANCE PAGE -->
     <div id="page-attendance">
-      <div class="topbar">
+      <div class="topbar" style="flex-wrap:wrap;gap:0;">
         <div class="topbar-left">
           <div class="date-nav">
             <button onclick="changeDay(-1)">←</button>
@@ -403,6 +403,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <button class="btn btn-ghost btn-sm" onclick="openStandbyModalForDate(formatDate(currentDate))">+ Standby</button>
         </div>
       </div>
+      <!-- Activity strip — single most recent entry with prev navigation -->
+      <div id="attendance-activity-banner" style="background:var(--bg2);border-bottom:1px solid var(--border);padding:7px 18px;display:flex;align-items:center;gap:10px;min-height:36px;">
+        <button onclick="activityBannerPrev()" title="Previous activity"
+          style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:0 4px;line-height:1;flex-shrink:0;">‹</button>
+        <div id="attendance-activity-list" style="flex:1;display:flex;align-items:center;gap:8px;overflow:hidden;min-width:0;font-size:12px;"></div>
+        <button class="btn btn-ghost btn-sm" style="font-size:11px;flex-shrink:0;padding:2px 8px;"
+          onclick="switchPage('activity',document.querySelector('[onclick*=activity]'))">All activity →</button>
+      </div>
+
       <div class="content">
         <div class="metrics" id="metrics"></div>
         <div id="standby-day-panel"></div>
@@ -416,14 +425,6 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           </div>
         </div>
 
-        <!-- Recent activity banner -->
-        <div id="attendance-activity-banner" style="margin-top:18px;">
-          <div class="table-header" style="display:flex;align-items:center;justify-content:space-between;">
-            <span class="table-title">Recent activity</span>
-            <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="switchPage('activity',document.querySelector('[onclick*=activity]'))">View all →</button>
-          </div>
-          <div id="attendance-activity-list" style="font-size:12px;color:var(--text2);padding:10px 0;">Loading...</div>
-        </div>
       </div>
     </div>
 
@@ -1205,24 +1206,34 @@ function renderActivityLog() {
   </table>`;
 }
 
-function jumpToShift(shiftDate, shiftId) {
-  // Navigate to the Attendance page on the correct date
-  if (!shiftDate) return;
-  // Parse and set currentDate
+async function jumpToShift(shiftDate, shiftId) {
+  if (!shiftDate || !shiftId) return;
   const d = new Date(shiftDate + 'T00:00:00');
   if (isNaN(d)) return;
   currentDate = d;
-  switchPage('attendance', document.querySelector('.nav-item[onclick*="attendance"]'));
-  // After the page renders, highlight the shift row
-  setTimeout(() => {
-    const row = document.getElementById(`row-${shiftId}`);
-    if (row) {
-      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      row.style.transition = 'outline 0s';
-      row.style.outline = '2px solid var(--teal)';
-      setTimeout(() => { row.style.outline = ''; }, 2500);
-    }
-  }, 400);
+  // Switch to attendance page
+  const navBtn = document.querySelector('.nav-item[onclick*="attendance"]');
+  if (navBtn) {
+    document.querySelectorAll('.main > div').forEach(d => d.style.display = 'none');
+    document.getElementById('page-attendance').style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+    navBtn.classList.add('active');
+  }
+  // Update date label
+  document.getElementById('date-label').textContent = formatDisplayDate(shiftDate);
+  // Load shifts for this date then highlight
+  await loadShifts();
+  // Now the table is rendered — find and highlight the row
+  const row = document.getElementById('row-' + shiftId);
+  if (row) {
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.style.outline = '2.5px solid var(--teal)';
+    row.style.transition = 'outline 0.3s';
+    setTimeout(() => { row.style.outline = ''; }, 3000);
+  } else {
+    // Row not found — shift may be on a different date or filtered out
+    toast('Shift not found in current view — check filters', 'error');
+  }
 }
 
 function clearActivityLog() {
@@ -2489,51 +2500,62 @@ function renderMetrics() {
   `;
 }
 
-// ── Attendance page activity banner ──────────────────────────
+// ── Attendance page activity strip ───────────────────────────
+let _bannerLogs = [];
+let _bannerIdx  = 0; // 0 = most recent
+
 async function renderAttendanceActivityBanner() {
   const el = document.getElementById('attendance-activity-list');
   if (!el) return;
-
-  // Fetch last 8 logs from Supabase
-  let logs = [];
   try {
     const { data, error } = await supabaseClient
       .from('activity_logs')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(8);
-    if (!error && data) logs = data;
-    else logs = (readLocalActivityLog() || []).slice(0, 8);
+      .limit(50);
+    if (!error && data && data.length) {
+      _bannerLogs = data;
+    } else {
+      _bannerLogs = (readLocalActivityLog() || []).slice(0, 50);
+    }
   } catch(e) {
-    logs = (readLocalActivityLog() || []).slice(0, 8);
+    _bannerLogs = (readLocalActivityLog() || []).slice(0, 50);
   }
+  _bannerIdx = 0; // reset to most recent on refresh
+  renderBannerEntry();
+}
 
-  if (!logs.length) {
-    el.innerHTML = '<div style="padding:8px 0;color:var(--text3);">No recent activity yet.</div>';
+function renderBannerEntry() {
+  const el = document.getElementById('attendance-activity-list');
+  if (!el) return;
+  if (!_bannerLogs.length) {
+    el.innerHTML = '<span style="color:var(--text3);">No recent activity yet.</span>';
     return;
   }
+  const r = _bannerLogs[_bannerIdx];
+  const icon = activityIcon(r.action);
+  const timeStr = activityTimeLabel(r.created_at);
+  const hasLink = r.ref_id && String(r.ref_id).trim() !== '' && r.shift_date && String(r.shift_date).trim() !== '';
+  const posLabel = _bannerIdx === 0 ? 'Latest' : `${_bannerIdx + 1} of ${_bannerLogs.length}`;
 
-  el.innerHTML = logs.map(r => {
-    const icon = activityIcon(r.action);
-    const timeStr = activityTimeLabel(r.created_at);
-    const hasLink = r.ref_id && String(r.ref_id).trim() && r.shift_date && String(r.shift_date).trim();
-    const cursor = hasLink ? 'cursor:pointer;' : '';
-    const onclick = hasLink ? `onclick="jumpToShift('${r.shift_date}','${r.ref_id}')"` : '';
-    const hoverOn  = hasLink ? `onmouseenter="this.style.background='var(--bg3)'"` : '';
-    const hoverOff = hasLink ? `onmouseleave="this.style.background=''"` : '';
-    return `<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;border-radius:6px;${cursor}transition:background 0.12s;"
-        ${onclick} ${hoverOn} ${hoverOff}>
-      <span style="font-size:15px;flex-shrink:0;margin-top:1px;">${icon}</span>
-      <div style="flex:1;min-width:0;">
-        <span style="font-weight:600;color:var(--teal);font-size:11px;">${escapeHtml(r.created_by||'?')}</span>
-        <span style="color:var(--text3);font-size:11px;margin:0 4px;">·</span>
-        <span style="font-weight:600;color:var(--text);font-size:11px;">${escapeHtml(r.action||'')}</span>
-        <span style="color:var(--text3);font-size:11px;margin:0 4px;">·</span>
-        <span style="color:var(--text3);font-size:11px;">${timeStr}</span>
-        <div style="color:var(--text2);font-size:11px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.details||'')}</div>
-      </div>
-    </div>`;
-  }).join('');
+  el.innerHTML = `
+    <span style="font-size:14px;flex-shrink:0;">${icon}</span>
+    <span style="color:var(--text3);font-size:10px;flex-shrink:0;white-space:nowrap;">${posLabel}</span>
+    <span style="color:var(--text3);font-size:11px;flex-shrink:0;">·</span>
+    <span style="font-weight:700;color:var(--teal);font-size:11px;flex-shrink:0;">${escapeHtml(r.created_by||'?')}</span>
+    <span style="font-weight:600;color:var(--text);font-size:11px;flex-shrink:0;">${escapeHtml(r.action||'')}</span>
+    <span style="color:var(--text3);font-size:11px;flex-shrink:0;">·</span>
+    <span style="color:var(--text2);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;">${escapeHtml(r.details||'')}</span>
+    <span style="color:var(--text3);font-size:11px;flex-shrink:0;white-space:nowrap;">${timeStr}</span>
+    ${hasLink ? `<button onclick="jumpToShift('${r.shift_date}','${r.ref_id}')"
+      style="flex-shrink:0;font-size:11px;padding:2px 8px;background:var(--teal);color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap;">↗ View shift</button>` : ''}
+  `;
+}
+
+function activityBannerPrev() {
+  if (!_bannerLogs.length) return;
+  _bannerIdx = Math.min(_bannerIdx + 1, _bannerLogs.length - 1);
+  renderBannerEntry();
 }
 
 // ── Add shift ─────────────────────────────────────────────────
