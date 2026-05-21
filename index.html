@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v16 — Five Guys outlet aliases, no-date ShiftOps rows and flexible imports -->
+<!-- Build patch: v17 — replacement-rate SR imports, Five Guys aliases and flexible imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4218,7 +4218,9 @@ function extractSpecialRate(text) {
   const t = String(text || '');
   const match = /special\s+rate\s*\$?(\d+\.?\d*)/i.exec(t)
     || /\$?(\d+\.?\d*)\s*\/\s*hr\s+special\s+rate/i.exec(t)
-    || /special\s+\$?(\d+\.?\d*)\s*\/\s*hr/i.exec(t);
+    || /special\s+\$?(\d+\.?\d*)\s*\/\s*hr/i.exec(t)
+    || /replacement\s*\$?(\d+\.?\d*)\s*\/\s*hr/i.exec(t)
+    || /\$?(\d+\.?\d*)\s*\/\s*hr\s+replacement/i.exec(t);
   return match ? parseFloat(match[1]) : null;
 }
 
