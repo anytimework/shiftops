@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v10 — available-slot imports, flexible imports, mobile layout and editable roles -->
+<!-- Build patch: v12 — week-range flexible imports, available slots and mobile layout -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4147,8 +4147,9 @@ function detectImportFormat(lines) {
 
   const joined = nonEmpty.join('\n');
   const hasRosterDate = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?\b/i.test(joined);
-  const hasRosterTime = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*[-–]/i.test(joined);
-  if (hasRosterDate && hasRosterTime) return 'natural_roster';
+  const hasRosterTime = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i.test(joined);
+  const hasWeekRange = /\bweek\s+of\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\s*[-–]\s*\d{1,2}\b/i.test(joined);
+  if ((hasRosterDate || hasWeekRange) && hasRosterTime) return 'natural_roster';
 
   return 'unknown';
 }
@@ -4620,11 +4621,40 @@ function naturalDateToIso(monthName, day, year) {
   return importParseDate(`${parseInt(cleaned, 10)} ${monthName} ${year}`);
 }
 
+function weekdayIndex(name) {
+  const n = String(name || '').toLowerCase().slice(0,3);
+  return { sun:0, mon:1, tue:2, wed:3, thu:4, fri:5, sat:6 }[n];
+}
+
+function naturalWeekContext(text, year) {
+  const match = String(text || '').match(/\bweek\s+of\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\s*[-–]\s*(\d{1,2})(?:st|nd|rd|th)?/i);
+  if (!match) return null;
+  const startIso = naturalDateToIso(match[1], match[2], year);
+  if (!startIso) return null;
+  return { month: match[1], startIso, startDay: parseInt(match[2], 10), endDay: parseInt(match[3], 10) };
+}
+
+function dateForWeekdayInContext(weekdayName, context) {
+  if (!context) return null;
+  const weekOffset = { mon:0, tue:1, wed:2, thu:3, fri:4, sat:5, sun:6 }[String(weekdayName || '').toLowerCase().slice(0,3)];
+  if (weekOffset === undefined) return null;
+  const [y, m, d0] = context.startIso.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 1, d0 + weekOffset));
+  return d.toISOString().slice(0,10);
+}
+
+function roleFromNaturalSegment(segment, fallbackRole) {
+  const roleText = String(segment || '').match(/\(([^)]+)\)/)?.[1] || '';
+  if (!roleText) return fallbackRole;
+  return importDetectRole(roleText, roleText);
+}
+
 function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = '') {
   const text = fullText || lines.join('\n');
   const outletRaw = inferNaturalImportOutlet(text);
-  const roleRaw = inferNaturalImportRole(text);
+  const defaultRoleRaw = inferNaturalImportRole(text);
   const year = naturalImportYear(text);
+  const weekContext = naturalWeekContext(text, year);
   const outletExact = allOutlets.find(o => o.name.trim().toLowerCase() === outletRaw.toLowerCase());
   const outletFuzzy = !outletExact ? importBestMatch(outletRaw, allOutlets.map(o => o.name), 0.25) : null;
   const outletAutoMatch = outletFuzzy?.autoSelect ? allOutlets.find(o => o.name === outletFuzzy.name) : null;
@@ -4633,42 +4663,29 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
 
   let currentShiftDate = null;
   const parsed = [];
-  for (const rawLine of lines) {
-    const line = String(rawLine || '').trim().replace(/^,+/, '').trim();
-    if (!line) continue;
+  const addNaturalRosterRow = (dateStr, startRaw, endRaw, workerRawInput, roleOverride = '') => {
+    if (!dateStr || !startRaw || !endRaw) return;
+    const roleRaw = roleOverride || defaultRoleRaw;
+    const workerRaw = cleanWorkerName(String(workerRawInput || '').replace(/\*.*?\*/g, '').replace(/\bupdated\b/ig, '').trim());
+    const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
+    if (!workerRaw && !isAvailableImportSlot) return;
 
-    const dateMatch = line.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*[-–]\s*[A-Za-z]+)?/i);
-    if (dateMatch) {
-      currentShiftDate = naturalDateToIso(dateMatch[1], dateMatch[2], year);
-      continue;
-    }
-
-    const shiftMatch = line.match(/^(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(.+)$/i);
-    if (!shiftMatch || !currentShiftDate) continue;
-
-    const startRaw = importParseTime(shiftMatch[1]);
-    const endRaw = importParseTime(shiftMatch[2]);
-    if (!startRaw || !endRaw) continue;
-
-    const workerRaw = cleanWorkerName(shiftMatch[3].replace(/\*.*?\*/g, '').replace(/\bupdated\b/ig, '').trim());
-    if (!workerRaw) continue;
-
-    const workerExact = allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase());
-    const workerFuzzy = !workerExact ? importBestMatch(workerRaw, allWorkers.map(w => w.name)) : null;
+    const workerExact = workerRaw ? allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase()) : null;
+    const workerFuzzy = workerRaw && !workerExact ? importBestMatch(workerRaw, allWorkers.map(w => w.name)) : null;
     const workerAutoMatch = workerFuzzy?.autoSelect ? allWorkers.find(w => w.name === workerFuzzy.name) : null;
     const workerMatch = workerExact || workerAutoMatch || null;
 
     let resolvedRate = 12;
     if (outletMatch) {
-      const suggested = getSuggestedRate(outletMatch.name, roleRaw, new Date(currentShiftDate + 'T00:00:00'));
+      const suggested = getSuggestedRate(outletMatch.name, roleRaw, new Date(dateStr + 'T00:00:00'));
       resolvedRate = suggested?.rate || resolvedRate;
     } else {
-      resolvedRate = defaultDailyRates(roleRaw)[dayKeyForDate(new Date(currentShiftDate + 'T00:00:00'))] || 12;
+      resolvedRate = defaultDailyRates(roleRaw)[dayKeyForDate(new Date(dateStr + 'T00:00:00'))] || 12;
     }
 
-    const forceCompleted = importMode === 'completed';
+    const forceCompleted = importMode === 'completed' && !isAvailableImportSlot;
     parsed.push({
-      _workerRaw: workerRaw,
+      _workerRaw: workerRaw || 'Available',
       _outletRaw: outletRaw,
       _workerMatch: workerMatch?.name || null,
       _outletMatch: outletMatch?.name || null,
@@ -4679,8 +4696,8 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
       _suggestedWorker: workerFuzzy?.name || null,
       _suggestedOutlet: outletFuzzy?.name || null,
       _deduction: 0,
-      shift_date: currentShiftDate,
-      worker_name: workerMatch?.name || workerRaw,
+      shift_date: dateStr,
+      worker_name: isAvailableImportSlot ? 'Available' : (workerMatch?.name || workerRaw),
       outlet: outletName,
       role: roleRaw,
       scheduled_start: startRaw,
@@ -4698,6 +4715,47 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
       sr_hours: null,
       sr_absorbed: null,
     });
+  };
+
+  for (const rawLine of lines) {
+    const line = String(rawLine || '').trim().replace(/^,+/, '').trim();
+    if (!line) continue;
+
+    const segments = line.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean);
+    if (weekContext && segments.length) {
+      let handledSegment = false;
+      for (const segment of segments) {
+        const weekItemMatch = segment.match(/^(?:\d+\s*x\s*)?(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*[-–]\s*([^()]+?))?(?:\s*\([^)]+\))?$/i);
+        if (!weekItemMatch) continue;
+        const dateStr = dateForWeekdayInContext(weekItemMatch[1], weekContext);
+        const roleForSegment = roleFromNaturalSegment(segment, defaultRoleRaw);
+        addNaturalRosterRow(dateStr, importParseTime(weekItemMatch[2]), importParseTime(weekItemMatch[3]), weekItemMatch[4] || '', roleForSegment);
+        handledSegment = true;
+      }
+      if (handledSegment) continue;
+    }
+
+    const datedShiftMatch = line.match(/^(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)?\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+\d+\s*x)?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*[-–]\s*(.*))?$/i);
+    if (datedShiftMatch) {
+      currentShiftDate = naturalDateToIso(datedShiftMatch[1], datedShiftMatch[2], year);
+      addNaturalRosterRow(currentShiftDate, importParseTime(datedShiftMatch[3]), importParseTime(datedShiftMatch[4]), datedShiftMatch[5] || '');
+      continue;
+    }
+
+    const dateMatch = line.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*[-–]\s*[A-Za-z]+)?/i);
+    if (dateMatch) {
+      currentShiftDate = naturalDateToIso(dateMatch[1], dateMatch[2], year);
+      continue;
+    }
+
+    const shiftMatch = line.match(/^(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*[-–]\s*(.*))?$/i);
+    if (!shiftMatch || !currentShiftDate) continue;
+
+    const startRaw = importParseTime(shiftMatch[1]);
+    const endRaw = importParseTime(shiftMatch[2]);
+    if (!startRaw || !endRaw) continue;
+
+    addNaturalRosterRow(currentShiftDate, startRaw, endRaw, shiftMatch[3] || '');
   }
   return parsed;
 }
