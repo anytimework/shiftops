@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: Import hours safety fix v5 — quarter-hour payroll and SR absorbed normalization -->
+<!-- Build patch: v7 — editable import roles and chef-tag role detection -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4155,9 +4155,9 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       : null;
     const outletMatch = outletExact || outletAutoMatch || null;
 
-    // Auto-detect role from outlet name suffix before it was cleaned
+    // Auto-detect role from outlet name suffix/tags before it was cleaned
     const outletFull = (cols[9] || '').trim();
-    const roleRaw = importDetectRole(outletFull);
+    const roleRaw = importDetectRole([outletFull, cols[8] || ''].join(' '), comment);
 
     // Base rate = col[17] (what client is billed / default worker payout)
     // If col[17] is missing, fall back to rate rules
@@ -4311,12 +4311,14 @@ function timeToMins(timeStr) {
   return (h || 0) * 60 + (m || 0);
 }
 
-function importDetectRole(outletFullName) {
-  const n = outletFullName.toLowerCase();
+function importDetectRole(outletFullName, commentText = '') {
+  const n = String(outletFullName || '').toLowerCase();
+  const c = String(commentText || '').toLowerCase();
+  if (/kitchen\s+assistant/.test(c)) return 'Kitchen Assistant';
   if (/chef|cdp|chef de partie/.test(n)) return 'Chef De Partie';
   if (/barista/.test(n)) return 'Barista';
-  if (/dishwasher/.test(n)) return 'Dishwasher / Kitchen Assistant';
-  if (/kitchen/.test(n)) return 'Dishwasher / Kitchen Assistant';
+  if (/dishwasher/.test(n)) return 'Dishwasher';
+  if (/kitchen/.test(n)) return 'Kitchen Assistant';
   if (/cashier|runner/.test(n)) return 'F&B Service Crew';
   return 'F&B Service Crew';
 }
@@ -4638,6 +4640,13 @@ function renderImportPreview() {
       outletCell = `<td>${escapeHtml(r.outlet)}</td>`;
     }
 
+    const roleCell = `<td>
+      <select style="min-width:135px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;"
+        onchange="onImportRoleChange(${idx}, this.value)">
+        ${importRoleOptions(r.role)}
+      </select>
+    </td>`;
+
     // ── Rate cell (editable) — shows SR badge if special rate detected ──
     const rateCell = r._specialRate && r._specialRate > r.rate
       ? `<td>
@@ -4693,7 +4702,7 @@ function renderImportPreview() {
       <td style="font-family:var(--mono);font-size:12px;">${r.shift_date}</td>
       ${workerCell}
       ${outletCell}
-      <td style="font-size:12px;">${escapeHtml(r.role)}</td>
+      ${roleCell}
       <td style="font-family:var(--mono);font-size:12px;">${r.scheduled_start}</td>
       <td style="font-family:var(--mono);font-size:12px;">${r.scheduled_end}</td>
       ${rateCell}
@@ -4718,11 +4727,22 @@ function renderImportPreview() {
       <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()">✓ Confirm &amp; Save ${activeCount} shift${activeCount !== 1 ? 's' : ''}</button>
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
       ${unmappedNote}
-      <span style="font-size:12px;color:var(--text3);">Rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
+      <span style="font-size:12px;color:var(--text3);">Role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>`;
 }
 
 // Search filter helpers for import mapping dropdowns
+function importRoleOptions(selectedRole) {
+  const selected = normaliseRole(selectedRole) || 'F&B Service Crew';
+  const roles = JOB_TYPES.includes(selected) ? JOB_TYPES : [selected, ...JOB_TYPES];
+  return roles.map(role => `<option value="${escapeAttr(role)}" ${role === selected ? 'selected' : ''}>${escapeHtml(role)}</option>`).join('');
+}
+
+function onImportRoleChange(idx, value) {
+  if (!importRows[idx]) return;
+  importRows[idx].role = normaliseRole(value) || value || 'F&B Service Crew';
+}
+
 function importFilterWorkers(query, listId) {
   const el = document.getElementById(listId);
   if (!el) return;
