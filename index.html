@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v19 — past imports clocked-out, editable reconciliation and flexible imports -->
+<!-- Build patch: v20 — late clock-in payroll fix, past imports clocked-out and flexible imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1501,16 +1501,17 @@ function calcShiftHours(s) {
     const n = Number(value);
     if (isFinite(n) && n > 0) hourCandidates.push(n);
   };
-  addHourCandidate(calcHours(payrollStartTime(s), co, breakMins));
+  const countedStart = payrollStartTime(s);
+  const actualHours = calcHours(countedStart, co, breakMins);
+  addHourCandidate(actualHours);
 
   // Import safety fix v2:
   // Imported Google Sheet rows sometimes save/display correctly as 12:00–23:00,
   // but the payroll hour calculation can still fall back to a wrong short duration
-  // on older imported rows. For completed imports, the scheduled start/end are the
-  // original sheet In/Out times, so use the scheduled duration whenever it is longer
-  // than the calculated actual duration. This fixes cases like Harshaah 12:00–23:00
-  // with 1h break, which must be 10h, not 1h.
-  if (schedStart && schedEnd && ci && co) {
+  // on older imported rows. Only allow the scheduled-duration fallback when the
+  // payable start is still the scheduled start; a late clock-in past grace must
+  // count from the rounded actual time instead.
+  if (schedStart && schedEnd && ci && co && (actualHours === null || countedStart === schedStart)) {
     addHourCandidate(calcHours(schedStart, schedEnd, breakMins));
   }
 
