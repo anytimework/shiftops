@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v17 — replacement-rate SR imports, Five Guys aliases and flexible imports -->
+<!-- Build patch: v18 — editable reconciled import workers/clients, SR imports and flexible imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -5067,7 +5067,13 @@ function renderImportPreview() {
         <div class="sub-text" style="color:var(--text3);margin-top:3px;font-size:10px;">Use suggestion or + New before saving</div>
       </td>`;
     } else {
-      workerCell = `<td style="font-weight:500;">${escapeHtml(r.worker_name)}</td>`;
+      workerCell = `<td style="font-weight:500;min-width:160px;">
+        <div style="font-weight:600;font-size:12px;">${escapeHtml(r.worker_name)}</div>
+        <details style="margin-top:4px;">
+          <summary style="font-size:10px;color:var(--text3);cursor:pointer;list-style:none;">✎ Change worker</summary>
+          ${searchDropdown('worker', idx, 'import-w-list-'+idx)}
+        </details>
+      </td>`;
     }
 
     // ── Outlet cell ──
@@ -5097,7 +5103,13 @@ function renderImportPreview() {
         <div class="sub-text" style="color:var(--text3);margin-top:3px;font-size:10px;">Use suggestion or + New before saving</div>
       </td>`;
     } else {
-      outletCell = `<td>${escapeHtml(r.outlet)}</td>`;
+      outletCell = `<td style="min-width:170px;">
+        <div style="font-weight:600;font-size:12px;">${escapeHtml(r.outlet)}</div>
+        <details style="margin-top:4px;">
+          <summary style="font-size:10px;color:var(--text3);cursor:pointer;list-style:none;">✎ Change client</summary>
+          ${searchDropdown('outlet', idx, 'import-o-list-'+idx)}
+        </details>
+      </td>`;
     }
 
     const roleCell = `<td>
@@ -5187,7 +5199,7 @@ function renderImportPreview() {
       <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()">✓ Confirm &amp; Save ${activeCount} shift${activeCount !== 1 ? 's' : ''}</button>
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
       ${unmappedNote}
-      <span style="font-size:12px;color:var(--text3);">Role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
+      <span style="font-size:12px;color:var(--text3);">Worker, client, role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>`;
 }
 
