@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: Import hours safety fix v2 — scheduled duration overrides wrong short calculated hours for imported completed rows -->
+<!-- Build patch: Import hours safety fix v4 — robust imported working-hours fallback for special-rate upload rows -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1318,7 +1318,12 @@ function calcHours(ci, co, breakMins = 0) {
   const raw = rawDurationHoursQuantized(ci, co);
   if (raw === null) return null;
   const worked = Math.max(0, raw - ((parseInt(breakMins, 10) || 0) / 60));
-  return worked.toFixed(2).replace(/\.00$/, '').replace(/0$/, '');
+  return formatHourValue(worked);
+}
+function formatHourValue(hours) {
+  const n = Number(hours);
+  if (!isFinite(n)) return null;
+  return n.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
 }
 function minsToTime(mins) {
   mins = ((parseInt(mins, 10) || 0) + 1440) % 1440;
@@ -1345,7 +1350,12 @@ function calcShiftHours(s) {
   const schedEnd = s.scheduled_end?.slice(0,5);
 
   // Main payroll calculation: actual clock-in/out, with 5-min grace and 15-min rounding.
-  let actualHours = calcHours(payrollStartTime(s), co, breakMins);
+  const hourCandidates = [];
+  const addHourCandidate = (value) => {
+    const n = Number(value);
+    if (isFinite(n) && n > 0) hourCandidates.push(n);
+  };
+  addHourCandidate(calcHours(payrollStartTime(s), co, breakMins));
 
   // Import safety fix v2:
   // Imported Google Sheet rows sometimes save/display correctly as 12:00–23:00,
@@ -1355,13 +1365,26 @@ function calcShiftHours(s) {
   // than the calculated actual duration. This fixes cases like Harshaah 12:00–23:00
   // with 1h break, which must be 10h, not 1h.
   if (schedStart && schedEnd && ci && co) {
-    const scheduledHours = calcHours(schedStart, schedEnd, breakMins);
-    if (scheduledHours !== null && (actualHours === null || Number(actualHours) < Number(scheduledHours))) {
-      actualHours = scheduledHours;
+    addHourCandidate(calcHours(schedStart, schedEnd, breakMins));
+  }
+
+  // Extra import fallbacks for special-rate rows.
+  // Some uploaded rows keep a short "hours" value while schedule/clock times and
+  // SR absorbed prove the worker should be paid for the full shift. Take the
+  // longest defensible value so Harshaah-style 12:00–23:00 rows with a 1h break
+  // pay 10h, not 1h.
+  const importedSrHours = parseFloat(s.sr_hours || 0);
+  const hasOwnMemberSpecialRate = !s.sr_worker && parseFloat(s.sr_rate || 0) > parseFloat(s.rate || 0);
+  if (hasOwnMemberSpecialRate) {
+    addHourCandidate(importedSrHours);
+    const srDelta = parseFloat(s.sr_rate || 0) - parseFloat(s.rate || 0);
+    const srAbsorbed = parseFloat(s.sr_absorbed || 0);
+    if (srDelta > 0 && srAbsorbed > 0) {
+      addHourCandidate(srAbsorbed / srDelta);
     }
   }
 
-  return actualHours;
+  return hourCandidates.length ? formatHourValue(Math.max(...hourCandidates)) : null;
 }
 function payrollStartNote(s) {
   const actual = s?.clock_in?.slice(0,5);
@@ -1520,7 +1543,7 @@ function simplePayrollText(s) {
   const country = normaliseCountry(s?.country || outletCountry(s.outlet));
   const rate = Number(s.rate || 0).toFixed(0);
   if (country === 'Malaysia') return `${cleanHourText(hours)} work on ${malaysiaSafeDate(s.shift_date)} at RM${rate} per hr`;
-  return `${Number(hours).toFixed(Number(hours) % 1 === 0 ? 0 : 2).replace(/0$/, '')}hrs work on ${formatShortDate(s.shift_date)} at SG${rate}/hr`;
+  return `${formatHourValue(hours)}hrs work on ${formatShortDate(s.shift_date)} at SG${rate}/hr`;
 }
 function payoutForShift(s) {
   const hours = parseFloat(calcShiftHours(s) || 0);
@@ -3783,7 +3806,7 @@ function renderReport(from, to, outlet) {
           <td>${formatDisplayDate(s.shift_date)}</td>
           <td>${s.worker_name}</td>
           <td>${s.outlet}</td>
-          <td style="font-family:var(--mono);">${hours.toFixed(2).replace(/\.00$/, '').replace(/0$/, '')}</td>
+          <td style="font-family:var(--mono);">${formatHourValue(hours)}</td>
           <td style="font-family:var(--mono);">${parseFloat(s.rate || 0).toFixed(0)}</td>
           <td style="font-family:var(--mono);">${moneyForShift(clientBilling, s)}</td>
           ${isClientTab ? '' : `<td style="font-family:var(--mono);font-weight:600;">${moneyForShift(workerPay, s)}</td>`}
@@ -4143,15 +4166,16 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     let srAbsorbed = null;
 
     const hrsCol = parseFloat((cols[5] || '').trim()) || null;
-    const computedHrs = hrsCol !== null ? hrsCol :
-      (() => {
-        const startM = timeToMins(clockIn);
-        const endM   = timeToMins(clockOut);
-        if (startM === null || endM === null) return null;
-        let adjustedEndM = endM;
-        if (adjustedEndM <= startM) adjustedEndM += 1440;
-        return Math.max(0, (adjustedEndM - startM) / 60 - breakMins / 60);
-      })();
+    const timeDerivedHrs = (() => {
+      const startM = timeToMins(clockIn);
+      const endM   = timeToMins(clockOut);
+      if (startM === null || endM === null) return null;
+      let adjustedEndM = endM;
+      if (adjustedEndM <= startM) adjustedEndM += 1440;
+      return Math.max(0, (adjustedEndM - startM) / 60 - breakMins / 60);
+    })();
+    const hourImportCandidates = [hrsCol, timeDerivedHrs].filter(h => isFinite(Number(h)) && Number(h) > 0);
+    const computedHrs = hourImportCandidates.length ? Math.max(...hourImportCandidates) : null;
 
     if (isThirdParty) {
       // 3rd party: flat fee absorbed, worker IS the external worker.
