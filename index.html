@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v20 — late clock-in payroll fix, past imports clocked-out and flexible imports -->
+<!-- Build patch: v21 — penalty waivers respected, late clock-in payroll fix and flexible imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1707,8 +1707,7 @@ function srAbsorbedForShift(s) {
 function shiftPenaltyAmount(s) {
   if (s.cancelled) return s.mc_url ? 0 : parseFloat(s.cancellation_penalty ?? 15) || 0;
   // For active shifts: sum late-arrival penalty + any prior-cancellation deduction
-  const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
-  const latePen    = parseFloat(l.penalty || 0);
+  const latePen    = effectiveLatePenalty(s);
   const cancelPen  = parseFloat(s.cancellation_penalty || 0); // prior cancel deduction on active shift
   return latePen + cancelPen;
 }
@@ -1906,6 +1905,19 @@ function calcLatePenalty(sched, clockIn) {
   if (diff <= 5) return { mins: Math.max(0,diff), penalty:0, status: diff <= 0 ? 'on-time' : 'grace' };
   const blocks = Math.ceil((diff - 5) / 15);
   return { mins: diff, penalty: Math.min(blocks * 2.5, 10), status: 'late' };
+}
+
+function latePenaltyOverrideValue(s) {
+  if (!s || s.late_penalty === null || s.late_penalty === undefined || s.late_penalty === '') return null;
+  const n = parseFloat(s.late_penalty);
+  return isFinite(n) ? Math.max(0, n) : null;
+}
+
+function effectiveLatePenalty(s) {
+  if (!s || s.cancelled) return 0;
+  const override = latePenaltyOverrideValue(s);
+  if (override !== null) return override;
+  return parseFloat(calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).penalty || 0);
 }
 
 function getRecentCancellations(workerName) {
@@ -2257,8 +2269,7 @@ function penaltyDisplay(s) {
     return `<span class="penalty-red">-${moneyForShift(pen, s)}</span>
       ${s.mc_url ? '<div class="sub-text" style="color:var(--amber);">MC waived</div>' : ''}`;
   }
-  const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
-  const latePen   = parseFloat(l.penalty || 0);
+  const latePen   = effectiveLatePenalty(s);
   const cancelPen = parseFloat(s.cancellation_penalty || 0);
   const total     = latePen + cancelPen;
   if (total <= 0) return '<span class="penalty-none">—</span>';
@@ -2744,7 +2755,7 @@ function renderMetrics() {
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = cancellationCountForLoadedShifts();
   const srAbsorbed = allShifts.reduce((a,s) => a + srAbsorbedForShift(s), 0);
-  const latePenalties = allShifts.reduce((a,s) => { const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)); return a + (s.cancelled ? 0 : l.penalty); }, 0);
+  const latePenalties = allShifts.reduce((a,s) => a + effectiveLatePenalty(s), 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   // Also count prior-cancellation deductions on active (non-cancelled) imported shifts
   const priorCancelPenalties = allShifts.filter(s => !s.cancelled).reduce((a,s) => a + parseFloat(s.cancellation_penalty || 0), 0);
@@ -3846,9 +3857,9 @@ async function generateCancellationReport(from, to, outlet, cancelType) {
   if (cancelType === 'penalty')      rows = rows.filter(s => s.cancelled && !s.mc_url);
   else if (cancelType === 'mc')      rows = rows.filter(s => s.cancelled && s.mc_url);
   else if (cancelType === 'outlet')  rows = rows.filter(s => s.cancelled); // outlet-cancelled shifts (no worker)
-  else if (cancelType === 'late')    rows = rows.filter(s => !s.cancelled && parseFloat(s.late_penalty||0) > 0);
+  else if (cancelType === 'late')    rows = rows.filter(s => !s.cancelled && effectiveLatePenalty(s) > 0);
   else if (cancelType === 'special_rate') rows = rows.filter(s => !s.cancelled && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate||0));
-  else rows = rows.filter(s => s.cancelled || parseFloat(s.late_penalty||0) > 0 || parseFloat(s.cancellation_penalty||0) > 0);
+  else rows = rows.filter(s => s.cancelled || effectiveLatePenalty(s) > 0 || parseFloat(s.cancellation_penalty||0) > 0);
 
   const body = document.getElementById('report-body');
   const count = document.getElementById('report-count');
@@ -3859,8 +3870,8 @@ async function generateCancellationReport(from, to, outlet, cancelType) {
 
   // Metrics
   const totalCancel = rows.filter(s => s.cancelled).length;
-  const totalLate   = rows.filter(s => !s.cancelled && parseFloat(s.late_penalty||0) > 0).length;
-  const totalPens   = rows.reduce((a,s) => a + parseFloat(s.late_penalty||0) + parseFloat(s.cancellation_penalty||0), 0);
+  const totalLate   = rows.filter(s => !s.cancelled && effectiveLatePenalty(s) > 0).length;
+  const totalPens   = rows.reduce((a,s) => a + effectiveLatePenalty(s) + parseFloat(s.cancellation_penalty||0), 0);
   document.getElementById('report-metrics').innerHTML = `
     <div class="metric-card"><div class="metric-label">Records</div><div class="metric-val blue">${rows.length}</div></div>
     <div class="metric-card"><div class="metric-label">Cancelled shifts</div><div class="metric-val red">${totalCancel}</div></div>
@@ -3878,7 +3889,7 @@ async function generateCancellationReport(from, to, outlet, cancelType) {
       <th>Type</th><th>Penalty</th><th>MC</th><th>Notes</th>
     </tr></thead>
     <tbody>${rows.map(s => {
-      const latePen   = parseFloat(s.late_penalty || 0);
+      const latePen   = effectiveLatePenalty(s);
       const cancelPen = parseFloat(s.cancellation_penalty || 0);
       const srRate    = s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate||0) ? parseFloat(s.sr_rate) : 0;
       const typeTag = s.cancelled
