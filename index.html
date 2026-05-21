@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v14 — broader natural-language imports, suggestions for new workers/clients and mobile layout -->
+<!-- Build patch: v15 — no-date ShiftOps rows, special-rate import fixes and flexible natural imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4141,6 +4141,12 @@ function detectImportFormat(lines) {
   const maybeTime3 = importParseTime((firstLine[3] || '').trim());
   if (maybeDate0 && maybeTime1 && maybeTime3) return 'shiftops_no_header';
 
+  // ShiftOps rows copied without the first Date column:
+  // col[0] = clock-in, col[1] = "-", col[2] = clock-out, date appears later in payroll text.
+  const maybeTime0 = importParseTime((firstLine[0] || '').trim());
+  const maybeTime2 = importParseTime((firstLine[2] || '').trim());
+  if (maybeTime0 && maybeTime2 && firstLine.length >= 9) return 'shiftops_no_header';
+
   // Header-based flexible format
   const headerNorm = firstLine.map(h => String(h).trim().toLowerCase());
   if (headerNorm.some(h => ['date','shift_date','shift date','worker','worker_name'].includes(h))) return 'header';
@@ -4159,6 +4165,38 @@ function detectImportFormat(lines) {
 //      5=hrs   6=FALSE     7=worker  8=tags  9=outlet
 //      17=rate  21=comments  22=deductions(numeric)
 
+function importYearForFallback() {
+  if (typeof currentDate !== 'undefined' && currentDate instanceof Date && !isNaN(currentDate)) return currentDate.getFullYear();
+  return new Date().getFullYear();
+}
+
+function extractShiftOpsInlineDate(rowText) {
+  const text = String(rowText || '');
+  const year = importYearForFallback();
+  const onMatch = text.match(/\bon\s+(\d{1,2})\s*\/\s*(\d{1,2})\b/i);
+  if (onMatch) return importParseDate(`${onMatch[1]}/${onMatch[2]}/${year}`);
+  const beforeOnMatch = text.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})\s+on\b/i);
+  if (beforeOnMatch) return importParseDate(`${beforeOnMatch[1]}/${beforeOnMatch[2]}/${year}`);
+  return null;
+}
+
+function extractShiftOpsBaseRate(cols, fallbackIndex) {
+  const indexed = importParseRate(cols[fallbackIndex]);
+  if (indexed) return indexed;
+  const text = cols.join(' ');
+  const sgMatch = text.match(/hrs\s+work\s+at\s+SG\s*\$?\s*(\d+\.?\d*)\s*\/?\s*hr/i);
+  if (sgMatch) return parseFloat(sgMatch[1]);
+  return 0;
+}
+
+function extractSpecialRate(text) {
+  const t = String(text || '');
+  const match = /special\s+rate\s*\$?(\d+\.?\d*)/i.exec(t)
+    || /\$?(\d+\.?\d*)\s*\/\s*hr\s+special\s+rate/i.exec(t)
+    || /special\s+\$?(\d+\.?\d*)\s*\/\s*hr/i.exec(t);
+  return match ? parseFloat(match[1]) : null;
+}
+
 function parseShiftOpsFormat(lines, defaultCountry, importMode) {
   const parsed = [];
   for (const line of lines) {
@@ -4168,52 +4206,55 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     // Must have at least 10 cols
     if (cols.length < 10) continue;
 
-    const dateStr = importParseDate(cols[0]);
+    const noDateColumn = !importParseDate(cols[0]) && importParseTime(cols[0]) && importParseTime(cols[2]);
+    const dateStr = noDateColumn ? extractShiftOpsInlineDate(cols.join(' ')) : importParseDate(cols[0]);
     if (!dateStr) continue; // skip header and footer rows
 
-    const clockIn  = importParseTime(cols[1]);
-    const clockOut = importParseTime(cols[3]);
+    const idx = noDateColumn
+      ? { clockIn:0, clockOut:2, breakHrs:3, hrs:4, flag:5, worker:6, tags:7, outlet:8, rate:17 }
+      : { clockIn:1, clockOut:3, breakHrs:4, hrs:5, flag:6, worker:7, tags:8, outlet:9, rate:17 };
+
+    const clockIn  = importParseTime(cols[idx.clockIn]);
+    const clockOut = importParseTime(cols[idx.clockOut]);
 
     // Skip rows where col[1] is a header word like "In"
     if (!clockIn) continue;
 
     // Break: col[4] is in HOURS when present. Blank imports use the same default:
     // 0 min for shifts up to 6h, 1h only when above 6h.
-    const breakRaw = (cols[4] || '').trim();
+    const breakRaw = (cols[idx.breakHrs] || '').trim();
     const breakMins = breakRaw
       ? Math.round((parseFloat(breakRaw) || 0) * 60)
       : (defaultBreakMinsForRange(clockIn, clockOut) || 0);
 
     // col[6]: FALSE = completed/clocked-out row, TRUE = scheduled/future booking
     // Neither should be skipped — TRUE just means no clock times
-    const flag = (cols[6] || '').trim().toUpperCase();
+    const flag = (cols[idx.flag] || '').trim().toUpperCase();
     const isScheduledRow = (flag === 'TRUE');
 
     // Worker name at col[7], tags at col[8]
-    const workerRaw = cleanWorkerName(cols[7] || '');
+    const workerRaw = cleanWorkerName(cols[idx.worker] || '');
     const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
     if (!workerRaw && !isAvailableImportSlot) continue;
 
     // Outlet at col[9] — strip role suffix
-    const outletRaw = cleanOutletName(cols[9] || '');
+    const outletRaw = cleanOutletName(cols[idx.outlet] || '');
     if (!outletRaw) continue;
 
-    // Rate at col[17] (integer like "15" or "18")
-    const rate = importParseRate(cols[17]) || 0;
+    // Rate at col[17] when the date column exists; no-date rows may need text fallback.
+    const rate = extractShiftOpsBaseRate(cols, idx.rate);
 
-    // Comments at col[21]: detect late & cancellation penalties, waivers, special rates
-    const comment = (cols[21] || '').trim();
+    // Comments at col[21], or all trailing text for no-date rows: detect late/cancel/SR.
+    const comment = noDateColumn ? cols.slice(18).join(' ').trim() : (cols[21] || '').trim();
     const WAIVER_RE = /waiv|waived|not deduct|no deduct|will not deduct|no penalt|penalt.*waiv|exempt|forgiv/i;
     const LATE_RE   = /late\s*\d+\s*min|late\s*\d+m|arrived.*late|clocked.*late|\d+\s*min.*late/i;
     // Match "deduct ... cancel", "cancel ... penalt", "$15 cancel", "deduct $N for ... cancel"
     const CANCEL_RE = /cancel.*penalt|penalt.*cancel|deduct.*cancel|cancel.*deduct|\$\d+.*cancel|deduct.{0,30}cancel/i;
-    const SPECIAL_RATE_RE = /special\s+rate\s*\$?(\d+\.?\d*)/i;
 
     const isWaived = WAIVER_RE.test(comment);
 
     // Special rate override from comment (e.g. "Special rate $17/hr")
-    const specialRateMatch = SPECIAL_RATE_RE.exec(comment);
-    const specialRate = specialRateMatch ? parseFloat(specialRateMatch[1]) : null;
+    const specialRate = extractSpecialRate(comment);
 
     // Deductions at col[22] — numeric penalty (e.g. "15")
     const dedRaw = (cols[22] || '').trim();
@@ -4306,8 +4347,8 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     const outletMatch = outletExact || outletAutoMatch || null;
 
     // Auto-detect role from outlet name suffix/tags before it was cleaned
-    const outletFull = (cols[9] || '').trim();
-    const roleRaw = importDetectRole([outletFull, cols[8] || ''].join(' '), comment);
+    const outletFull = (cols[idx.outlet] || '').trim();
+    const roleRaw = importDetectRole([outletFull, cols[idx.tags] || ''].join(' '), comment);
 
     // Base rate = col[17] (what client is billed / default worker payout)
     // If col[17] is missing, fall back to rate rules
@@ -4341,7 +4382,7 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     let srHours   = null;
     let srAbsorbed = null;
 
-    const hrsCol = parseFloat((cols[5] || '').trim()) || null;
+    const hrsCol = parseFloat((cols[idx.hrs] || '').trim()) || null;
     const timeDerivedHrs = (() => {
       const startM = timeToMins(clockIn);
       const endM   = timeToMins(clockOut);
