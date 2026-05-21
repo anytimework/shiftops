@@ -1968,7 +1968,11 @@ function renderTable() {
           const replacementAction = (isAvailable && !s.sr_worker)
             ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`
             : '';
+          const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
+          const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
           actions = `<div class="action-stack">
+            ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
+            ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
             ${replacementAction}
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
@@ -2111,37 +2115,150 @@ function renderTimeCell(s, field) {
   return `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${val || '—'}</span>`;
 }
 
+function quickClockIn(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  // Pre-fill with current time as a convenience
+  const now = new Date();
+  const nowStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  // Replace the clock-in cell with an inline time input + confirm button
+  const cell = document.getElementById(`ci-disp-${id}`);
+  if (!cell) return;
+  cell.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <input type="time" id="qci-${id}" value="${nowStr}"
+        style="font-family:var(--mono);font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--teal);border-radius:4px;width:90px;">
+      <div style="display:flex;gap:4px;">
+        <button class="btn btn-primary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="confirmClockIn('${id}')">✓</button>
+        <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelClockInInput('${id}')">✕</button>
+      </div>
+    </div>`;
+  document.getElementById(`qci-${id}`)?.focus();
+}
+
+async function confirmClockIn(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const ci = document.getElementById(`qci-${id}`)?.value;
+  if (!ci) { toast('Please enter a clock-in time', 'error'); return; }
+  const lp = calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty;
+  const { error } = await supabaseClient.from('shifts').update({
+    clock_in: ci, late_penalty: lp, updated_at: new Date().toISOString()
+  }).eq('id', id);
+  if (error) { toast('Clock-in failed: ' + error.message, 'error'); return; }
+  await logActivity('Clock in', `${s.worker_name} at ${s.outlet} clocked in at ${ci}`, 'shift', id);
+  toast(`${s.worker_name} clocked in at ${ci}`);
+  await loadShifts();
+}
+
+function cancelClockInInput(id) {
+  // Restore the original cell display without saving
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const cell = document.getElementById(`ci-disp-${id}`);
+  if (cell) cell.innerHTML = renderTimeCell(s, 'clock_in');
+}
+
+function quickClockOut(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const now = new Date();
+  const nowStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const cell = document.getElementById(`co-disp-${id}`);
+  if (!cell) return;
+  cell.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <input type="time" id="qco-${id}" value="${nowStr}"
+        style="font-family:var(--mono);font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--teal);border-radius:4px;width:90px;">
+      <div style="display:flex;gap:4px;">
+        <button class="btn btn-primary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="confirmClockOut('${id}')">✓</button>
+        <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelClockOutInput('${id}')">✕</button>
+      </div>
+    </div>`;
+  document.getElementById(`qco-${id}`)?.focus();
+}
+
+async function confirmClockOut(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const co = document.getElementById(`qco-${id}`)?.value;
+  if (!co) { toast('Please enter a clock-out time', 'error'); return; }
+  const { error } = await supabaseClient.from('shifts').update({
+    clock_out: co, updated_at: new Date().toISOString()
+  }).eq('id', id);
+  if (error) { toast('Clock-out failed: ' + error.message, 'error'); return; }
+  await logActivity('Clock out', `${s.worker_name} at ${s.outlet} clocked out at ${co}`, 'shift', id);
+  toast(`${s.worker_name} clocked out at ${co}`);
+  await loadShifts();
+}
+
+function cancelClockOutInput(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const cell = document.getElementById(`co-disp-${id}`);
+  if (cell) cell.innerHTML = renderTimeCell(s, 'clock_out');
+}
+
 function openEditRow(id) {
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
-  document.getElementById(`ci-disp-${id}`).innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
-  document.getElementById(`co-disp-${id}`).innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
+  // Always replace clock-in/out cells cleanly (overrides any quick-clock inputs)
+  const ciCell = document.getElementById(`ci-disp-${id}`);
+  const coCell = document.getElementById(`co-disp-${id}`);
+  const brCell = document.getElementById(`break-disp-${id}`);
+  if (!ciCell || !coCell || !brCell) return;
+  ciCell.innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
+  coCell.innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
   const tc = parseFloat(s.transport_claim || 0);
-  document.getElementById(`break-disp-${id}`).innerHTML =
+  brCell.innerHTML =
     breakSelectHtml(`edit-break-${id}`, breakMinsForShift(s)) +
     `<div style="margin-top:6px;display:flex;align-items:center;gap:6px;">
        <span style="font-size:11px;color:var(--text2);">🚕 Transport $</span>
        <input type="number" min="0" step="0.50" id="edit-tc-${id}" value="${tc > 0 ? tc.toFixed(2) : ''}" placeholder="0.00"
          style="width:70px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
      </div>` +
-    `<button class="btn btn-primary btn-sm" style="margin-top:6px;" onclick="saveRow('${id}')">Save</button>`;
+    `<div style="display:flex;gap:6px;margin-top:6px;">
+       <button class="btn btn-primary btn-sm" onclick="saveRow('${id}')">Save</button>
+       <button class="btn btn-ghost btn-sm" onclick="cancelEditRow('${id}')">Cancel</button>
+     </div>`;
+  // Focus the clock-in field for convenience
+  document.getElementById(`edit-ci-${id}`)?.focus();
+}
+
+function cancelEditRow(id) {
+  // Restore all three cells to display mode without saving
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const ciCell = document.getElementById(`ci-disp-${id}`);
+  const coCell = document.getElementById(`co-disp-${id}`);
+  const brCell = document.getElementById(`break-disp-${id}`);
+  if (ciCell) ciCell.innerHTML = renderTimeCell(s, 'clock_in');
+  if (coCell) coCell.innerHTML = renderTimeCell(s, 'clock_out');
+  if (brCell) brCell.innerHTML = `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</span>`;
 }
 
 async function saveRow(id) {
-  const ci = document.getElementById('edit-ci-' + id)?.value;
-  const co = document.getElementById('edit-co-' + id)?.value;
-  const br = parseInt(document.getElementById('edit-break-' + id)?.value || 0, 10);
-  const tcRaw = document.getElementById('edit-tc-' + id)?.value;
-  const tc = tcRaw ? parseFloat(tcRaw) || 0 : 0;
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  // Read values — fall back to existing DB value if the input doesn't exist
+  const ciInput = document.getElementById('edit-ci-' + id);
+  const coInput = document.getElementById('edit-co-' + id);
+  const brInput = document.getElementById('edit-break-' + id);
+  const tcInput = document.getElementById('edit-tc-' + id);
+  const ci = ciInput ? (ciInput.value || null) : (s.clock_in?.slice(0,5) || null);
+  const co = coInput ? (coInput.value || null) : (s.clock_out?.slice(0,5) || null);
+  const br = brInput ? parseInt(brInput.value || 0, 10) : breakMinsForShift(s);
+  const tc = tcInput ? (parseFloat(tcInput.value) || 0) : parseFloat(s.transport_claim || 0);
+  const lp = ci ? calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty : 0;
   const { error } = await supabaseClient.from('shifts').update({
-    clock_in: ci||null, clock_out: co||null, break_mins: br,
+    clock_in: ci, clock_out: co, break_mins: br,
+    late_penalty: lp,
     transport_claim: tc || null,
     updated_at: new Date().toISOString()
   }).eq('id', id);
-  if (error) { toast('Failed to save', 'error'); return; }
-  const s = allShifts.find(x => x.id === id);
-  const tcNote = tc > 0 ? `, transport claim $${tc.toFixed(2)}` : '';
-  await logActivity('Attendance updated', `${s?.worker_name || 'Available'} at ${s?.outlet || '—'} clock-in ${ci || '—'}, clock-out ${co || '—'}, break ${br} mins${tcNote}`, 'shift', id);
+  if (error) { toast('Failed to save: ' + error.message, 'error'); return; }
+  const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
+  await logActivity('Attendance updated', `${s.worker_name || 'Available'} at ${s.outlet || '—'} — in ${ci||'—'}, out ${co||'—'}, break ${br}m${tcNote}`, 'shift', id);
   toast('Saved!');
   await loadShifts();
 }
