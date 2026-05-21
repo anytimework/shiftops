@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v8 — mobile-friendly layout, editable import roles and chef-tag role detection -->
+<!-- Build patch: v10 — available-slot imports, flexible imports, mobile layout and editable roles -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2958,7 +2958,7 @@ function openAddModal() {
   document.getElementById('f-name').value = '';
   document.getElementById('f-clockin').value = '';
   document.getElementById('f-sched-end').value = '17:00';
-  document.getElementById('f-break').value = '60';
+  autoBreakForAddShift();
   document.getElementById('f-third-party').checked = false;
   document.getElementById('f-third-party-name').value = '';
   document.getElementById('f-third-party-fee').value = '10.00';
@@ -2991,8 +2991,8 @@ function autoBreakForAddShift() {
   const end = document.getElementById('f-sched-end')?.value;
   const sel = document.getElementById('f-break');
   if (!start || !end || !sel) return;
-  const dur = rawDurationHours(start, end);
-  if (dur !== null && dur >= 6 && Number(sel.value) === 0) sel.value = '60';
+  const suggested = defaultBreakMinsForRange(start, end);
+  if (suggested !== null) sel.value = String(suggested);
 }
 
 function previewPenalty() {
@@ -4062,6 +4062,14 @@ function importParseDate(raw) {
 function importParseTime(raw) {
   if (!raw) return null;
   raw = String(raw).trim();
+  const compact = raw.match(/^(\d{1,2})(?:\.(\d{2}))?\s*(am|pm)$/i);
+  if (compact) {
+    let h = parseInt(compact[1]), m = parseInt(compact[2] || '0');
+    const suf = compact[3].toLowerCase();
+    if (suf === 'pm' && h < 12) h += 12;
+    if (suf === 'am' && h === 12) h = 0;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
   const hm = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*(am|pm))?$/i);
   if (hm) {
     let h = parseInt(hm[1]), m = parseInt(hm[2]);
@@ -4137,6 +4145,11 @@ function detectImportFormat(lines) {
   const headerNorm = firstLine.map(h => String(h).trim().toLowerCase());
   if (headerNorm.some(h => ['date','shift_date','shift date','worker','worker_name'].includes(h))) return 'header';
 
+  const joined = nonEmpty.join('\n');
+  const hasRosterDate = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?\b/i.test(joined);
+  const hasRosterTime = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*[-–]\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*[-–]/i.test(joined);
+  if (hasRosterDate && hasRosterTime) return 'natural_roster';
+
   return 'unknown';
 }
 
@@ -4163,9 +4176,12 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     // Skip rows where col[1] is a header word like "In"
     if (!clockIn) continue;
 
-    // Break: col[4] is in HOURS (e.g. "1" = 60 mins, "0.5" = 30 mins)
-    const breakHrs = parseFloat(cols[4]) || 0;
-    const breakMins = Math.round(breakHrs * 60);
+    // Break: col[4] is in HOURS when present. Blank imports use the same default:
+    // 0 min for shifts up to 6h, 1h only when above 6h.
+    const breakRaw = (cols[4] || '').trim();
+    const breakMins = breakRaw
+      ? Math.round((parseFloat(breakRaw) || 0) * 60)
+      : (defaultBreakMinsForRange(clockIn, clockOut) || 0);
 
     // col[6]: FALSE = completed/clocked-out row, TRUE = scheduled/future booking
     // Neither should be skipped — TRUE just means no clock times
@@ -4174,7 +4190,8 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
 
     // Worker name at col[7], tags at col[8]
     const workerRaw = cleanWorkerName(cols[7] || '');
-    if (!workerRaw) continue;
+    const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
+    if (!workerRaw && !isAvailableImportSlot) continue;
 
     // Outlet at col[9] — strip role suffix
     const outletRaw = cleanOutletName(cols[9] || '');
@@ -4262,10 +4279,10 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     }
 
     // Resolve worker — exact first, then fuzzy
-    const workerExact = allWorkers.find(w =>
+    const workerExact = workerRaw ? allWorkers.find(w =>
       w.name.trim().toLowerCase() === workerRaw.toLowerCase()
-    );
-    const workerFuzzy = !workerExact
+    ) : null;
+    const workerFuzzy = workerRaw && !workerExact
       ? importBestMatch(workerRaw, allWorkers.map(w => w.name))
       : null;
     // Auto-apply if clear single match; otherwise keep as mismatch for user to confirm
@@ -4358,7 +4375,7 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
     }
 
     parsed.push({
-      _workerRaw:         workerRaw,
+      _workerRaw:         workerRaw || 'Available',
       _outletRaw:         outletRaw,
       _workerMatch:       workerMatch?.name || null,
       _outletMatch:       outletMatch?.name || null,
@@ -4371,7 +4388,7 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       _deduction:         deduction,
 
       shift_date:          dateStr,
-      worker_name:         workerMatch?.name || workerRaw,
+      worker_name:         isAvailableImportSlot ? 'Available' : (workerMatch?.name || workerRaw),
       outlet:              outletMatch?.name || outletRaw,
       role:                roleRaw,
       scheduled_start:     clockIn,   // these ARE the scheduled times in this format
@@ -4434,6 +4451,17 @@ function importBestMatch(raw, candidates, threshold = 0.35) {
   // Auto-select only if clearly better than runner-up (gap ≥ 0.25) AND score ≥ 0.65
   const autoSelect = bestScore >= 0.65 && (bestScore - secondScore) >= 0.25;
   return { name: best, score: bestScore, autoSelect };
+}
+
+function defaultBreakMinsForRange(start, end) {
+  const dur = rawDurationHours(start, end);
+  if (dur === null) return null;
+  return dur > 6 ? 60 : 0;
+}
+
+function isTodayOrFutureDate(dateStr) {
+  if (!dateStr) return false;
+  return dateStr >= new Date().toISOString().slice(0,10);
 }
 
 function timeToMins(timeStr) {
@@ -4509,10 +4537,12 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
     const endRaw     = importParseTime(get(cols,'scheduled_end'));
     const rateRaw    = importParseRate(get(cols,'rate'));
     const brkRaw     = get(cols,'break_mins');
-    const breakMins  = brkRaw ? Math.round((parseFloat(brkRaw)||0) * (/^\d+(\.\d+)?$/.test(brkRaw) && parseFloat(brkRaw) < 10 ? 60 : 1)) : 0;
     const clockIn    = importParseTime(get(cols,'clock_in'));
     const clockOut   = importParseTime(get(cols,'clock_out'));
     const countryRaw = get(cols,'country') || defaultCountry;
+    const breakMins  = brkRaw
+      ? Math.round((parseFloat(brkRaw)||0) * (/^\d+(\.\d+)?$/.test(brkRaw) && parseFloat(brkRaw) < 10 ? 60 : 1))
+      : (defaultBreakMinsForRange(startRaw, endRaw) || 0);
 
     let finalClockIn = clockIn, finalClockOut = clockOut;
     const isPast = dateStr < new Date().toISOString().slice(0,10);
@@ -4520,7 +4550,8 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
     else if (importMode === 'scheduled') { finalClockIn=null; finalClockOut=null; }
     else { if (isPast && clockOut) { finalClockIn = clockIn||startRaw; finalClockOut = clockOut; } }
 
-    const workerMatch = allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase());
+    const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
+    const workerMatch = workerRaw ? allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase()) : null;
     const outletMatch = allOutlets.find(o => o.name.trim().toLowerCase() === outletRaw.toLowerCase());
 
     let resolvedRate = rateRaw;
@@ -4531,18 +4562,141 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
     if (!resolvedRate) resolvedRate = 12;
 
     parsed.push({
-      _workerRaw: workerRaw, _outletRaw: outletRaw,
+      _workerRaw: workerRaw || 'Available', _outletRaw: outletRaw,
       _workerMatch: workerMatch?.name||null, _outletMatch: outletMatch?.name||null,
       _hasWorkerMismatch: !!workerRaw && !workerMatch,
       _hasOutletMismatch: !!outletRaw && !outletMatch,
       _deduction: 0,
-      shift_date: dateStr, worker_name: workerMatch?.name||workerRaw||'Available',
+      shift_date: dateStr, worker_name: isAvailableImportSlot ? 'Available' : (workerMatch?.name||workerRaw||'Available'),
       outlet: outletMatch?.name||outletRaw||'', role: normaliseRole(roleRaw),
       scheduled_start: startRaw||'09:00', scheduled_end: endRaw||'17:00',
       rate: resolvedRate, break_mins: breakMins,
       clock_in: finalClockIn, clock_out: finalClockOut,
       country: normaliseCountry(countryRaw),
       cancelled: false, late_penalty: 0, cancellation_penalty: 0,
+    });
+  }
+  return parsed;
+}
+
+// ── FORMAT C: WhatsApp / plain text weekly roster ───────────
+// Example:
+// Hi @Marlon AGM Pasta Bar ... FOH (May 18th to May 24th)
+// May 18 - Monday
+// 6PM-10PM - Jing Heng
+
+function inferNaturalImportOutlet(text) {
+  const lines = String(text || '').split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const intro = lines.find(l => /@\w+/.test(l)) || lines[0] || '';
+  let outlet = intro
+    .replace(/^(hi|hello|dear)\s+/i, '')
+    .replace(/@\S+\s*/i, '')
+    .split(/,|good\s+(?:morning|afternoon|evening)|kindly|please/i)[0]
+    .replace(/\b(updated\s+)?list\b.*$/i, '')
+    .trim();
+  return cleanOutletName(outlet) || 'Unknown outlet';
+}
+
+function inferNaturalImportRole(text) {
+  const t = String(text || '').toLowerCase();
+  if (/kitchen\s+assistant/.test(t)) return 'Kitchen Assistant';
+  if (/\bchef\b|\bcdp\b|chef de partie/.test(t)) return 'Chef De Partie';
+  if (/\bbarista\b/.test(t)) return 'Barista';
+  if (/\bdishwasher\b/.test(t)) return 'Dishwasher';
+  if (/\bkitchen\b|\bboh\b/.test(t)) return 'Kitchen Assistant';
+  return 'F&B Service Crew';
+}
+
+function naturalImportYear(text) {
+  const explicit = String(text || '').match(/\b(20\d{2})\b/);
+  if (explicit) return parseInt(explicit[1], 10);
+  if (typeof currentDate !== 'undefined' && currentDate instanceof Date && !isNaN(currentDate)) return currentDate.getFullYear();
+  return new Date().getFullYear();
+}
+
+function naturalDateToIso(monthName, day, year) {
+  const cleaned = String(day || '').replace(/\D/g, '');
+  if (!cleaned) return null;
+  return importParseDate(`${parseInt(cleaned, 10)} ${monthName} ${year}`);
+}
+
+function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = '') {
+  const text = fullText || lines.join('\n');
+  const outletRaw = inferNaturalImportOutlet(text);
+  const roleRaw = inferNaturalImportRole(text);
+  const year = naturalImportYear(text);
+  const outletExact = allOutlets.find(o => o.name.trim().toLowerCase() === outletRaw.toLowerCase());
+  const outletFuzzy = !outletExact ? importBestMatch(outletRaw, allOutlets.map(o => o.name), 0.25) : null;
+  const outletAutoMatch = outletFuzzy?.autoSelect ? allOutlets.find(o => o.name === outletFuzzy.name) : null;
+  const outletMatch = outletExact || outletAutoMatch || null;
+  const outletName = outletMatch?.name || outletRaw;
+
+  let currentShiftDate = null;
+  const parsed = [];
+  for (const rawLine of lines) {
+    const line = String(rawLine || '').trim().replace(/^,+/, '').trim();
+    if (!line) continue;
+
+    const dateMatch = line.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*[-–]\s*[A-Za-z]+)?/i);
+    if (dateMatch) {
+      currentShiftDate = naturalDateToIso(dateMatch[1], dateMatch[2], year);
+      continue;
+    }
+
+    const shiftMatch = line.match(/^(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(.+)$/i);
+    if (!shiftMatch || !currentShiftDate) continue;
+
+    const startRaw = importParseTime(shiftMatch[1]);
+    const endRaw = importParseTime(shiftMatch[2]);
+    if (!startRaw || !endRaw) continue;
+
+    const workerRaw = cleanWorkerName(shiftMatch[3].replace(/\*.*?\*/g, '').replace(/\bupdated\b/ig, '').trim());
+    if (!workerRaw) continue;
+
+    const workerExact = allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase());
+    const workerFuzzy = !workerExact ? importBestMatch(workerRaw, allWorkers.map(w => w.name)) : null;
+    const workerAutoMatch = workerFuzzy?.autoSelect ? allWorkers.find(w => w.name === workerFuzzy.name) : null;
+    const workerMatch = workerExact || workerAutoMatch || null;
+
+    let resolvedRate = 12;
+    if (outletMatch) {
+      const suggested = getSuggestedRate(outletMatch.name, roleRaw, new Date(currentShiftDate + 'T00:00:00'));
+      resolvedRate = suggested?.rate || resolvedRate;
+    } else {
+      resolvedRate = defaultDailyRates(roleRaw)[dayKeyForDate(new Date(currentShiftDate + 'T00:00:00'))] || 12;
+    }
+
+    const forceCompleted = importMode === 'completed';
+    parsed.push({
+      _workerRaw: workerRaw,
+      _outletRaw: outletRaw,
+      _workerMatch: workerMatch?.name || null,
+      _outletMatch: outletMatch?.name || null,
+      _hasWorkerMismatch: !!workerRaw && !workerMatch,
+      _hasOutletMismatch: !!outletRaw && !outletMatch,
+      _workerAutoMatched: !!workerAutoMatch,
+      _outletAutoMatched: !!outletAutoMatch,
+      _suggestedWorker: workerFuzzy?.name || null,
+      _suggestedOutlet: outletFuzzy?.name || null,
+      _deduction: 0,
+      shift_date: currentShiftDate,
+      worker_name: workerMatch?.name || workerRaw,
+      outlet: outletName,
+      role: roleRaw,
+      scheduled_start: startRaw,
+      scheduled_end: endRaw,
+      rate: resolvedRate,
+      break_mins: defaultBreakMinsForRange(startRaw, endRaw) || 0,
+      clock_in: forceCompleted ? startRaw : null,
+      clock_out: forceCompleted ? endRaw : null,
+      country: normaliseCountry(defaultCountry),
+      cancelled: false,
+      late_penalty: 0,
+      cancellation_penalty: 0,
+      sr_worker: null,
+      sr_rate: null,
+      sr_hours: null,
+      sr_absorbed: null,
     });
   }
   return parsed;
@@ -4572,11 +4726,17 @@ function parseImportText(text) {
   if (fmt === 'header') {
     return parseHeaderFormat(nonEmpty, defaultCountry, importMode);
   }
+  if (fmt === 'natural_roster') {
+    const rows = parseNaturalRosterFormat(nonEmpty, defaultCountry, importMode, text);
+    return rows.length ? rows : null;
+  }
   // Unknown — try ShiftOps data-only on all lines, then header format
   const tryShiftOps = parseShiftOpsFormat(nonEmpty, defaultCountry, importMode);
   if (tryShiftOps.length) return tryShiftOps;
   const tryHeader = parseHeaderFormat(nonEmpty, defaultCountry, importMode);
   if (tryHeader.length) return tryHeader;
+  const tryNatural = parseNaturalRosterFormat(nonEmpty, defaultCountry, importMode, text);
+  if (tryNatural.length) return tryNatural;
   return null;
 }
 
