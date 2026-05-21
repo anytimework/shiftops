@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v12 — week-range flexible imports, available slots and mobile layout -->
+<!-- Build patch: v13 — sentence-style flexible imports, available slots and mobile layout -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4643,6 +4643,25 @@ function dateForWeekdayInContext(weekdayName, context) {
   return d.toISOString().slice(0,10);
 }
 
+function dateForRelativeWeekday(relativeText, weekdayName) {
+  const target = weekdayIndex(weekdayName);
+  if (target === undefined) return null;
+  const base = (typeof currentDate !== 'undefined' && currentDate instanceof Date && !isNaN(currentDate))
+    ? new Date(currentDate)
+    : new Date();
+  base.setHours(0,0,0,0);
+  const rel = String(relativeText || '').toLowerCase();
+  let delta = (target - base.getDay() + 7) % 7;
+  if (rel.includes('next')) {
+    delta += delta === 0 ? 7 : 7;
+  } else if (!rel.includes('this') && delta === 0) {
+    delta = 7;
+  }
+  const d = new Date(base);
+  d.setDate(base.getDate() + delta);
+  return d.toISOString().slice(0,10);
+}
+
 function roleFromNaturalSegment(segment, fallbackRole) {
   const roleText = String(segment || '').match(/\(([^)]+)\)/)?.[1] || '';
   if (!roleText) return fallbackRole;
@@ -4655,17 +4674,21 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
   const defaultRoleRaw = inferNaturalImportRole(text);
   const year = naturalImportYear(text);
   const weekContext = naturalWeekContext(text, year);
-  const outletExact = allOutlets.find(o => o.name.trim().toLowerCase() === outletRaw.toLowerCase());
-  const outletFuzzy = !outletExact ? importBestMatch(outletRaw, allOutlets.map(o => o.name), 0.25) : null;
-  const outletAutoMatch = outletFuzzy?.autoSelect ? allOutlets.find(o => o.name === outletFuzzy.name) : null;
-  const outletMatch = outletExact || outletAutoMatch || null;
-  const outletName = outletMatch?.name || outletRaw;
+  const resolveNaturalOutlet = (rawOutlet) => {
+    const raw = cleanOutletName(rawOutlet || outletRaw) || 'Unknown outlet';
+    const exact = allOutlets.find(o => o.name.trim().toLowerCase() === raw.toLowerCase());
+    const fuzzy = !exact ? importBestMatch(raw, allOutlets.map(o => o.name), 0.25) : null;
+    const autoMatch = fuzzy?.autoSelect ? allOutlets.find(o => o.name === fuzzy.name) : null;
+    const match = exact || autoMatch || null;
+    return { raw, match, fuzzy, autoMatch, name: match?.name || raw };
+  };
 
   let currentShiftDate = null;
   const parsed = [];
-  const addNaturalRosterRow = (dateStr, startRaw, endRaw, workerRawInput, roleOverride = '') => {
+  const addNaturalRosterRow = (dateStr, startRaw, endRaw, workerRawInput, roleOverride = '', outletOverride = '') => {
     if (!dateStr || !startRaw || !endRaw) return;
     const roleRaw = roleOverride || defaultRoleRaw;
+    const outletInfo = resolveNaturalOutlet(outletOverride || outletRaw);
     const workerRaw = cleanWorkerName(String(workerRawInput || '').replace(/\*.*?\*/g, '').replace(/\bupdated\b/ig, '').trim());
     const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
     if (!workerRaw && !isAvailableImportSlot) return;
@@ -4676,8 +4699,8 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
     const workerMatch = workerExact || workerAutoMatch || null;
 
     let resolvedRate = 12;
-    if (outletMatch) {
-      const suggested = getSuggestedRate(outletMatch.name, roleRaw, new Date(dateStr + 'T00:00:00'));
+    if (outletInfo.match) {
+      const suggested = getSuggestedRate(outletInfo.match.name, roleRaw, new Date(dateStr + 'T00:00:00'));
       resolvedRate = suggested?.rate || resolvedRate;
     } else {
       resolvedRate = defaultDailyRates(roleRaw)[dayKeyForDate(new Date(dateStr + 'T00:00:00'))] || 12;
@@ -4686,19 +4709,19 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
     const forceCompleted = importMode === 'completed' && !isAvailableImportSlot;
     parsed.push({
       _workerRaw: workerRaw || 'Available',
-      _outletRaw: outletRaw,
+      _outletRaw: outletInfo.raw,
       _workerMatch: workerMatch?.name || null,
-      _outletMatch: outletMatch?.name || null,
+      _outletMatch: outletInfo.match?.name || null,
       _hasWorkerMismatch: !!workerRaw && !workerMatch,
-      _hasOutletMismatch: !!outletRaw && !outletMatch,
+      _hasOutletMismatch: !!outletInfo.raw && !outletInfo.match,
       _workerAutoMatched: !!workerAutoMatch,
-      _outletAutoMatched: !!outletAutoMatch,
+      _outletAutoMatched: !!outletInfo.autoMatch,
       _suggestedWorker: workerFuzzy?.name || null,
-      _suggestedOutlet: outletFuzzy?.name || null,
+      _suggestedOutlet: outletInfo.fuzzy?.name || null,
       _deduction: 0,
       shift_date: dateStr,
       worker_name: isAvailableImportSlot ? 'Available' : (workerMatch?.name || workerRaw),
-      outlet: outletName,
+      outlet: outletInfo.name,
       role: roleRaw,
       scheduled_start: startRaw,
       scheduled_end: endRaw,
@@ -4733,6 +4756,16 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
         handledSegment = true;
       }
       if (handledSegment) continue;
+    }
+
+    const sentenceMatch = line.match(/(?:(next|this)\s+week\s+)?(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?).*?(?:\d+\s*x\s*)?(?:(pt|part[\s-]*timer|service crew|foh|cdp|chef de partie|chef|barista|dishwasher|kitchen assistant|kitchen)\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)).*?\b(?:for|at)\s+(.+?)\s*$/i);
+    if (sentenceMatch) {
+      const dateStr = dateForRelativeWeekday(sentenceMatch[1] || '', sentenceMatch[2]);
+      const roleText = sentenceMatch[3] || '';
+      const roleForSegment = roleText ? importDetectRole(roleText, roleText) : defaultRoleRaw;
+      const outletForSegment = sentenceMatch[6].replace(/[.。!]+$/,'').trim();
+      addNaturalRosterRow(dateStr, importParseTime(sentenceMatch[4]), importParseTime(sentenceMatch[5]), '', roleForSegment, outletForSegment);
+      continue;
     }
 
     const datedShiftMatch = line.match(/^(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)?\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+\d+\s*x)?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*[-–]\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*[-–]\s*(.*))?$/i);
