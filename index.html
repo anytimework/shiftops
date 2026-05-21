@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: Import 3rd Party auto-detection + SR absorbed default fee -->
+<!-- Build patch: Import 3rd Party auto-detection + SR absorbed default fee + imported-hours safety fix -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1338,7 +1338,28 @@ function payrollStartTime(s) {
 }
 function calcShiftHours(s) {
   if (!s) return null;
-  return calcHours(payrollStartTime(s), s.clock_out?.slice(0,5), breakMinsForShift(s));
+  const breakMins = breakMinsForShift(s);
+  const ci = s.clock_in?.slice(0,5);
+  const co = s.clock_out?.slice(0,5);
+  const schedStart = s.scheduled_start?.slice(0,5);
+  const schedEnd = s.scheduled_end?.slice(0,5);
+
+  // Main payroll calculation: actual clock-in/out, with 5-min grace and 15-min rounding.
+  let actualHours = calcHours(payrollStartTime(s), co, breakMins);
+
+  // Import safety fix:
+  // Some pasted/imported Google Sheet rows can visually show 12:00–23:00 but still
+  // calculate as 1h because the imported time fields are interpreted inconsistently
+  // after saving/loading. If the shift was imported with clock-in/out equal to the
+  // scheduled start/end, the scheduled duration is the safest source of truth.
+  if (schedStart && schedEnd && ci && co && ci === schedStart && co === schedEnd) {
+    const scheduledHours = calcHours(schedStart, schedEnd, breakMins);
+    if (scheduledHours !== null && (actualHours === null || Number(actualHours) < Number(scheduledHours))) {
+      actualHours = scheduledHours;
+    }
+  }
+
+  return actualHours;
 }
 function payrollStartNote(s) {
   const actual = s?.clock_in?.slice(0,5);
@@ -4124,8 +4145,10 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       (() => {
         const startM = timeToMins(clockIn);
         const endM   = timeToMins(clockOut);
-        if (!startM && !endM) return null;
-        return Math.max(0, (endM - startM) / 60 - breakMins / 60);
+        if (startM === null || endM === null) return null;
+        let adjustedEndM = endM;
+        if (adjustedEndM <= startM) adjustedEndM += 1440;
+        return Math.max(0, (adjustedEndM - startM) / 60 - breakMins / 60);
       })();
 
     if (isThirdParty) {
