@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v18 — editable reconciled import workers/clients, SR imports and flexible imports -->
+<!-- Build patch: v19 — past imports clocked-out, editable reconciliation and flexible imports -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -4333,7 +4333,11 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       finalClockOut = clockOut;
     } else {
       // Auto mode:
-      if (isScheduledRow || isFuture) {
+      if (isPast && clockIn && clockOut) {
+        // Past imported shifts should already be completed, even if source flag says TRUE.
+        finalClockIn = clockIn;
+        finalClockOut = clockOut;
+      } else if (isScheduledRow || isFuture) {
         // TRUE flag or future date → Scheduled (no clock times)
         finalClockIn = null; finalClockOut = null;
       } else if (isToday) {
@@ -4604,11 +4608,25 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
       ? Math.round((parseFloat(brkRaw)||0) * (/^\d+(\.\d+)?$/.test(brkRaw) && parseFloat(brkRaw) < 10 ? 60 : 1))
       : (defaultBreakMinsForRange(startRaw, endRaw) || 0);
 
-    let finalClockIn = clockIn, finalClockOut = clockOut;
-    const isPast = dateStr < new Date().toISOString().slice(0,10);
+    let finalClockIn = null, finalClockOut = null;
+    const today = new Date().toISOString().slice(0,10);
+    const isPast = dateStr < today;
+    const isToday = dateStr === today;
+    const isFuture = dateStr > today;
     if (importMode === 'completed') { finalClockIn = clockIn||startRaw; finalClockOut = clockOut||endRaw; }
     else if (importMode === 'scheduled') { finalClockIn=null; finalClockOut=null; }
-    else { if (isPast && clockOut) { finalClockIn = clockIn||startRaw; finalClockOut = clockOut; } }
+    else {
+      if (isPast && (clockOut || endRaw)) {
+        finalClockIn = clockIn || startRaw;
+        finalClockOut = clockOut || endRaw;
+      } else if (isToday && clockIn) {
+        finalClockIn = clockIn || startRaw;
+        finalClockOut = null;
+      } else if (isFuture) {
+        finalClockIn = null;
+        finalClockOut = null;
+      }
+    }
 
     const isAvailableImportSlot = !workerRaw && isTodayOrFutureDate(dateStr);
     const workerMatch = workerRaw ? allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase()) : null;
