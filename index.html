@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v24 — profile notes, commission-aware special rates, restriction blocks and worker phones -->
+<!-- Build patch: v25 — clickable country-split report cards with penalties -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -3940,6 +3940,11 @@ function startMessagePolling() {
 
 // ── Reports page ─────────────────────────────────────────────
 let currentReportRows = [];
+let currentReportAllRows = [];
+let currentReportMetricFilter = 'all';
+let currentReportLabel = '';
+let currentReportFrom = '';
+let currentReportTo = '';
 
 let currentReportTab = 'payroll';
 
@@ -3962,6 +3967,9 @@ function setReportTab(tab) {
   const ft = document.getElementById('report-filter-title');
   if (ft) ft.textContent = titles[tab] || 'Report filters';
   // Reset body
+  currentReportRows = [];
+  currentReportAllRows = [];
+  currentReportMetricFilter = 'all';
   document.getElementById('report-body').innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>Click Generate to run this report.</p></div>';
   document.getElementById('report-metrics').innerHTML = '';
 }
@@ -4003,7 +4011,12 @@ async function generateReport() {
   if (worker && currentReportTab === 'worker') q = q.ilike('worker_name', `%${worker}%`);
   const { data, error } = await q;
   if (error) { toast('Failed to generate report: ' + error.message, 'error'); return; }
-  currentReportRows = (data || []).filter(s => !s.cancelled && s.clock_in && s.clock_out);
+  currentReportAllRows = (data || []).filter(s => !s.cancelled && s.clock_in && s.clock_out);
+  currentReportRows = currentReportAllRows.slice();
+  currentReportMetricFilter = 'all';
+  currentReportFrom = from;
+  currentReportTo = to;
+  currentReportLabel = outlet || worker || 'All outlets';
   renderReport(from, to, outlet || worker);
 }
 
@@ -4080,57 +4093,126 @@ function reportMoney(n, outlet) {
   if (countries.length === 1) return moneyForCountry(n, countries[0]);
   return Number(n || 0).toFixed(2);
 }
+function reportPenaltyForShift(s) {
+  return effectiveLatePenalty(s) + parseFloat(s.cancellation_penalty || 0);
+}
+function splitReportCountByCountry(rows) {
+  return rows.reduce((acc, s) => {
+    acc[countryForShift(s)] = (acc[countryForShift(s)] || 0) + 1;
+    return acc;
+  }, { Singapore: 0, Malaysia: 0 });
+}
+function splitReportHoursByCountry(rows) {
+  return splitAmountsByCountry(rows, s => parseFloat(calcShiftHours(s) || 0));
+}
+function countrySplitPlain(amounts, decimals = 0, cls = '') {
+  const fmt = n => Number(n || 0).toFixed(decimals).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  return `<div class="metric-split">
+    <div class="metric-split-row"><span class="metric-split-country">🇸🇬 Singapore</span><span class="metric-split-amount ${cls}">${fmt(amounts.Singapore)}</span></div>
+    <div class="metric-split-row"><span class="metric-split-country">🇲🇾 Malaysia</span><span class="metric-split-amount ${cls}">${fmt(amounts.Malaysia)}</span></div>
+  </div>`;
+}
+function reportMetricCard(filter, label, value, active = currentReportMetricFilter === filter) {
+  return `<div class="metric-card clickable ${active ? 'active-filter' : ''}" onclick="setReportMetricFilter('${filter}')"><div class="metric-label">${label}</div>${value}</div>`;
+}
+function setReportMetricFilter(filter) {
+  currentReportMetricFilter = currentReportMetricFilter === filter ? 'all' : filter;
+  renderReport(currentReportFrom, currentReportTo, currentReportLabel);
+}
+function reportRowsForMetric(rows, filter) {
+  if (!filter || filter === 'all') return rows;
+  if (filter === 'singapore') return rows.filter(s => countryForShift(s) === 'Singapore');
+  if (filter === 'malaysia') return rows.filter(s => countryForShift(s) === 'Malaysia');
+  if (filter === 'sr_absorbed') return rows.filter(s => srAbsorbedForShift(s) > 0);
+  if (filter === 'transport') return rows.filter(s => transportClaim(s) > 0);
+  if (filter === 'penalties') return rows.filter(s => reportPenaltyForShift(s) > 0);
+  if (filter === 'client_billing') return rows.filter(s => payoutForShift(s) > 0);
+  if (filter === 'worker_pay') return rows.filter(s => netPaymentForShift(s) > 0);
+  if (filter === 'total_billed') return rows.filter(s => payoutForShift(s) + transportClaim(s) > 0);
+  return rows;
+}
+function metricFilterLabelForReport(filter) {
+  return ({
+    all: 'all rows',
+    singapore: 'Singapore',
+    malaysia: 'Malaysia',
+    sr_absorbed: 'SR absorbed rows',
+    transport: 'transport rows',
+    penalties: 'penalty rows',
+    client_billing: 'client billing rows',
+    worker_pay: 'worker pay rows',
+    total_billed: 'total billed rows'
+  })[filter] || 'filtered rows';
+}
 function renderReport(from, to, outlet) {
   const body = document.getElementById('report-body');
-  const totalHours = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
-  const totalPayout = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
-  const totalNetPayout = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
-  document.getElementById('report-title').textContent = `${outlet || 'All outlets'} usage: ${formatDisplayDate(from)} to ${formatDisplayDate(to)}`;
-  document.getElementById('report-count').textContent = `${currentReportRows.length} completed shift${currentReportRows.length !== 1 ? 's' : ''}`;
-  const reportTotalPayoutByCountry = splitAmountsByCountry(currentReportRows, payoutForShift);
-  const reportNetPayoutByCountry = splitAmountsByCountry(currentReportRows, netPaymentForShift);
-  const totalTransportMetric = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
-  const totalSrMetric = currentReportRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
-  const totalWorkerPayMetric = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
+  const sourceRows = currentReportAllRows.length ? currentReportAllRows : currentReportRows;
+  const viewRows = reportRowsForMetric(sourceRows, currentReportMetricFilter);
+  currentReportRows = viewRows;
+  const totalHours = viewRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
+  const totalPayout = viewRows.reduce((a,s) => a + payoutForShift(s), 0);
+  const totalTransportMetric = viewRows.reduce((a,s) => a + transportClaim(s), 0);
+  const totalSrMetric = viewRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
+  const totalPenaltiesMetric = viewRows.reduce((a,s) => a + reportPenaltyForShift(s), 0);
+  const totalWorkerPayMetric = viewRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   const totalClientBillMetric = totalPayout + totalTransportMetric;
+  const metricSuffix = currentReportMetricFilter !== 'all' ? ` · ${metricFilterLabelForReport(currentReportMetricFilter)}` : '';
+  document.getElementById('report-title').textContent = `${outlet || 'All outlets'} usage: ${formatDisplayDate(from)} to ${formatDisplayDate(to)}${metricSuffix}`;
+  document.getElementById('report-count').textContent = `${viewRows.length} of ${sourceRows.length} completed shift${sourceRows.length !== 1 ? 's' : ''}`;
+  const reportCountByCountry = splitReportCountByCountry(viewRows);
+  const reportHoursByCountry = splitReportHoursByCountry(viewRows);
+  const reportTotalPayoutByCountry = splitAmountsByCountry(viewRows, payoutForShift);
+  const reportNetPayoutByCountry = splitAmountsByCountry(viewRows, netPaymentForShift);
+  const reportSrByCountry = splitAmountsByCountry(viewRows, srAbsorbedForShift);
+  const reportTransportByCountry = splitAmountsByCountry(viewRows, transportClaim);
+  const reportClientBillByCountry = splitAmountsByCountry(viewRows, s => payoutForShift(s) + transportClaim(s));
+  const reportPenaltyByCountry = splitAmountsByCountry(viewRows, reportPenaltyForShift);
   document.getElementById('report-metrics').innerHTML = `
-    <div class="metric-card"><div class="metric-label">Completed shifts</div><div class="metric-val blue">${currentReportRows.length}</div></div>
-    <div class="metric-card"><div class="metric-label">Total hours</div><div class="metric-val green">${totalHours.toFixed(2).replace(/\.00$/, '')}</div></div>
-    <div class="metric-card"><div class="metric-label">Client billing</div>${outlet ? `<div class="metric-val amber">${reportMoney(totalPayout, outlet)}</div>` : countrySplitMetric(reportTotalPayoutByCountry, 'amber')}</div>
-    <div class="metric-card"><div class="metric-label">Worker pay</div><div class="metric-val green">${reportMoney(totalWorkerPayMetric, outlet)}</div></div>
-    ${totalSrMetric > 0 ? `<div class="metric-card"><div class="metric-label">SR absorbed</div><div class="metric-val" style="color:var(--amber);">${reportMoney(totalSrMetric, outlet)}</div></div>` : ''}
-    ${totalTransportMetric > 0 ? `<div class="metric-card"><div class="metric-label">🚕 Transport</div><div class="metric-val" style="color:var(--teal);">${reportMoney(totalTransportMetric, outlet)}</div></div>` : ''}
-    <div class="metric-card"><div class="metric-label">Total billed to client</div><div class="metric-val" style="color:var(--teal);">${reportMoney(totalClientBillMetric, outlet)}</div></div>
+    ${reportMetricCard('all','Completed shifts', countrySplitPlain(reportCountByCountry, 0, 'blue'))}
+    ${reportMetricCard('all','Total hours', countrySplitPlain(reportHoursByCountry, 2, 'green'))}
+    ${reportMetricCard('client_billing','Client billing', countrySplitMetric(reportTotalPayoutByCountry, 'amber'))}
+    ${reportMetricCard('worker_pay','Worker pay', countrySplitMetric(reportNetPayoutByCountry, 'green'))}
+    ${reportMetricCard('sr_absorbed','SR absorbed', countrySplitMetric(reportSrByCountry, totalSrMetric > 0 ? 'amber' : 'green'))}
+    ${reportMetricCard('penalties','Penalties', countrySplitMetric(reportPenaltyByCountry, totalPenaltiesMetric > 0 ? 'red' : 'green'))}
+    ${reportMetricCard('transport','🚕 Transport', countrySplitMetric(reportTransportByCountry, totalTransportMetric > 0 ? 'amber' : 'green'))}
+    ${reportMetricCard('total_billed','Total billed to client', countrySplitMetric(reportClientBillByCountry, 'green'))}
   `;
-  if (!currentReportRows.length) {
+  if (!viewRows.length) {
     body.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>No completed shifts found for this report.</p></div>';
     return;
   }
-  const totalTransport   = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
-  const totalSrAbsorbed  = currentReportRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
-  const totalWorkerPay   = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
+  const totalTransport   = viewRows.reduce((a,s) => a + transportClaim(s), 0);
+  const totalSrAbsorbed  = viewRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
+  const totalWorkerPay   = viewRows.reduce((a,s) => a + netPaymentForShift(s), 0);
+  const totalPenalties   = viewRows.reduce((a,s) => a + reportPenaltyForShift(s), 0);
   // Client billing = base payout (hours × client rate) + transport — NOT worker pay
-  const totalClientBill  = currentReportRows.reduce((a,s) => a + payoutForShift(s) + transportClaim(s), 0);
+  const totalClientBill  = viewRows.reduce((a,s) => a + payoutForShift(s) + transportClaim(s), 0);
   const isClientTab = currentReportTab === 'client';
   const showSrCol = !isClientTab && totalSrAbsorbed > 0;
+  const showPenaltyCol = !isClientTab && totalPenalties > 0;
   body.innerHTML = `<div style="overflow-x:auto;"><table>
     <thead><tr>
       <th>Date</th><th>Employee</th><th>Outlet</th><th>Hours</th>
       <th>Rate</th><th>${isClientTab ? 'Total' : 'Client Billing'}</th>${isClientTab ? '' : '<th>Worker Pay</th>'}
       ${showSrCol ? '<th>SR Absorbed</th>' : ''}
+      ${showPenaltyCol ? '<th>Penalty</th>' : ''}
       <th>🚕 Transport</th><th>Total Billed to Client</th>
       <th>Summary</th><th>Role</th><th>In</th><th>Out</th><th>Break</th>
     </tr></thead>
     <tbody>
-      ${currentReportRows.map(s => {
+      ${viewRows.map(s => {
         const hours   = parseFloat(calcShiftHours(s) || 0);
         const tc      = transportClaim(s);
         const clientBilling = payoutForShift(s);          // hours × s.rate (client rate)
         const workerPay     = netPaymentForShift(s);       // what worker actually receives
         const srAbs   = srAbsorbedForShift(s);
+        const penalty = reportPenaltyForShift(s);
         const clientTotal   = clientBilling + tc;          // what client is invoiced
         const srCell  = showSrCol
           ? `<td style="font-family:var(--mono);color:var(--amber);">${srAbs > 0 ? moneyForShift(srAbs, s) : '—'}</td>`
+          : '';
+        const penaltyCell  = showPenaltyCol
+          ? `<td style="font-family:var(--mono);color:var(--red);">${penalty > 0 ? '-'+moneyForShift(penalty, s) : '—'}</td>`
           : '';
         return `<tr>
           <td>${formatDisplayDate(s.shift_date)}</td>
@@ -4141,6 +4223,7 @@ function renderReport(from, to, outlet) {
           <td style="font-family:var(--mono);">${moneyForShift(clientBilling, s)}</td>
           ${isClientTab ? '' : `<td style="font-family:var(--mono);font-weight:600;">${moneyForShift(workerPay, s)}</td>`}
           ${srCell}
+          ${penaltyCell}
           <td style="font-family:var(--mono);color:var(--teal);">${tc > 0 ? moneyForShift(tc, s) : '—'}</td>
           <td style="font-family:var(--mono);font-weight:700;">${moneyForShift(clientTotal, s)}</td>
           <td style="min-width:230px;">${payrollSummary(s)}</td>
@@ -4157,6 +4240,7 @@ function renderReport(from, to, outlet) {
         <td style="font-family:var(--mono);">${reportMoney(totalPayout, outlet)}</td>
         ${isClientTab ? '' : `<td style="font-family:var(--mono);">${reportMoney(totalWorkerPay, outlet)}</td>`}
         ${showSrCol ? `<td style="font-family:var(--mono);color:var(--amber);">${reportMoney(totalSrAbsorbed, outlet)}</td>` : ''}
+        ${showPenaltyCol ? `<td style="font-family:var(--mono);color:var(--red);">-${reportMoney(totalPenalties, outlet)}</td>` : ''}
         <td style="font-family:var(--mono);color:var(--teal);">${totalTransport > 0 ? reportMoney(totalTransport, outlet) : '—'}</td>
         <td style="font-family:var(--mono);">${reportMoney(totalClientBill, outlet)}</td>
         <td></td><td></td><td></td><td></td><td></td>
