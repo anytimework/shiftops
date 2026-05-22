@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v26 — report penalty export, attendance comments and unpaid total-payment badge -->
+<!-- Build patch: v27 — local expandable attendance comments without DB schema changes -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1067,6 +1067,7 @@ let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount =
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 let editingWorkerId = null, editingOutletId = null;
 let profileMeta = loadProfileMeta();
+let shiftComments = loadShiftComments();
 const INTERNAL_USER_ACCOUNTS = [
   { username:'Jon', passcode:'8472915630' },
   { username:'Jayden', passcode:'5028741936' },
@@ -1087,6 +1088,53 @@ function loadProfileMeta() {
 }
 function saveProfileMeta() {
   localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+}
+function loadShiftComments() {
+  try { return JSON.parse(localStorage.getItem('shift_comments_v27') || '{}'); }
+  catch(e) { return {}; }
+}
+function saveShiftComments() {
+  localStorage.setItem('shift_comments_v27', JSON.stringify(shiftComments));
+}
+function commentForShift(sOrId) {
+  const id = typeof sOrId === 'object' ? sOrId?.id : sOrId;
+  if (!id) return '';
+  return String(shiftComments[String(id)] || '').trim();
+}
+function setShiftComment(id, text) {
+  const key = String(id || '');
+  if (!key) return;
+  const clean = String(text || '').trim();
+  if (clean) shiftComments[key] = clean;
+  else delete shiftComments[key];
+  saveShiftComments();
+}
+function renderCommentControl(s) {
+  if (!s?.id) return '';
+  const note = commentForShift(s);
+  const count = note ? 1 : 0;
+  return `<div style="margin-top:6px;">
+    <button type="button" class="btn btn-ghost btn-sm" onclick="toggleInlineComment('${s.id}')" style="padding:3px 8px;font-size:11px;">Comments ${count ? `<span class="nav-badge show" style="position:static;margin-left:6px;box-shadow:none;">${count}</span>` : ''}</button>
+    <div id="inline-comment-${s.id}" style="display:none;margin-top:6px;max-width:280px;">
+      <textarea id="inline-comment-text-${s.id}" rows="3" placeholder="Comments / internal notes" style="width:100%;font-size:12px;padding:6px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--font);resize:vertical;">${escapeHtml(note)}</textarea>
+      <div style="display:flex;gap:6px;margin-top:5px;">
+        <button class="btn btn-primary btn-sm" onclick="saveInlineComment('${s.id}')">Save</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleInlineComment('${s.id}')">Close</button>
+      </div>
+    </div>
+  </div>`;
+}
+function toggleInlineComment(id) {
+  const el = document.getElementById(`inline-comment-${id}`);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') document.getElementById(`inline-comment-text-${id}`)?.focus();
+}
+function saveInlineComment(id) {
+  const input = document.getElementById(`inline-comment-text-${id}`);
+  setShiftComment(id, input?.value || '');
+  toast(commentForShift(id) ? 'Comment saved' : 'Comment removed');
+  renderTable();
 }
 function normProfileKey(name) {
   return String(name || '').trim().toLowerCase();
@@ -2500,7 +2548,7 @@ function renderTable() {
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
-          <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}${s.payroll_notes ? `<div class="sub-text" style="margin-top:4px;color:var(--amber);">Note: ${escapeHtml(s.payroll_notes)}</div>` : ''}</td>
+          <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}${renderCommentControl(s)}</td>
           <td style="font-family:var(--mono);font-size:12px;min-width:170px;">${paymentDisplay(s)}</td>
           <td>${statusBadge(s)}</td>
           <td>${penaltyDisplay(s)}</td>
@@ -2733,6 +2781,8 @@ function openEditRow(id) {
   ciCell.innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
   coCell.innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
   const tc = parseFloat(s.transport_claim || 0);
+  const existingComment = commentForShift(id);
+  const commentCount = existingComment ? 1 : 0;
   brCell.innerHTML =
     breakSelectHtml(`edit-break-${id}`, breakMinsForShift(s)) +
     `<div style="margin-top:6px;display:flex;align-items:center;gap:6px;">
@@ -2741,8 +2791,11 @@ function openEditRow(id) {
          style="width:70px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
      </div>
      <div style="margin-top:6px;">
-       <textarea id="edit-notes-${id}" rows="3" placeholder="Comments / internal notes"
-         style="width:100%;min-width:220px;font-size:12px;padding:6px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--font);resize:vertical;">${escapeHtml(s.payroll_notes || '')}</textarea>
+       <button type="button" class="btn btn-ghost btn-sm" onclick="toggleCommentEditor('${id}')">Comments ${commentCount ? `<span class="nav-badge show" style="position:static;margin-left:6px;box-shadow:none;">${commentCount}</span>` : ''}</button>
+       <div id="comment-editor-${id}" style="display:none;margin-top:6px;">
+         <textarea id="edit-notes-${id}" rows="3" placeholder="Comments / internal notes"
+           style="width:100%;min-width:220px;font-size:12px;padding:6px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--font);resize:vertical;">${escapeHtml(existingComment)}</textarea>
+       </div>
      </div>` +
     `<div style="display:flex;gap:6px;margin-top:6px;">
        <button class="btn btn-primary btn-sm" onclick="saveRow('${id}')">Save</button>
@@ -2750,6 +2803,13 @@ function openEditRow(id) {
      </div>`;
   // Focus the clock-in field for convenience
   document.getElementById(`edit-ci-${id}`)?.focus();
+}
+
+function toggleCommentEditor(id) {
+  const el = document.getElementById(`comment-editor-${id}`);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') document.getElementById(`edit-notes-${id}`)?.focus();
 }
 
 function cancelEditRow(id) {
@@ -2777,16 +2837,16 @@ async function saveRow(id) {
   const co = coInput ? (coInput.value || null) : (s.clock_out?.slice(0,5) || null);
   const br = brInput ? parseInt(brInput.value || 0, 10) : breakMinsForShift(s);
   const tc = tcInput ? (parseFloat(tcInput.value) || 0) : parseFloat(s.transport_claim || 0);
-  const notes = notesInput ? notesInput.value.trim() : (s.payroll_notes || '');
+  const notes = notesInput ? notesInput.value.trim() : commentForShift(id);
   const lp = ci ? calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty : 0;
   const { error } = await supabaseClient.from('shifts').update({
     clock_in: ci, clock_out: co, break_mins: br,
     late_penalty: lp,
     transport_claim: tc || null,
-    payroll_notes: notes || null,
     updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Failed to save: ' + error.message, 'error'); return; }
+  setShiftComment(id, notes);
   const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
   const notesLog = notes ? `, notes: ${notes}` : '';
   const _dateFmt = s.shift_date ? new Date(s.shift_date+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}) : '';
@@ -4090,7 +4150,7 @@ async function generateCancellationReport(from, to, outlet, cancelType) {
         <td>${typeTag}</td>
         <td style="font-family:var(--mono);color:var(--red);font-weight:600;">${penAmt > 0 ? '-$'+penAmt.toFixed(2) : srRate > 0 ? '$'+srRate.toFixed(2)+'/hr' : '—'}</td>
         <td>${s.mc_url ? '✓' : '—'}</td>
-        <td style="font-size:11px;color:var(--text2);">${escapeHtml(s.payroll_notes||'')}</td>
+        <td style="font-size:11px;color:var(--text2);">${escapeHtml(commentForShift(s))}</td>
       </tr>`;
     }).join('')}
     </tbody></table></div>`;
@@ -4274,7 +4334,7 @@ function exportReportCsv() {
       srAbs > 0 ? srAbs.toFixed(2) : '',
       penalty > 0 ? penalty.toFixed(2) : '',
       tc > 0 ? tc.toFixed(2) : '', clientTotal.toFixed(2),
-      payrollSummary(s), [s.role || '', s.payroll_notes || ''].filter(Boolean).join(' — '), s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
+      payrollSummary(s), [s.role || '', commentForShift(s)].filter(Boolean).join(' — '), s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
   });
   const totalHours       = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout      = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
