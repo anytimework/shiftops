@@ -1355,10 +1355,12 @@ function formatDate(d) {
 
 // ─── Shift Reminder System (Supabase-backed, real-time synced) ───────────────
 async function loadReminders() {
-  // Try Supabase first, fall back to localStorage cache
+  // Always load localStorage first so data is available instantly
+  try { shiftReminders = JSON.parse(localStorage.getItem('shift_reminders') || '{}'); } catch(e) { shiftReminders = {}; }
+  // Then try Supabase — only override if it actually returns rows (empty array = table exists but nothing saved yet, keep localStorage)
   try {
     const { data, error } = await supabaseClient.from('shift_reminders').select('*');
-    if (!error && data) {
+    if (!error && data && data.length > 0) {
       shiftReminders = {};
       data.forEach(r => {
         shiftReminders[r.shift_id] = {
@@ -1369,11 +1371,9 @@ async function loadReminders() {
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
-      return;
     }
+    // If empty or error: keep the localStorage version already loaded above
   } catch(e) {}
-  // Fallback: load from localStorage cache
-  try { shiftReminders = JSON.parse(localStorage.getItem('shift_reminders') || '{}'); } catch(e) { shiftReminders = {}; }
 }
 async function persistReminder(shiftId) {
   // Update localStorage cache immediately
@@ -1453,21 +1453,34 @@ function reminderPanelHtml(s) {
   const today = new Date(); today.setHours(0,0,0,0);
   const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
   const shiftDay = new Date(s.shift_date + 'T00:00:00');
-  const isToday = shiftDay.getTime() === today.getTime();
+  const isToday    = shiftDay.getTime() === today.getTime();
   const isTomorrow = shiftDay.getTime() === tomorrow.getTime();
-  if (!isToday && !isTomorrow) return '';
+  const isPast     = shiftDay.getTime() < today.getTime();
   const r = shiftReminders[s.id] || {};
+  const hasAnyData = r.nightSent || r.nightAcked || r.clockinSent || r.clockinResponded;
+  // Show panel for today, tomorrow, OR any past shift that already has reminder data recorded
+  if (!isToday && !isTomorrow && !hasAnyData) return '';
   const isFullyAck = r.nightSent && r.nightAcked && r.clockinSent && r.clockinResponded;
   if (isFullyAck) {
     return `<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
   }
   const sid = escapeAttr(String(s.id));
+  // Past shifts with partial data: show read-only summary so ops can see what was recorded
+  if (isPast && hasAnyData) {
+    const badges = [
+      r.nightSent      ? '<span style="color:var(--green);">🌙✓</span>' : '<span style="color:var(--text3);">🌙✗</span>',
+      r.nightAcked     ? '<span style="color:var(--green);">👤✓</span>' : '<span style="color:var(--text3);">👤✗</span>',
+      r.clockinSent    ? '<span style="color:var(--green);">⏰✓</span>' : '<span style="color:var(--text3);">⏰✗</span>',
+      r.clockinResponded ? '<span style="color:var(--green);">✅✓</span>' : '<span style="color:var(--text3);">✅✗</span>',
+    ].join(' ');
+    return `<div class="reminder-panel" style="font-size:10px;color:var(--text3);">Reminders: ${badges} <button class="btn-undo-ack" style="margin-left:4px;" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Reset</button></div>`;
+  }
   let html = '<div class="reminder-panel">';
-  // Night reminder section — shown on both tomorrow (send) and today (verify)
+  // Night reminder section — shown on tomorrow + today
   html += `<div class="reminder-section-label">🌙 Night reminder</div>`;
   html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label></div>`;
   html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rna-${sid}" ${r.nightAcked?'checked':''} onchange="toggleReminder('${sid}','nightAcked',this.checked)"><label for="rna-${sid}">Worker acknowledged</label></div>`;
-  // Clock-in section — only shown when viewing today's shifts
+  // Clock-in section — only on today's view
   if (isToday) {
     html += `<div class="reminder-section-label" style="margin-top:6px;">⏰ Clock-in reminder</div>`;
     html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcs-${sid}" ${r.clockinSent?'checked':''} onchange="toggleReminder('${sid}','clockinSent',this.checked)"><label for="rcs-${sid}">Reminder sent</label></div>`;
