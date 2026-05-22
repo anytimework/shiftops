@@ -1637,13 +1637,9 @@ function calcShiftHours(s) {
   const actualHours = calcHours(countedStart, co, breakMins);
   addHourCandidate(actualHours);
 
-  // Import safety fix v2:
-  // Imported Google Sheet rows sometimes save/display correctly as 12:00–23:00,
-  // but the payroll hour calculation can still fall back to a wrong short duration
-  // on older imported rows. Only allow the scheduled-duration fallback when the
-  // payable start is still the scheduled start; a late clock-in past grace must
-  // count from the rounded actual time instead.
-  if (schedStart && schedEnd && ci && co && (actualHours === null || countedStart === schedStart)) {
+  // Scheduled-hours fallback: only used when actual clock-out is missing
+  // (i.e. shift not yet completed). If a clock-out exists, always trust actual hours.
+  if (schedStart && schedEnd && actualHours === null) {
     addHourCandidate(calcHours(schedStart, schedEnd, breakMins));
   }
 
