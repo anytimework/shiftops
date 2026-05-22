@@ -6490,9 +6490,22 @@ function buildSystemContext() {
     `cancelled:${s.cancelled?'yes':'no'} id:${s.id}`
   ).join('\n');
 
-  const workerList = allWorkers.slice(0,30).map(w =>
-    `${w.name} (${normaliseCountry(w.country)}) ${w.suspended?'[SUSPENDED]':''} pay:${w.bank_method||'?'}`
+  const workerList = allWorkers.slice(0,60).map(w =>
+    `${w.name} | phone:${w.phone||w.contact||'N/A'} | (${normaliseCountry(w.country)}) ${w.suspended?'[SUSPENDED]':''} pay:${w.bank_method||'?'}`
   ).join('\n');
+
+  // Build available slot counts for next 14 days
+  const today14 = [];
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(currentDate); d.setDate(d.getDate() + i);
+    const ds = formatDate(d);
+    const dayShifts = allShifts.filter(s => s.shift_date === ds);
+    const avail = dayShifts.filter(s => (!s.worker_name || s.worker_name === 'Available') && !s.cancelled).length;
+    const filled = dayShifts.filter(s => s.worker_name && s.worker_name !== 'Available' && !s.cancelled).length;
+    today14.push(`${ds}: ${filled} filled, ${avail} available slots`);
+  }
+
+  const outletList = allOutlets.slice(0,30).map(o => `${o.name} (${normaliseCountry(o.country||'')})`).join(', ');
 
   return `
 === SYSTEM CONTEXT (live data) ===
@@ -6507,13 +6520,16 @@ TODAY OVERVIEW (${today}):
 - Completed (clocked out): ${completed.length}
 - Cancelled: ${cancelled.length}
 
+SHIFT AVAILABILITY (next 14 days):
+${today14.join('\n')}
+
 RECENT SHIFTS (up to 40):
 ${shiftList}
 
-WORKERS (up to 30):
+WORKERS (up to 60, with phone):
 ${workerList}
 
-OUTLETS: ${allOutlets.slice(0,20).map(o=>o.name).join(', ')}
+OUTLETS: ${outletList}
 === END CONTEXT ===`;
 }
 
@@ -6540,15 +6556,21 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "waivePenalty", "shiftId": "<id>", "workerName": "<name>"}
 {"type": "navigateTo", "page": "attendance|workers|reports|analytics|incidents|activity"}
 {"type": "markPaid", "shiftId": "<id>", "workerName": "<name>"}
+{"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
+{"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
+{"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
 \`\`\`
 
 RULES:
 - Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
+- BEFORE creating a shift: confirm with the user by showing the worker's full name AND phone number from the WORKERS list, plus the exact outlet name. Wait for "yes/confirm" before executing.
+- BEFORE creating an available slot: confirm outlet name and time, then execute.
 - When clocking in/out, if no time given use current time.
 - Be concise and friendly. Use emojis sparingly.
 - If you need a shift ID and there are multiple matches, list them and ask which one.
 - For navigation, just output the navigateTo action.
-- When answering questions, reference actual names and times from the context.
+- When answering questions about available slots, calculate from the SHIFT AVAILABILITY data in context.
+- Always use EXACT worker names and outlet names as they appear in the database.
 - Speak naturally, like a helpful colleague.`;
 
   const response = await fetch('https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/claude-proxy', {
@@ -6661,6 +6683,80 @@ async function executeAIAction(actionJson) {
       await supabaseClient.from('shifts').update({ is_paid: true, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
       await loadShifts();
       return `✅ **${a.workerName}** marked as paid`;
+    }
+
+    case 'createShift': {
+      const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
+      if (!w) return `❌ Worker "${a.workerName}" not found in database`;
+      const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
+      // Get rate from most recent shift at this outlet for this worker, or fallback
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
+      const country = normaliseCountry(outlet.country || w.country);
+      const { error } = await supabaseClient.from('shifts').insert({
+        worker_name: w.name,
+        outlet: outlet.name,
+        shift_date: a.date,
+        scheduled_start: a.start + ':00',
+        scheduled_end: a.end + ':00',
+        break_mins: parseInt(a.breakMins || 0),
+        rate: rate,
+        country: country,
+        role: a.role || 'F&B Service Crew',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+      if (error) return `❌ Failed to create shift: ${error.message}`;
+      await logActivity('AI: Shift created', `Shift created for ${w.name} at ${outlet.name} on ${a.date}`, 'shift', null, {});
+      await loadShifts();
+      return `✅ Shift created for **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) at **${outlet.name}** on ${a.date}, ${a.start}–${a.end}`;
+    }
+
+    case 'createAvailableSlot': {
+      const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
+      const country = normaliseCountry(outlet.country || 'Singapore');
+      const { error } = await supabaseClient.from('shifts').insert({
+        worker_name: 'Available',
+        outlet: outlet.name,
+        shift_date: a.date,
+        scheduled_start: a.start + ':00',
+        scheduled_end: a.end + ':00',
+        break_mins: parseInt(a.breakMins || 0),
+        rate: rate,
+        country: country,
+        role: a.role || 'F&B Service Crew',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+      if (error) return `❌ Failed to create slot: ${error.message}`;
+      await logActivity('AI: Available slot created', `Available slot at ${outlet.name} on ${a.date}`, 'shift', null, {});
+      await loadShifts();
+      return `✅ Available slot created at **${outlet.name}** on ${a.date}, ${a.start}–${a.end} (open for booking)`;
+    }
+
+    case 'addStandby': {
+      const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
+      if (!w) return `❌ Worker "${a.workerName}" not found`;
+      const record = {
+        worker_name: w.name,
+        available_date: a.availableDate,
+        note: a.note || '',
+        created_at: new Date().toISOString()
+      };
+      try {
+        const { error } = await supabaseClient.from('standby_workers').insert(record);
+        if (error) throw error;
+      } catch(e) {
+        // fallback to localStorage
+        const rows = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
+        rows.push({ ...record, id: Date.now() });
+        localStorage.setItem('standby_workers_local', JSON.stringify(rows));
+      }
+      return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby list for ${a.availableDate}`;
     }
 
     default:
