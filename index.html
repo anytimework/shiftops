@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v22 — country-split penalties and SR absorbed cards, penalty waivers respected -->
+<!-- Build patch: v23 — 3rd party manual SR replacement with hourly uplift plus platform fee -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -873,15 +873,16 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="modal">
     <h3>Service recovery</h3>
     <div id="sr-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;font-size:13px;"></div>
-    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Choose hourly replacement when you pay a higher worker rate, or fixed platform fee when a 3rd party charges a flat fee per shift.</span></div>
+    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Use hourly replacement when a worker or 3rd party has a different hourly rate. Add the platform fee when the 3rd party also charges a fixed fee.</span></div>
     <div class="divider"></div>
     <div class="form-row"><label>SR type</label><select id="sr-type" onchange="toggleSRType(); calcSR();"><option value="hourly">Hourly replacement difference</option><option value="fixed_fee">3rd party platform fee per shift</option></select></div>
     <div id="sr-hourly-fields">
-      <div class="form-row"><label>Replacement worker</label><select id="sr-worker"><option value="">Select replacement worker</option></select></div>
+      <div class="form-row"><label>Replacement worker / 3rd party name</label><input type="text" id="sr-worker" list="sr-worker-options" placeholder="Select or type name manually" oninput="syncSRThirdPartyFee(); calcSR();"><datalist id="sr-worker-options"></datalist></div>
       <div class="form-grid">
         <div class="form-row"><label>Original rate ($/hr)</label><input type="number" id="sr-orig" readonly style="background:var(--bg3);color:var(--text3);"></div>
         <div class="form-row"><label>Replacement rate ($/hr)</label><input type="number" id="sr-new" step="0.50" min="1" oninput="calcSR()"></div>
       </div>
+      <div class="form-row"><label>Extra 3rd party fee ($)</label><input type="number" id="sr-hourly-fee" step="0.50" min="0" value="0.00" oninput="markSRFeeTouched(); calcSR();"><div class="sub-text">For external/manual names this defaults to $10 on top of the hourly rate difference.</div></div>
       <div class="form-row"><label>Hours to cover</label><input type="number" id="sr-hours" step="0.5" min="0.5" oninput="calcSR()"></div>
     </div>
     <div id="sr-fixed-fields" style="display:none;">
@@ -1734,8 +1735,17 @@ function netPaymentForShift(s) {
   return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s)) + tc;
 }
 function totalPaymentForShift(s) {
-  const thirdPartyFee = s?.sr_worker ? srAbsorbedForShift(s) : 0;
+  const thirdPartyFee = s?.sr_worker ? thirdPartyPlatformFeeForShift(s) : 0;
   return netPaymentForShift(s) + thirdPartyFee;
+}
+function thirdPartyPlatformFeeForShift(s) {
+  if (!s?.sr_worker) return 0;
+  const absorbed = srAbsorbedForShift(s);
+  const hrs = parseFloat(s.sr_hours || 0);
+  const srRate = parseFloat(s.sr_rate || s.rate || 0);
+  const baseRate = parseFloat(s.rate || 0);
+  const hourlyUplift = hrs > 0 ? Math.max(0, (srRate - baseRate) * hrs) : 0;
+  return Math.max(0, absorbed - hourlyUplift);
 }
 function isPayableShift(s) {
   const workerName = String(s?.worker_name || '').trim().toLowerCase();
@@ -1857,7 +1867,7 @@ function estimatedPaymentForShift(s) {
   // Estimated payment should include every scheduled assigned worker, even before clock-in.
   // Before clock-in, count from scheduled start to scheduled end; after clock-in, count from actual/payroll start to scheduled end.
   const tempShift = { ...s, clock_in: estimatedStart, clock_out: estimatedEnd };
-  if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(tempShift) - shiftPenaltyAmount(tempShift));
+  if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(tempShift) - shiftPenaltyAmount(tempShift)) + thirdPartyPlatformFeeForShift(tempShift);
   return Math.max(0, payoutForShift(tempShift) - shiftPenaltyAmount(tempShift));
 }
 function paymentDisplay(s) {
@@ -1867,12 +1877,13 @@ function paymentDisplay(s) {
   const penalty = shiftPenaltyAmount(s);
   const pnote = payrollStartNote(s);
   const srFee = srAbsorbedForShift(s);
+  const platformFee = thirdPartyPlatformFeeForShift(s);
   if (!s.clock_out && !s.cancelled) {
     const est = estimatedPaymentForShift(s);
-    return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">${isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing'}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${srFee?` · Extra fee ${moneyForShift(srFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
+    return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">${isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing'}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${platformFee?` · Platform fee ${moneyForShift(platformFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
   }
   if (s.sr_worker) {
-    return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Net: ${moneyForShift(net, s)}</div>${srFee?`<div class="sub-text">3rd party fee absorbed: ${moneyForShift(srFee, s)}</div>`:''}<div class="sub-text">Paid to: ${s.sr_worker}</div>`;
+    return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)} client rate</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Paid to 3rd party: ${moneyForShift(net, s)}</div>${srFee?`<div class="sub-text">SR absorbed: ${moneyForShift(srFee, s)}${platformFee?` incl. ${moneyForShift(platformFee, s)} fee`:''}</div>`:''}<div class="sub-text">Provider: ${s.sr_worker}</div>`;
   }
   // Special rate for own member (sr_rate set, sr_worker null)
   const srRateVal = !s.sr_worker && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate||0) ? parseFloat(s.sr_rate) : 0;
@@ -3266,20 +3277,39 @@ Click Cancel to skip (you can add it manually later via the penalty column).`
 }
 
 // ── Service recovery ──────────────────────────────────────────
+let srFeeTouched = false;
+
 function populateSRWorkerSelect(currentWorkerName = '') {
-  const sel = document.getElementById('sr-worker');
-  if (!sel) return;
+  const list = document.getElementById('sr-worker-options');
+  if (!list) return;
   const current = String(currentWorkerName || '').trim().toLowerCase();
   const availableWorkers = (allWorkers || [])
     .filter(w => w && w.name && !isWorkerSuspended(w.name))
     .filter(w => w.name.trim().toLowerCase() !== current)
     .sort((a,b) => a.name.localeCompare(b.name));
-  sel.innerHTML = '<option value="">Select replacement worker</option>' +
-    availableWorkers.map(w => `<option value="${escapeAttr(w.name)}">${w.name}</option>`).join('');
+  list.innerHTML = availableWorkers.map(w => `<option value="${escapeAttr(w.name)}">${w.name}</option>`).join('');
+}
+
+function isRegisteredWorkerName(name) {
+  const target = String(name || '').trim().toLowerCase();
+  return !!target && (allWorkers || []).some(w => String(w?.name || '').trim().toLowerCase() === target);
+}
+
+function markSRFeeTouched() {
+  srFeeTouched = true;
+}
+
+function syncSRThirdPartyFee() {
+  const type = document.getElementById('sr-type')?.value || 'hourly';
+  const worker = document.getElementById('sr-worker')?.value || '';
+  const feeInput = document.getElementById('sr-hourly-fee');
+  if (!feeInput || type !== 'hourly' || srFeeTouched) return;
+  feeInput.value = worker.trim() && !isRegisteredWorkerName(worker) ? '10.00' : '0.00';
 }
 
 function openSRModal(id, rate, workerName, outlet, sched) {
   pendingSRId = id;
+  srFeeTouched = false;
   document.getElementById('sr-info').innerHTML =
     `<div style="font-weight:600;">Replacing: ${workerName}</div>
      <div style="color:var(--text2);font-size:12px;margin-top:2px;">${outlet} · ${sched?.slice(0,5)} shift · Original rate: $${parseFloat(rate).toFixed(2)}/hr</div>`;
@@ -3287,6 +3317,7 @@ function openSRModal(id, rate, workerName, outlet, sched) {
   document.getElementById('sr-orig').value = parseFloat(rate).toFixed(2);
   document.getElementById('sr-new').value = '';
   document.getElementById('sr-hours').value = '';
+  document.getElementById('sr-hourly-fee').value = '0.00';
   document.getElementById('sr-platform').value = '3rd party platform';
   document.getElementById('sr-fee').value = '10.00';
   populateSRWorkerSelect(workerName);
@@ -3301,6 +3332,7 @@ function toggleSRType() {
   const type = document.getElementById('sr-type')?.value || 'hourly';
   document.getElementById('sr-hourly-fields').style.display = type === 'hourly' ? 'block' : 'none';
   document.getElementById('sr-fixed-fields').style.display = type === 'fixed_fee' ? 'block' : 'none';
+  syncSRThirdPartyFee();
 }
 
 function calcSR() {
@@ -3317,11 +3349,14 @@ function calcSR() {
   const orig = parseFloat(document.getElementById('sr-orig').value);
   const newR = parseFloat(document.getElementById('sr-new').value);
   const hrs = parseFloat(document.getElementById('sr-hours').value);
+  const fee = parseFloat(document.getElementById('sr-hourly-fee').value) || 0;
   if (isNaN(orig) || isNaN(newR) || isNaN(hrs) || hrs <= 0) { prev.style.display = 'none'; return; }
   prev.style.display = 'block';
-  const absorbed = (newR - orig) * hrs;
+  const hourlyAbsorbed = (newR - orig) * hrs;
+  const absorbed = hourlyAbsorbed + fee;
   prev.innerHTML = `<div class="pen-row"><span>Original cost</span><span>$${(orig*hrs).toFixed(2)}</span></div>
     <div class="pen-row"><span>Replacement cost</span><span>$${(newR*hrs).toFixed(2)}</span></div>
+    ${fee>0?`<div class="pen-row"><span>3rd party platform fee</span><span>$${fee.toFixed(2)}</span></div>`:''}
     <div class="pen-row total"><span>SR absorbed by you</span><span style="color:${absorbed>0?'var(--amber)':'var(--green)'};">${absorbed>0?'+':''} $${Math.abs(absorbed).toFixed(2)}</span></div>`;
 }
 
@@ -3344,10 +3379,11 @@ async function confirmSR() {
     worker = document.getElementById('sr-worker').value.trim();
     const newR = parseFloat(document.getElementById('sr-new').value);
     const hrs = parseFloat(document.getElementById('sr-hours').value);
+    const fee = parseFloat(document.getElementById('sr-hourly-fee').value) || 0;
     if (!worker || isNaN(newR) || isNaN(hrs)) { toast('Please fill all fields', 'error'); return; }
     srRate = newR;
     srHours = hrs;
-    absorbed = (newR - orig) * hrs;
+    absorbed = ((newR - orig) * hrs) + fee;
   }
 
   const { error } = await supabaseClient.from('shifts').update({
