@@ -6432,6 +6432,283 @@ function buildTop10Cancellations(cancelled) {
 }
 // ═══════════════════════════════════════════════════════════════
 
+
+// ══════════════════════════════════════════════════════════════
+// AI ASSISTANT ENGINE
+// ══════════════════════════════════════════════════════════════
+
+let aiChatOpen = false;
+let aiHistory  = []; // {role, content} for Claude API
+
+function toggleAIChat() {
+  aiChatOpen = !aiChatOpen;
+  const panel = document.getElementById('ai-panel');
+  panel.style.display = aiChatOpen ? 'flex' : 'none';
+  if (aiChatOpen) document.getElementById('ai-input')?.focus();
+}
+
+function aiQuick(text) {
+  document.getElementById('ai-input').value = text;
+  sendAIMessage();
+}
+
+function aiAddMsg(content, role = 'bot') {
+  const el = document.getElementById('ai-messages');
+  const div = document.createElement('div');
+  div.className = `ai-msg ai-msg-${role}`;
+  div.innerHTML = content;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  return div;
+}
+
+function aiTyping() {
+  const el = document.getElementById('ai-messages');
+  const div = document.createElement('div');
+  div.className = 'ai-msg ai-msg-bot ai-typing';
+  div.innerHTML = '<span></span><span></span><span></span>';
+  div.id = 'ai-typing-indicator';
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function aiRemoveTyping() {
+  document.getElementById('ai-typing-indicator')?.remove();
+}
+
+// Build a real-time system context snapshot
+function buildSystemContext() {
+  const today = formatDate(currentDate);
+  const todayShifts = allShifts.filter(s => s.shift_date === today);
+  const clocked    = todayShifts.filter(s => s.clock_in && !s.clock_out && !s.cancelled);
+  const notIn      = todayShifts.filter(s => !s.clock_in && !s.cancelled && s.worker_name !== 'Available');
+  const completed  = todayShifts.filter(s => s.clock_in && s.clock_out && !s.cancelled);
+  const cancelled  = todayShifts.filter(s => s.cancelled);
+
+  const shiftList = allShifts.slice(0, 40).map(s =>
+    `[${s.shift_date} ${s.scheduled_start?.slice(0,5)||'?'}-${s.scheduled_end?.slice(0,5)||'?'}] ` +
+    `${s.worker_name||'Available'} @ ${s.outlet||'?'} | ` +
+    `CI:${s.clock_in?.slice(0,5)||'—'} CO:${s.clock_out?.slice(0,5)||'—'} ` +
+    `cancelled:${s.cancelled?'yes':'no'} id:${s.id}`
+  ).join('\n');
+
+  const workerList = allWorkers.slice(0,30).map(w =>
+    `${w.name} (${normaliseCountry(w.country)}) ${w.suspended?'[SUSPENDED]':''} pay:${w.bank_method||'?'}`
+  ).join('\n');
+
+  return `
+=== SYSTEM CONTEXT (live data) ===
+Current user: ${currentInternalUser || 'Unknown'}
+Viewing date: ${today}
+Current time: ${new Date().toLocaleTimeString('en-SG')}
+
+TODAY OVERVIEW (${today}):
+- Total shifts: ${todayShifts.length}
+- Currently clocked in (ongoing): ${clocked.length}
+- Not yet clocked in: ${notIn.length} — ${notIn.map(s=>s.worker_name).join(', ')||'none'}
+- Completed (clocked out): ${completed.length}
+- Cancelled: ${cancelled.length}
+
+RECENT SHIFTS (up to 40):
+${shiftList}
+
+WORKERS (up to 30):
+${workerList}
+
+OUTLETS: ${allOutlets.slice(0,20).map(o=>o.name).join(', ')}
+=== END CONTEXT ===`;
+}
+
+// Claude API call via Anthropic
+async function callClaude(userMessage) {
+  aiHistory.push({ role: 'user', content: userMessage });
+
+  const systemPrompt = `You are a helpful operations assistant embedded in "Anytime Work Operations", an F&B payroll and shift management system used in Singapore and Malaysia.
+
+You have two modes:
+1. ANSWER: Answer questions about shifts, workers, outlets using the live system context provided.
+2. ACTION: Perform actions by outputting a JSON action block when the user asks you to do something.
+
+${buildSystemContext()}
+
+ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking action:
+\`\`\`action
+{"type": "clockIn", "shiftId": "<id>", "time": "HH:MM", "workerName": "<name>"}
+{"type": "clockOut", "shiftId": "<id>", "time": "HH:MM", "workerName": "<name>"}
+{"type": "cancelShift", "shiftId": "<id>", "workerName": "<name>", "cancelType": "worker_penalty|worker_mc|outlet_bypass"}
+{"type": "suspendWorker", "workerName": "<name>"}
+{"type": "unsuspendWorker", "workerName": "<name>"}
+{"type": "addNote", "shiftId": "<id>", "note": "<text>"}
+{"type": "waivePenalty", "shiftId": "<id>", "workerName": "<name>"}
+{"type": "navigateTo", "page": "attendance|workers|reports|analytics|incidents|activity"}
+{"type": "markPaid", "shiftId": "<id>", "workerName": "<name>"}
+\`\`\`
+
+RULES:
+- Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
+- When clocking in/out, if no time given use current time.
+- Be concise and friendly. Use emojis sparingly.
+- If you need a shift ID and there are multiple matches, list them and ask which one.
+- For navigation, just output the navigateTo action.
+- When answering questions, reference actual names and times from the context.
+- Speak naturally, like a helpful colleague.`;
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      system: systemPrompt,
+      messages: aiHistory.slice(-10), // last 10 turns
+    })
+  });
+
+  if (!response.ok) throw new Error(`API error ${response.status}`);
+  const data = await response.json();
+  const reply = data.content?.[0]?.text || '';
+  aiHistory.push({ role: 'assistant', content: reply });
+  return reply;
+}
+
+// Parse and execute action blocks from Claude's response
+async function executeAIAction(actionJson) {
+  const a = JSON.parse(actionJson);
+  switch (a.type) {
+
+    case 'clockIn': {
+      const s = allShifts.find(x => x.id === a.shiftId);
+      if (!s) return `❌ Shift not found (id: ${a.shiftId})`;
+      const time = a.time || new Date().toTimeString().slice(0,5);
+      const lp = calcLatePenalty(s.scheduled_start?.slice(0,5), time).penalty;
+      await supabaseClient.from('shifts').update({ clock_in: time, late_penalty: lp, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
+      await logActivity('AI: Clocked in', `${a.workerName} clocked in at ${time}`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+      await loadShifts();
+      return `✅ Clocked in **${a.workerName}** at ${time}${lp > 0 ? ` (late penalty $${lp.toFixed(2)} applied)` : ''}`;
+    }
+
+    case 'clockOut': {
+      const s = allShifts.find(x => x.id === a.shiftId);
+      if (!s) return `❌ Shift not found`;
+      const time = a.time || new Date().toTimeString().slice(0,5);
+      await supabaseClient.from('shifts').update({ clock_out: time, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
+      await logActivity('AI: Clocked out', `${a.workerName} clocked out at ${time}`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+      await loadShifts();
+      return `✅ Clocked out **${a.workerName}** at ${time}`;
+    }
+
+    case 'cancelShift': {
+      const s = allShifts.find(x => x.id === a.shiftId);
+      if (!s) return `❌ Shift not found`;
+      const isPenalty = a.cancelType === 'worker_penalty';
+      await supabaseClient.from('shifts').update({
+        cancelled: true, worker_name: 'Available',
+        cancellation_penalty: isPenalty ? 15 : 0,
+        updated_at: new Date().toISOString()
+      }).eq('id', a.shiftId);
+      await logActivity('AI: Shift cancelled', `${a.workerName} shift at ${s.outlet} cancelled`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: a.workerName, outlet: s.outlet });
+      await loadShifts();
+      return `✅ Cancelled **${a.workerName}'s** shift at ${s.outlet}${isPenalty ? ' ($15 penalty applied)' : ' (no penalty)'}`;
+    }
+
+    case 'suspendWorker': {
+      const w = allWorkers.find(x => x.name.toLowerCase().includes(a.workerName.toLowerCase()));
+      if (!w) return `❌ Worker "${a.workerName}" not found`;
+      await supabaseClient.from('workers').update({ suspended: true }).eq('id', w.id);
+      await loadWorkers();
+      await logActivity('AI: Worker suspended', `${w.name} suspended`, 'worker', w.id, {});
+      return `✅ **${w.name}** has been suspended and cannot be booked for new shifts`;
+    }
+
+    case 'unsuspendWorker': {
+      const w = allWorkers.find(x => x.name.toLowerCase().includes(a.workerName.toLowerCase()));
+      if (!w) return `❌ Worker "${a.workerName}" not found`;
+      await supabaseClient.from('workers').update({ suspended: false, suspended_until: null }).eq('id', w.id);
+      await loadWorkers();
+      await logActivity('AI: Worker unsuspended', `${w.name} unsuspended`, 'worker', w.id, {});
+      return `✅ **${w.name}** has been unsuspended and can now be booked`;
+    }
+
+    case 'addNote': {
+      const s = allShifts.find(x => x.id === a.shiftId);
+      if (!s) return `❌ Shift not found`;
+      await supabaseClient.from('shifts').update({ payroll_notes: a.note, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
+      await loadShifts();
+      return `✅ Note added to ${s.worker_name}'s shift: "${a.note}"`;
+    }
+
+    case 'waivePenalty': {
+      await supabaseClient.from('shifts').update({ late_penalty: 0, cancellation_penalty: 0, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
+      await loadShifts();
+      return `✅ Penalty waived for **${a.workerName}**`;
+    }
+
+    case 'navigateTo': {
+      const navBtn = document.querySelector(`.nav-item[onclick*="${a.page}"]`);
+      if (navBtn) { switchPage(a.page, navBtn); return `📍 Navigated to **${a.page}**`; }
+      return `❌ Page "${a.page}" not found`;
+    }
+
+    case 'markPaid': {
+      const s = allShifts.find(x => x.id === a.shiftId);
+      if (!s) return `❌ Shift not found`;
+      await supabaseClient.from('shifts').update({ is_paid: true, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
+      await loadShifts();
+      return `✅ **${a.workerName}** marked as paid`;
+    }
+
+    default:
+      return `❓ Unknown action: ${a.type}`;
+  }
+}
+
+// Render Claude's reply — handle markdown + action blocks
+async function renderAIReply(reply) {
+  // Extract action blocks
+  const actionMatch = reply.match(/```action\s*([\s\S]*?)```/);
+  let displayText = reply.replace(/```action[\s\S]*?```/g, '').trim();
+
+  // Convert basic markdown
+  displayText = displayText
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
+
+  aiAddMsg(displayText, 'bot');
+
+  if (actionMatch) {
+    try {
+      const result = await executeAIAction(actionMatch[1].trim());
+      if (result) {
+        const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
+      }
+    } catch(e) {
+      aiAddMsg(`❌ Action failed: ${e.message}`, 'error');
+    }
+  }
+}
+
+async function sendAIMessage() {
+  const input = document.getElementById('ai-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  aiAddMsg(escapeHtml(msg), 'user');
+  aiTyping();
+
+  try {
+    const reply = await callClaude(msg);
+    aiRemoveTyping();
+    await renderAIReply(reply);
+  } catch(e) {
+    aiRemoveTyping();
+    aiAddMsg(`❌ Error: ${e.message}. Check your internet connection.`, 'error');
+  }
+}
+// ══════════════════════════════════════════════════════════════
+
 // ── Close modals on overlay click ─────────────────────────────
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
@@ -6530,5 +6807,79 @@ setInterval(async () => {
     </div>
   </div>
 </div>
+
+<!-- AI Assistant -->
+<button id="ai-fab" onclick="toggleAIChat()"
+  style="position:fixed;bottom:24px;right:24px;width:52px;height:52px;border-radius:50%;
+  background:linear-gradient(135deg,var(--teal),var(--accent));border:none;cursor:pointer;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:22px;display:flex;
+  align-items:center;justify-content:center;transition:transform 0.2s;"
+  onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'">
+  🤖
+</button>
+
+<div id="ai-panel" style="display:none;position:fixed;bottom:88px;right:24px;width:380px;max-height:560px;
+  background:var(--bg2);border:1px solid var(--border);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  z-index:1001;display:none;flex-direction:column;overflow:hidden;">
+  <!-- Header -->
+  <div style="padding:14px 16px;background:linear-gradient(135deg,var(--teal),var(--accent));
+    display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span style="font-size:20px;">🤖</span>
+      <div>
+        <div style="font-weight:700;color:#fff;font-size:14px;">Anytime Assistant</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.75);">Powered by Claude AI</div>
+      </div>
+    </div>
+    <button onclick="toggleAIChat()" style="background:none;border:none;color:rgba(255,255,255,0.8);
+      font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
+  </div>
+  <!-- Messages -->
+  <div id="ai-messages" style="flex:1;overflow-y:auto;padding:14px 16px;display:flex;
+    flex-direction:column;gap:10px;min-height:200px;max-height:380px;">
+    <div class="ai-msg ai-msg-bot">
+      👋 Hi! I'm your Anytime Assistant. I can help you navigate the system or take actions like:<br><br>
+      • <b>Clock in/out</b> a worker<br>
+      • <b>Cancel</b> a shift<br>
+      • <b>Add</b> a new shift<br>
+      • <b>Suspend/unsuspend</b> a worker<br>
+      • <b>Find</b> worker or shift info<br>
+      • <b>Add notes</b> to a shift<br><br>
+      Just ask in plain language!
+    </div>
+  </div>
+  <!-- Quick actions -->
+  <div id="ai-quick" style="padding:8px 16px;display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--border2);flex-shrink:0;">
+    <button class="ai-quick-btn" onclick="aiQuick('Who is not clocked in today?')">Who's not in?</button>
+    <button class="ai-quick-btn" onclick="aiQuick('Show today shifts summary')">Today summary</button>
+    <button class="ai-quick-btn" onclick="aiQuick('Any pending clock outs?')">Pending clock-outs</button>
+    <button class="ai-quick-btn" onclick="aiQuick('Show cancellations this week')">Cancellations</button>
+  </div>
+  <!-- Input -->
+  <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;">
+    <input id="ai-input" type="text" placeholder="Ask me anything…"
+      style="flex:1;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;
+      padding:8px 12px;color:var(--text);font-size:13px;font-family:var(--font);"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAIMessage();}">
+    <button onclick="sendAIMessage()" style="background:var(--teal);border:none;border-radius:8px;
+      padding:8px 14px;color:#fff;font-size:13px;cursor:pointer;font-weight:600;white-space:nowrap;">Send</button>
+  </div>
+</div>
+
+<style>
+.ai-msg { padding:10px 13px; border-radius:10px; font-size:12.5px; line-height:1.55; max-width:92%; word-break:break-word; }
+.ai-msg-bot { background:var(--bg3); color:var(--text); align-self:flex-start; border-bottom-left-radius:3px; }
+.ai-msg-user { background:var(--teal); color:#fff; align-self:flex-end; border-bottom-right-radius:3px; }
+.ai-msg-error { background:rgba(232,64,64,0.15); color:var(--red); align-self:flex-start; border-bottom-left-radius:3px; }
+.ai-quick-btn { font-size:11px; padding:4px 9px; background:var(--bg3); border:1px solid var(--border2);
+  border-radius:12px; color:var(--text2); cursor:pointer; white-space:nowrap; }
+.ai-quick-btn:hover { border-color:var(--teal); color:var(--teal); }
+.ai-typing { display:flex; gap:4px; align-items:center; padding:10px 13px; }
+.ai-typing span { width:7px; height:7px; background:var(--text3); border-radius:50%;
+  animation:aiDot 1.2s infinite; }
+.ai-typing span:nth-child(2) { animation-delay:0.2s; }
+.ai-typing span:nth-child(3) { animation-delay:0.4s; }
+@keyframes aiDot { 0%,80%,100%{transform:scale(0.6);opacity:0.4} 40%{transform:scale(1);opacity:1} }
+</style>
 </body>
 </html>
