@@ -1364,14 +1364,32 @@ function toggleReminder(shiftId, field, checked) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
   shiftReminders[shiftId][field] = !!checked;
   saveReminders();
-  renderTable();
+  updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
 }
 function undoFullAck(shiftId) {
   shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false };
   saveReminders();
-  renderTable();
+  updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
+}
+function updateReminderPanelInPlace(shiftId) {
+  const row = document.getElementById('row-' + shiftId);
+  if (!row) return; // row not in DOM (e.g. different day view), nothing to update
+  const firstTd = row.querySelector('td:first-child');
+  if (!firstTd) return;
+  // Remove old reminder element (either .reminder-panel or .reminder-all-ack)
+  const existing = firstTd.querySelector('.reminder-panel, .reminder-all-ack');
+  if (existing) existing.remove();
+  // Re-inject updated reminder panel
+  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  if (!s) return;
+  const newHtml = reminderPanelHtml(s);
+  if (newHtml) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = newHtml;
+    while (tmp.firstChild) firstTd.appendChild(tmp.firstChild);
+  }
 }
 function reminderPanelHtml(s) {
   const workerName = String(s.worker_name || '').trim();
