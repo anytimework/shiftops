@@ -6000,19 +6000,29 @@ function renderAnalytics(rows, from, to) {
   const totalPens = rows.reduce((a,s) => a + parseFloat(s.late_penalty||0) + parseFloat(s.cancellation_penalty||0), 0);
   const totalSR   = rows.reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
 
+  // ── Country splits ──
+  const payByCty    = splitAmountsByCountry(completed, netPaymentForShift);
+  const hrsByCty    = splitAmountsByCountry(completed, s => parseFloat(calcShiftHours(s)||0));
+  const penByCty    = splitAmountsByCountry(rows, s => parseFloat(s.late_penalty||0) + parseFloat(s.cancellation_penalty||0));
+  const srByCty     = splitAmountsByCountry(rows, s => parseFloat(s.sr_absorbed||0));
+  const shiftByCty  = splitAmountsByCountry(rows, () => 1);
+  const compByCty   = splitAmountsByCountry(completed, () => 1);
+  const cancByCty   = splitAmountsByCountry(cancelled, () => 1);
+  const lateByCty   = splitAmountsByCountry(withLate, () => 1);
+
   // ── Summary cards ──
   const summaryCards = `
-  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:20px;">
-    ${aCard('Total Shifts', rows.length, 'blue', '')}
-    ${aCard('Completed', completed.length, 'green', '')}
-    ${aCard('Cancelled', cancelled.length, 'red', '')}
-    ${aCard('Total Hours', totalHrs.toFixed(1)+'h', 'teal', '')}
-    ${aCard('Total Payout', '$'+totalPay.toFixed(0), 'green', '')}
-    ${aCard('Penalties', '$'+totalPens.toFixed(2), totalPens>0?'red':'green', '')}
-    ${aCard('Late Arrivals', withLate.length, withLate.length>0?'amber':'green', '')}
-    ${aCard('SR Absorbed', '$'+totalSR.toFixed(2), totalSR>0?'amber':'', '')}
-    ${aCard('Cancellation Rate', completed.length+cancelled.length > 0 ? (cancelled.length/(completed.length+cancelled.length)*100).toFixed(1)+'%' : '0%', cancelled.length>3?'amber':'green', '')}
-    ${aCard('Avg Hours/Shift', completed.length ? (totalHrs/completed.length).toFixed(1)+'h' : '—', '', '')}
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:20px;">
+    ${aSplitCard('Total Shifts', shiftByCty, 'blue', v => v.toFixed(0))}
+    ${aSplitCard('Completed', compByCty, 'green', v => v.toFixed(0))}
+    ${aSplitCard('Cancelled', cancByCty, 'red', v => v.toFixed(0))}
+    ${aSplitCard('Total Hours', hrsByCty, 'teal', v => v.toFixed(1)+'h')}
+    ${aSplitCard('Total Payout', payByCty, 'green', (v,c) => c==='Malaysia' ? 'RM'+v.toFixed(0) : '$'+v.toFixed(0))}
+    ${aSplitCard('Penalties', penByCty, 'red', (v,c) => c==='Malaysia' ? 'RM'+v.toFixed(2) : '$'+v.toFixed(2))}
+    ${aSplitCard('Late Arrivals', lateByCty, withLate.length>0?'amber':'green', v => v.toFixed(0))}
+    ${aSplitCard('SR Absorbed', srByCty, srByCty.Singapore+srByCty.Malaysia>0?'amber':'', (v,c) => c==='Malaysia' ? 'RM'+v.toFixed(2) : '$'+v.toFixed(2))}
+    ${aCard('Cancellation Rate', completed.length+cancelled.length>0?(cancelled.length/(completed.length+cancelled.length)*100).toFixed(1)+'%':'0%', cancelled.length>3?'amber':'green', '')}
+    ${aCard('Avg Hours/Shift', completed.length?(totalHrs/completed.length).toFixed(1)+'h':'—', '', '')}
   </div>`;
 
   // ── Weekly trend (last 8 weeks) ──
@@ -6042,8 +6052,12 @@ function renderAnalytics(rows, from, to) {
   // ── Top 10 earners ──
   const top10earn = buildTop10Earners(completed.filter(s => s.worker_name && s.worker_name !== 'Available'));
 
+  // ── Recommendations ──
+  const recommendations = buildRecommendations(rows, completed, cancelled, withLate);
+
   el.innerHTML = `
     ${summaryCards}
+    ${recommendations}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
       ${weeklyTrend}
       ${monthlyTrend}
@@ -6071,6 +6085,146 @@ function aCard(label, val, color, sub) {
     <div class="metric-label">${label}</div>
     <div style="font-size:22px;font-weight:700;color:${c};margin-top:4px;">${val}</div>
     ${sub ? `<div style="font-size:11px;color:var(--text3);margin-top:2px;">${sub}</div>` : ''}
+  </div>`;
+}
+
+function buildRecommendations(rows, completed, cancelled, withLate) {
+  const tips = [];
+  const total = rows.length;
+  const cancelRate = total > 0 ? cancelled.length / total : 0;
+  const lateRate   = completed.length > 0 ? withLate.length / completed.length : 0;
+
+  // ── Cancellation rate warning ──
+  if (cancelRate > 0.1) {
+    tips.push({ type:'warn', icon:'🚫', title:'High cancellation rate',
+      body:`${(cancelRate*100).toFixed(1)}% of shifts in this period were cancelled. Consider reviewing worker reliability or improving shift confirmation processes.` });
+  } else if (cancelRate > 0.05) {
+    tips.push({ type:'info', icon:'🚫', title:'Moderate cancellation rate',
+      body:`${(cancelRate*100).toFixed(1)}% cancellation rate. Monitor trends — above 10% may indicate scheduling issues.` });
+  }
+
+  // ── Late arrivals warning ──
+  if (lateRate > 0.15) {
+    tips.push({ type:'warn', icon:'🕐', title:'Frequent late arrivals',
+      body:`${(lateRate*100).toFixed(1)}% of completed shifts had late arrivals. Consider sending earlier shift reminders or reviewing travel times for key outlets.` });
+  }
+
+  // ── Busiest day insight ──
+  const dowCounts = [0,0,0,0,0,0,0];
+  const DOW_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  completed.forEach(s => {
+    if (!s.shift_date) return;
+    const d = new Date(s.shift_date + 'T00:00:00');
+    dowCounts[(d.getDay()+6)%7]++;
+  });
+  const peakDow = dowCounts.indexOf(Math.max(...dowCounts));
+  const quietDow = dowCounts.indexOf(Math.min(...dowCounts.filter(x => x > 0)));
+  if (completed.length > 10) {
+    tips.push({ type:'info', icon:'📅', title:`${DOW_NAMES[peakDow]} is your busiest day`,
+      body:`${DOW_NAMES[peakDow]} had the most completed shifts. Ensure you have enough standby workers available for this day. ${DOW_NAMES[quietDow] !== DOW_NAMES[peakDow] ? DOW_NAMES[quietDow]+' is typically quietest.' : ''}` });
+  }
+
+  // ── Top repeat canceller ──
+  const cancelCounts = {};
+  cancelled.forEach(s => { if (s.worker_name && s.worker_name !== 'Available') cancelCounts[s.worker_name] = (cancelCounts[s.worker_name]||0)+1; });
+  const topCanceller = Object.entries(cancelCounts).sort((a,b)=>b[1]-a[1])[0];
+  if (topCanceller && topCanceller[1] >= 3) {
+    tips.push({ type:'warn', icon:'⚠️', title:`${topCanceller[0]} has ${topCanceller[1]} cancellations`,
+      body:`This worker has cancelled ${topCanceller[1]} shifts this period. Consider reviewing their reliability or discussing with them before scheduling future shifts.` });
+  }
+
+  // ── Top late worker ──
+  const lateCounts = {};
+  rows.filter(s=>!s.cancelled).forEach(s => {
+    const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
+    if (l.penalty > 0 && s.worker_name && s.worker_name !== 'Available') {
+      if (!lateCounts[s.worker_name]) lateCounts[s.worker_name] = { count:0, mins:0 };
+      lateCounts[s.worker_name].count++;
+      lateCounts[s.worker_name].mins += l.mins || 0;
+    }
+  });
+  const topLate = Object.entries(lateCounts).sort((a,b)=>b[1].count-a[1].count)[0];
+  if (topLate && topLate[1].count >= 3) {
+    tips.push({ type:'info', icon:'🕐', title:`${topLate[0]} is frequently late`,
+      body:`Late ${topLate[1].count} times this period, averaging ${(topLate[1].mins/topLate[1].count).toFixed(0)} mins late per arrival. Consider a briefing or adjusting scheduled start time.` });
+  }
+
+  // ── Client usage growth ──
+  const clientShifts = {};
+  completed.forEach(s => { if (s.outlet) clientShifts[s.outlet] = (clientShifts[s.outlet]||0)+1; });
+  const topClient = Object.entries(clientShifts).sort((a,b)=>b[1]-a[1])[0];
+  if (topClient) {
+    tips.push({ type:'good', icon:'🏪', title:`${topClient[0]} is your top client`,
+      body:`${topClient[1]} completed shifts this period. A strong client relationship — consider checking if they need additional standby cover.` });
+  }
+
+  // ── SR absorbed warning ──
+  const totalSR = rows.reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
+  const totalPay = completed.reduce((a,s) => a + netPaymentForShift(s), 0);
+  if (totalSR > 0 && totalPay > 0 && (totalSR/totalPay) > 0.05) {
+    tips.push({ type:'warn', icon:'💸', title:'High SR absorption cost',
+      body:`SR absorbed costs ($${totalSR.toFixed(2)}) are ${(totalSR/totalPay*100).toFixed(1)}% of total payout. Review 3rd party bookings and special rate arrangements to manage margins.` });
+  }
+
+  if (!tips.length) {
+    tips.push({ type:'good', icon:'✅', title:'All looking good!',
+      body:'No major issues detected in this period. Keep maintaining punctuality and low cancellation rates.' });
+  }
+
+  const typeStyles = {
+    warn: { bg:'rgba(232,64,64,0.08)', border:'var(--red)',   dot:'var(--red)' },
+    info: { bg:'rgba(79,142,247,0.08)', border:'var(--accent)', dot:'var(--accent)' },
+    good: { bg:'rgba(52,199,123,0.08)', border:'var(--green)', dot:'var(--green)' },
+  };
+
+  const cards = tips.map(t => {
+    const s = typeStyles[t.type] || typeStyles.info;
+    return `<div style="background:${s.bg};border:1px solid ${s.border};border-radius:8px;padding:12px 14px;display:flex;gap:10px;align-items:flex-start;">
+      <span style="font-size:18px;flex-shrink:0;margin-top:1px;">${t.icon}</span>
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:3px;">${t.title}</div>
+        <div style="font-size:11px;color:var(--text2);line-height:1.5;">${t.body}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<div class="table-wrap" style="margin-bottom:20px;">
+    <div class="table-header"><span class="table-title">💡 Recommendations & Insights</span></div>
+    <div style="padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;">
+      ${cards}
+    </div>
+  </div>`;
+}
+
+function aSplitCard(label, byCty, color, fmt) {
+  const colors = { blue:'var(--accent)', green:'var(--green)', red:'var(--red)', amber:'var(--amber)', teal:'var(--teal)' };
+  const c = colors[color] || 'var(--text)';
+  const sg = byCty.Singapore || 0;
+  const my = byCty.Malaysia  || 0;
+  const fmtFn = typeof fmt === 'function' ? fmt : v => fmt ? v+fmt : v;
+  const hasBoth = sg > 0 && my > 0;
+  // If only one country has data, show like aCard but with country flag
+  if (!hasBoth) {
+    const val = sg > 0 ? fmtFn(sg, 'Singapore') : my > 0 ? fmtFn(my, 'Malaysia') : '—';
+    const flag = sg > 0 ? '🇸🇬 ' : my > 0 ? '🇲🇾 ' : '';
+    return `<div class="metric-card" style="min-width:0;">
+      <div class="metric-label">${label}</div>
+      <div style="font-size:20px;font-weight:700;color:${c};margin-top:4px;">${flag}${val}</div>
+    </div>`;
+  }
+  return `<div class="metric-card" style="min-width:0;">
+    <div class="metric-label">${label}</div>
+    <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span style="font-size:11px;color:var(--text3);">🇸🇬 SG</span>
+        <span style="font-size:16px;font-weight:700;color:${c};">${fmtFn(sg, 'Singapore')}</span>
+      </div>
+      <div style="height:1px;background:var(--border2);"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span style="font-size:11px;color:var(--text3);">🇲🇾 MY</span>
+        <span style="font-size:16px;font-weight:700;color:${c};">${fmtFn(my, 'Malaysia')}</span>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -6121,8 +6275,13 @@ function buildWeeklyTrend(rows) {
   const sorted = Object.entries(weeks).sort((a,b) => a[0].localeCompare(b[0])).slice(-8);
   const maxTotal = Math.max(...sorted.map(([,v]) => v.total), 1);
   const items = sorted.map(([k, v]) => {
-    const d = new Date(k + 'T00:00:00');
-    const label = d.toLocaleDateString('en-SG', { day:'numeric', month:'short' });
+    const monDay = new Date(k + 'T00:00:00');
+    const sunDay = new Date(monDay);
+    sunDay.setDate(monDay.getDate() + 6);
+    const fmtOpts = { day:'numeric', month:'short' };
+    const monLabel = monDay.toLocaleDateString('en-SG', fmtOpts);
+    const sunLabel = sunDay.toLocaleDateString('en-SG', fmtOpts);
+    const label = `${monLabel} – ${sunLabel}`;
     return { label, value: v.total, display: v.total, sub: `${v.completed} done · ${v.cancelled} cancel` };
   });
   const bars = barChart(items, maxTotal, (_,i) => {
