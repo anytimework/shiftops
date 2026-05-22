@@ -127,6 +127,18 @@ td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align:
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: rgba(255,255,255,0.02); }
 .worker-name { font-weight: 500; font-size: 13px; }
+/* Shift reminder tracking */
+.reminder-panel { margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--border2); }
+.reminder-row { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text2); margin-top: 2px; line-height: 1.3; }
+.reminder-row label { cursor: pointer; user-select: none; }
+.reminder-cb { width: 13px; height: 13px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0; margin: 0; }
+.reminder-section-label { font-size: 9.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text3); margin-top: 5px; margin-bottom: 1px; }
+.reminder-all-ack { margin-top: 6px; padding: 4px 8px; background: rgba(52,199,123,0.12); border: 1px solid rgba(52,199,123,0.3); border-radius: 4px; font-size: 11px; color: var(--green); display: flex; align-items: center; justify-content: space-between; gap: 6px; font-weight: 600; }
+.btn-undo-ack { background: none; border: 1px solid rgba(52,199,123,0.4); border-radius: 3px; padding: 1px 6px; font-size: 10px; color: var(--green); cursor: pointer; flex-shrink: 0; font-family: var(--font); }
+.btn-undo-ack:hover { background: rgba(52,199,123,0.1); }
+.reminder-alert-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 18px; font-size: 12px; font-weight: 500; border-bottom: 1px solid transparent; }
+.reminder-alert-urgent { background: rgba(255,59,48,0.08); border-bottom-color: rgba(255,59,48,0.2); color: var(--red); }
+.reminder-alert-warn { background: rgba(255,149,0,0.09); border-bottom-color: rgba(255,149,0,0.2); color: var(--amber); }
 .sub-text { font-size: 11px; color: var(--text3); margin-top: 1px; }
 
 /* Badges */
@@ -557,6 +569,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div class="content">
         <div class="metrics" id="metrics"></div>
         <div id="standby-day-panel"></div>
+        <div id="reminder-alerts"></div>
         <div class="table-wrap">
           <div class="table-header">
             <span class="table-title">Attendance log</span>
@@ -1132,6 +1145,7 @@ const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [], allKnowledge = [];
+let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded }
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
 let importRows = [];
@@ -1320,10 +1334,13 @@ function applySuggestedRate() {
 async function init() {
   seedInternalUsers();
   updateDateLabel();
+  loadReminders();
   await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList()]);
   await loadShifts();
   updateSidebarDate();
   requireInternalLogin();
+  checkReminderAlerts();
+  setInterval(() => { checkReminderAlerts(); }, 60000); // recheck every minute
 }
 
 function updateSidebarDate() {
@@ -1335,6 +1352,89 @@ function updateSidebarDate() {
 function formatDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
+
+// ─── Shift Reminder System ───────────────────────────────────────────────────
+function loadReminders() {
+  try { shiftReminders = JSON.parse(localStorage.getItem('shift_reminders') || '{}'); } catch(e) { shiftReminders = {}; }
+}
+function saveReminders() {
+  localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+}
+function toggleReminder(shiftId, field, checked) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId][field] = !!checked;
+  saveReminders();
+  renderTable();
+  checkReminderAlerts();
+}
+function undoFullAck(shiftId) {
+  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false };
+  saveReminders();
+  renderTable();
+  checkReminderAlerts();
+}
+function reminderPanelHtml(s) {
+  const workerName = String(s.worker_name || '').trim();
+  if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) return '';
+  const today = new Date(); today.setHours(0,0,0,0);
+  const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
+  const shiftDay = new Date(s.shift_date + 'T00:00:00');
+  const isToday = shiftDay.getTime() === today.getTime();
+  const isTomorrow = shiftDay.getTime() === tomorrow.getTime();
+  if (!isToday && !isTomorrow) return '';
+  const r = shiftReminders[s.id] || {};
+  const isFullyAck = r.nightSent && r.nightAcked && r.clockinSent && r.clockinResponded;
+  if (isFullyAck) {
+    return `<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
+  }
+  const sid = escapeAttr(String(s.id));
+  let html = '<div class="reminder-panel">';
+  // Night reminder section — shown on both tomorrow (send) and today (verify)
+  html += `<div class="reminder-section-label">🌙 Night reminder</div>`;
+  html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label></div>`;
+  html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rna-${sid}" ${r.nightAcked?'checked':''} onchange="toggleReminder('${sid}','nightAcked',this.checked)"><label for="rna-${sid}">Worker acknowledged</label></div>`;
+  // Clock-in section — only shown when viewing today's shifts
+  if (isToday) {
+    html += `<div class="reminder-section-label" style="margin-top:6px;">⏰ Clock-in reminder</div>`;
+    html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcs-${sid}" ${r.clockinSent?'checked':''} onchange="toggleReminder('${sid}','clockinSent',this.checked)"><label for="rcs-${sid}">Reminder sent</label></div>`;
+    html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcr-${sid}" ${r.clockinResponded?'checked':''} onchange="toggleReminder('${sid}','clockinResponded',this.checked)"><label for="rcr-${sid}">Worker responded</label></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+function checkReminderAlerts() {
+  const container = document.getElementById('reminder-alerts');
+  if (!container) return;
+  const now = new Date();
+  const todayStr = formatDate(now);
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  const alerts = [];
+  (allShifts || []).forEach(s => {
+    const r = shiftReminders[s.id] || {};
+    const workerName = String(s.worker_name || '').trim();
+    if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) return;
+    if (s.shift_date !== todayStr) return;
+    // Alert: night reminder sent but not acked, and it's past 8am
+    if (r.nightSent && !r.nightAcked && nowMins >= 480) {
+      alerts.push({ type: 'urgent', msg: `⚠️ <strong>${workerName}</strong> (${s.outlet || ''} ${s.scheduled_start ? s.scheduled_start.slice(0,5) : ''}) hasn't acknowledged last night's shift reminder` });
+    }
+    // Alert: clock-in reminder sent but not responded, within 2 hrs of shift start
+    if (r.clockinSent && !r.clockinResponded && s.scheduled_start) {
+      const [sh, sm] = s.scheduled_start.split(':').map(Number);
+      const shiftMins = sh * 60 + sm;
+      if (nowMins >= shiftMins - 120) {
+        const remaining = shiftMins - nowMins;
+        const label = remaining > 0 ? `in ${remaining} min` : 'starting NOW';
+        alerts.push({ type: 'warn', msg: `🔔 <strong>${workerName}</strong> (${s.outlet || ''}) hasn't responded to clock-in reminder — shift ${label}` });
+      }
+    }
+  });
+  if (!alerts.length) { container.innerHTML = ''; return; }
+  container.innerHTML = alerts.map(a =>
+    `<div class="reminder-alert-item ${a.type === 'urgent' ? 'reminder-alert-urgent' : 'reminder-alert-warn'}">${a.msg}</div>`
+  ).join('');
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 function updateDateLabel() {
   if (attendanceView === 'week') {
@@ -2452,6 +2552,7 @@ async function loadShifts() {
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
+  checkReminderAlerts();
 }
 
 // ── Render table ─────────────────────────────────────────────
@@ -2612,7 +2713,7 @@ function renderTable() {
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}</td>
+          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
