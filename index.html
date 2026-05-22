@@ -1334,11 +1334,11 @@ function applySuggestedRate() {
 async function init() {
   seedInternalUsers();
   updateDateLabel();
-  loadReminders();
-  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList()]);
+  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
   await loadShifts();
   updateSidebarDate();
   requireInternalLogin();
+  subscribeToReminderChanges(); // live sync from Supabase for all users
   checkReminderAlerts();
   setInterval(() => { checkReminderAlerts(); }, 60000); // recheck every minute
 }
@@ -1353,25 +1353,81 @@ function formatDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// ─── Shift Reminder System ───────────────────────────────────────────────────
-function loadReminders() {
+// ─── Shift Reminder System (Supabase-backed, real-time synced) ───────────────
+async function loadReminders() {
+  // Try Supabase first, fall back to localStorage cache
+  try {
+    const { data, error } = await supabaseClient.from('shift_reminders').select('*');
+    if (!error && data) {
+      shiftReminders = {};
+      data.forEach(r => {
+        shiftReminders[r.shift_id] = {
+          nightSent: !!r.night_sent,
+          nightAcked: !!r.night_acked,
+          clockinSent: !!r.clockin_sent,
+          clockinResponded: !!r.clockin_responded
+        };
+      });
+      localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+      return;
+    }
+  } catch(e) {}
+  // Fallback: load from localStorage cache
   try { shiftReminders = JSON.parse(localStorage.getItem('shift_reminders') || '{}'); } catch(e) { shiftReminders = {}; }
 }
-function saveReminders() {
+async function persistReminder(shiftId) {
+  // Update localStorage cache immediately
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+  // Persist to Supabase (upsert by shift_id)
+  const r = shiftReminders[shiftId] || {};
+  try {
+    await supabaseClient.from('shift_reminders').upsert({
+      shift_id: String(shiftId),
+      night_sent: !!r.nightSent,
+      night_acked: !!r.nightAcked,
+      clockin_sent: !!r.clockinSent,
+      clockin_responded: !!r.clockinResponded,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'shift_id' });
+  } catch(e) { console.warn('Reminder sync failed (saved locally):', e); }
 }
-function toggleReminder(shiftId, field, checked) {
+function subscribeToReminderChanges() {
+  try {
+    supabaseClient
+      .channel('shift_reminders_live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_reminders' }, (payload) => {
+        const row = payload.new || payload.old;
+        if (!row) return;
+        const shiftId = row.shift_id;
+        if (payload.eventType === 'DELETE') {
+          delete shiftReminders[shiftId];
+        } else {
+          shiftReminders[shiftId] = {
+            nightSent: !!row.night_sent,
+            nightAcked: !!row.night_acked,
+            clockinSent: !!row.clockin_sent,
+            clockinResponded: !!row.clockin_responded
+          };
+        }
+        localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+        updateReminderPanelInPlace(shiftId);
+        checkReminderAlerts();
+      })
+      .subscribe();
+  } catch(e) { console.warn('Reminder real-time subscription failed:', e); }
+}
+async function toggleReminder(shiftId, field, checked) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
   shiftReminders[shiftId][field] = !!checked;
-  saveReminders();
-  updateReminderPanelInPlace(shiftId);
+  updateReminderPanelInPlace(shiftId); // instant local update, no scroll jump
   checkReminderAlerts();
+  await persistReminder(shiftId);      // sync to Supabase for all other users
 }
-function undoFullAck(shiftId) {
+async function undoFullAck(shiftId) {
   shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false };
-  saveReminders();
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
+  await persistReminder(shiftId);
 }
 function updateReminderPanelInPlace(shiftId) {
   const row = document.getElementById('row-' + shiftId);
