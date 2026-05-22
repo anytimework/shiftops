@@ -6654,7 +6654,7 @@ function buildSystemContext() {
     `cancelled:${s.cancelled?'yes':'no'} id:${s.id}`
   ).join('\n');
 
-  const workerList = allWorkers.slice(0,60).map(w =>
+  const workerList = allWorkers.map(w =>
     `${w.name} | phone:${w.phone||w.contact||'N/A'} | (${normaliseCountry(w.country)}) ${w.suspended?'[SUSPENDED]':''} pay:${w.bank_method||'?'}`
   ).join('\n');
 
@@ -6669,7 +6669,7 @@ function buildSystemContext() {
     today14.push(`${ds}: ${filled} filled, ${avail} available slots`);
   }
 
-  const outletList = allOutlets.slice(0,30).map(o => `${o.name} (${normaliseCountry(o.country||'')})`).join(', ');
+  const outletList = allOutlets.map(o => `${o.name} (${normaliseCountry(o.country||'')})`).join(', ');
 
   return `
 === SYSTEM CONTEXT (live data) ===
@@ -6726,6 +6726,8 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
 {"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
 {"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
+{"type": "searchWorker", "query": "<partial or full name to search>"}
+{"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
 \`\`\`
 
@@ -6739,6 +6741,8 @@ RULES:
 - For navigation, just output the navigateTo action.
 - When answering questions about available slots, calculate from the SHIFT AVAILABILITY data in context.
 - Always use EXACT worker names and outlet names as they appear in the database.
+- If you can't find a worker in the WORKERS list, use searchWorker action to do a live database lookup — never say you can't find someone without trying this first.
+- If you can't find an outlet/client in the OUTLETS list, use searchOutlet to do a live lookup.
 - When a user tells you a fact, rule, policy or requirement (e.g. attire, SOPs, outlet info), AUTOMATICALLY save it using saveKnowledge WITHOUT asking for confirmation — just do it and confirm you saved it.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - Speak naturally, like a helpful colleague.`;
@@ -6927,6 +6931,40 @@ async function executeAIAction(actionJson) {
         localStorage.setItem('standby_workers_local', JSON.stringify(rows));
       }
       return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby list for ${a.availableDate}`;
+    }
+
+    case 'searchOutlet': {
+      try {
+        const { data, error } = await supabaseClient
+          .from('outlets')
+          .select('*')
+          .ilike('name', `%${a.query}%`)
+          .limit(10);
+        if (error) throw error;
+        if (!data?.length) return `❌ No outlets/clients found matching "${a.query}"`;
+        return data.map(o =>
+          `**${o.name}** | ${normaliseCountry(o.country||'')} | ${o.address||'No address'}`
+        ).join('\n');
+      } catch(e) {
+        return `❌ Search failed: ${e.message}`;
+      }
+    }
+
+    case 'searchWorker': {
+      try {
+        const { data, error } = await supabaseClient
+          .from('workers')
+          .select('*')
+          .ilike('name', `%${a.query}%`)
+          .limit(10);
+        if (error) throw error;
+        if (!data?.length) return `❌ No workers found matching "${a.query}"`;
+        return data.map(w =>
+          `**${w.name}** | 📞 ${w.phone||w.contact||'N/A'} | ${normaliseCountry(w.country)} | ${w.suspended?'🚫 SUSPENDED':'✅ Active'} | Pay: ${w.bank_method||'?'}`
+        ).join('\n');
+      } catch(e) {
+        return `❌ Search failed: ${e.message}`;
+      }
     }
 
     case 'saveKnowledge': {
