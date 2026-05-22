@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v23 — 3rd party manual SR replacement with hourly uplift plus platform fee -->
+<!-- Build patch: v24 — profile notes, commission-aware special rates, restriction blocks and worker phones -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -163,8 +163,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .modal h3 { font-size: 15px; font-weight: 600; margin-bottom: 16px; letter-spacing: -0.2px; }
 .form-row { margin-bottom: 14px; }
 .form-row label { display: block; font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; font-family: var(--mono); }
-.form-row input, .form-row select { width: 100%; font-size: 13px; padding: 9px 12px; border-radius: var(--radius); border: 1px solid var(--border2); background: var(--bg); color: var(--text); font-family: var(--font); transition: border 0.15s; }
-.form-row input:focus, .form-row select:focus { outline: none; border-color: var(--accent); }
+.form-row input, .form-row select, .form-row textarea { width: 100%; font-size: 13px; padding: 9px 12px; border-radius: var(--radius); border: 1px solid var(--border2); background: var(--bg); color: var(--text); font-family: var(--font); transition: border 0.15s; }
+.form-row textarea { min-height: 76px; resize: vertical; line-height: 1.45; }
+.form-row input:focus, .form-row select:focus, .form-row textarea:focus { outline: none; border-color: var(--accent); }
 .form-row select option { background: var(--bg2); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -910,6 +911,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
       <div class="form-row"><label>Account / PayNow no.</label><input type="text" id="wf-bank" placeholder="e.g. 9xxx xxxx"></div>
     </div>
+    <div class="form-row"><label>Profile notes</label><textarea id="wf-notes" rows="4" placeholder="e.g. Watch lateness; check location 1 hour before shift"></textarea></div>
+    <div class="form-row"><label>Outlets this worker should not be assigned to</label><textarea id="wf-disliked-outlets" rows="3" placeholder="One outlet per line, e.g. Pasta Bar"></textarea></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-worker-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="worker-save-btn" onclick="saveWorker()">Add worker</button>
@@ -919,11 +922,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 <!-- ADD OUTLET MODAL -->
 <div class="modal-overlay" id="add-outlet-modal">
-  <div class="modal" style="width:320px;">
+  <div class="modal">
     <h3 id="outlet-modal-title">Add outlet</h3>
     <div class="form-row"><label>Outlet name</label><input type="text" id="of-name" placeholder="e.g. Kopitiam Sengkang"></div>
     <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
+    <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
+    <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
+    <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="outlet-save-btn" onclick="saveOutlet()">Add outlet</button>
@@ -1060,6 +1066,7 @@ let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLog
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 let editingWorkerId = null, editingOutletId = null;
+let profileMeta = loadProfileMeta();
 const INTERNAL_USER_ACCOUNTS = [
   { username:'Jon', passcode:'8472915630' },
   { username:'Jayden', passcode:'5028741936' },
@@ -1070,6 +1077,56 @@ const INTERNAL_USER_ACCOUNTS = [
 const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
 const INTERNAL_LOGIN_TTL_MS = 12 * 60 * 60 * 1000;
 
+function loadProfileMeta() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('profile_meta_v24') || '{}');
+    return { workers: parsed.workers || {}, outlets: parsed.outlets || {} };
+  } catch(e) {
+    return { workers:{}, outlets:{} };
+  }
+}
+function saveProfileMeta() {
+  localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+}
+function normProfileKey(name) {
+  return String(name || '').trim().toLowerCase();
+}
+function splitProfileList(text) {
+  return String(text || '').split(/\n|,/).map(x => x.trim()).filter(Boolean);
+}
+function workerProfile(name) {
+  return profileMeta.workers[normProfileKey(name)] || {};
+}
+function outletProfile(name) {
+  return profileMeta.outlets[normProfileKey(name)] || {};
+}
+function workerPhone(workerName) {
+  const w = allWorkers.find(x => String(x.name || '').trim().toLowerCase() === String(workerName || '').trim().toLowerCase());
+  return w?.phone || '';
+}
+function workerPhoneLine(workerName) {
+  const phone = workerPhone(workerName);
+  return phone ? `<div class="sub-text">☎ ${escapeHtml(phone)}</div>` : '';
+}
+function assignmentRestriction(workerName, outletName) {
+  const worker = String(workerName || '').trim();
+  const outlet = String(outletName || '').trim();
+  if (!worker || !outlet || worker.toLowerCase() === 'available') return null;
+  const wk = normProfileKey(worker);
+  const ok = normProfileKey(outlet);
+  if ((workerProfile(worker).disliked_outlets || []).map(normProfileKey).includes(ok)) {
+    return `${worker} is marked as not wanting shifts at ${outlet}.`;
+  }
+  if ((outletProfile(outlet).banned_workers || []).map(normProfileKey).includes(wk)) {
+    return `${worker} is banned from ${outlet}.`;
+  }
+  return null;
+}
+function profileNoteBlock(text, tone = 'blue') {
+  const clean = String(text || '').trim();
+  if (!clean) return '';
+  return `<div class="alert alert-${tone}" style="margin-top:10px;padding:8px 10px;font-size:11px;"><span class="alert-icon">📝</span><span>${escapeHtml(clean).replace(/\n/g,'<br>')}</span></div>`;
+}
 
 const JOB_TYPES = ['F&B Service Crew', 'Dishwasher', 'Kitchen Assistant', 'Chef De Partie', 'Cashier', 'Runner', 'Barista'];
 const DAY_KEYS = ['mon','tue','wed','thu','fri','sat','sun'];
@@ -1624,7 +1681,7 @@ function updateWorkerDatalist() {
   if (!dl) return;
   const selectedOutlet = document.getElementById('f-outlet')?.value;
   const list = selectedOutlet ? workersForSelectedOutlet() : allWorkers;
-  dl.innerHTML = list.map(w => `<option value="${escapeAttr(w.name)}">`).join('');
+  dl.innerHTML = list.map(w => `<option value="${escapeAttr(w.name)}" label="${escapeAttr([w.phone, normaliseCountry(w.country)].filter(Boolean).join(' · '))}">`).join('');
 }
 function onShiftOutletChange() {
   applySuggestedRate();
@@ -1704,6 +1761,23 @@ function srAbsorbedForShift(s) {
     return Math.max(0, hours * delta);
   }
   return parseFloat(s.sr_absorbed || 0);
+}
+function specialRateCommissionInfo(s) {
+  if (!isOwnMemberSpecialRate(s)) return null;
+  const hours = parseFloat(calcShiftHours(s) || 0);
+  const baseRate = parseFloat(s.rate || 0);
+  const srRate = parseFloat(s.sr_rate || 0);
+  const deltaPerHour = Math.max(0, srRate - baseRate);
+  const commissionPct = parseFloat(outletProfile(s.outlet).commission_pct ?? 20) || 0;
+  const commissionPerHour = baseRate * (commissionPct / 100);
+  const waivedPerHour = Math.min(deltaPerHour, commissionPerHour);
+  const trueCostPerHour = Math.max(0, deltaPerHour - commissionPerHour);
+  return {
+    commissionPct,
+    waived: waivedPerHour * hours,
+    trueCost: trueCostPerHour * hours,
+    label: trueCostPerHour > 0 ? 'Extra cost after commission' : 'Commission waived'
+  };
 }
 function shiftPenaltyAmount(s) {
   if (s.cancelled) return s.mc_url ? 0 : parseFloat(s.cancellation_penalty ?? 15) || 0;
@@ -1893,10 +1967,13 @@ function paymentDisplay(s) {
     const workerPay  = parseFloat(calcShiftHours(s)||0) * srRateVal; // hours × $17 = $153
     const tc2  = transportClaim(s);
     const netSR = Math.max(0, workerPay - shiftPenaltyAmount(s)) + tc2;
+    const commissionInfo = specialRateCommissionInfo(s);
+    const commissionLine = commissionInfo ? `<div class="sub-text">${commissionInfo.label}: ${moneyForShift(commissionInfo.trueCost || commissionInfo.waived, s)} at ${commissionInfo.commissionPct}% commission${commissionInfo.trueCost > 0 ? ` · Commission waived ${moneyForShift(commissionInfo.waived, s)}` : ''}</div>` : '';
     return `<div>${moneyForShift(clientBill, s)}</div>
       <div class="sub-text">${hours||0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr <span style="color:var(--text3);">(client rate)</span></div>
       <div class="sub-text" style="margin-top:3px;">Worker pay: <strong>${moneyForShift(workerPay, s)}</strong> <span style="color:var(--teal);">(${currencySymbolForOutlet(s.outlet)}${srRateVal.toFixed(2)}/hr special)</span></div>
       <div class="sub-text">SR absorbed: ${moneyForShift(srFee, s)}</div>
+      ${commissionLine}
       <div style="margin-top:4px;color:var(--green);font-weight:600;">Net to worker: ${moneyForShift(netSR, s)}</div>
       ${penalty>0?`<div class="sub-text">Less deduction: ${moneyForShift(penalty, s)}</div>`:''}
       <div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
@@ -2342,14 +2419,16 @@ function srDisplay(s) {
   if (!s.sr_worker && !fee && !hasSpecialRate) return '<span class="penalty-none">—</span>';
   const label = s.sr_worker ? escapeHtml(s.sr_worker) : (hasSpecialRate ? `Special rate ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.sr_rate).toFixed(0)}/hr` : 'SR');
   const feeLine = fee ? `<div style="color:var(--amber);font-weight:700;">${moneyForShift(fee, s)}</div>` : '<div class="sub-text">No extra fee</div>';
-  return `${feeLine}<div class="sub-text">${label}</div>`;
+  const commission = specialRateCommissionInfo(s);
+  const commissionLine = commission ? `<div class="sub-text" style="color:${commission.trueCost > 0 ? 'var(--red)' : 'var(--green)'};">${commission.label}</div>` : '';
+  return `${feeLine}<div class="sub-text">${label}</div>${commissionLine}`;
 }
 
 function renderTable() {
   renderStandbyDayPanel();
   if (attendanceView === 'week') { renderWeeklyGrid(); return; }
   const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
-  let rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  let rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
   // When viewing Total Payment tab, sort by effective finish time descending
   // Overnight shifts (clock_out < scheduled_start) count as next day for sorting
   if (activeMetricFilter === 'paid_out') {
@@ -2414,7 +2493,7 @@ function renderTable() {
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div><div class="sub-text">${s.outlet}</div>${srTag}</td>
+          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}</td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -2448,7 +2527,7 @@ function renderWeeklyGrid() {
     if (statusFilter === 'cancelled') return !!s.cancelled;
     return true;
   };
-  const filtered = allShifts.filter(s => matchesStatus(s) && matchesMetricFilter(s) && (!search || [s.worker_name, s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  const filtered = allShifts.filter(s => matchesStatus(s) && matchesMetricFilter(s) && (!search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
   const labelMap = { active:'active', confirmed:'confirmed', available:'available', cancelled:'cancelled', all:'total' };
   const standbyInWeek = days.reduce((a,d) => a + standbyForDay(formatDate(d)).length, 0);
   document.getElementById('shift-count').textContent = `${filtered.length} ${labelMap[statusFilter] || ''} shift${filtered.length !== 1 ? 's' : ''}${standbyInWeek ? ` · ${standbyInWeek} standby` : ''}`;
@@ -2462,7 +2541,7 @@ function renderWeeklyGrid() {
     const workerName = String(s.worker_name || '').trim() || 'Available';
     const isAvailable = workerName.toLowerCase() === 'available';
     const cls = s.cancelled ? ' cancelled' : (isAvailable ? ' available' : '');
-    const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong>${workerName}</strong>`;
+    const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong>${workerName}</strong>${workerPhoneLine(workerName)}`;
     const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${moneyForShift(netPaymentForShift(s), s)}</div>` : '';
     const actions = s.cancelled
       ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
@@ -3002,7 +3081,11 @@ function onWorkerInput() {
   const btn = document.getElementById('add-confirm-btn');
   const selectedOutlet = document.getElementById('f-outlet')?.value || '';
   const selectedCountry = outletCountry(selectedOutlet);
-  if (rawName && w && normaliseCountry(w.country) !== selectedCountry) {
+  const restriction = assignmentRestriction(name, selectedOutlet);
+  if (restriction) {
+    document.getElementById('add-block-text').textContent = restriction;
+    warn.style.display = 'flex'; btn.disabled = true; btn.style.opacity = '0.4';
+  } else if (rawName && w && normaliseCountry(w.country) !== selectedCountry) {
     document.getElementById('add-block-text').textContent = `${w.name} is registered under ${normaliseCountry(w.country)}, but this outlet is under ${selectedCountry}.`;
     warn.style.display = 'flex'; btn.disabled = true; btn.style.opacity = '0.4';
   } else if (name && isWorkerSuspended(name)) {
@@ -3058,6 +3141,8 @@ async function addShift() {
   const selectedCountry = outletCountry(outletName);
   if (!isThirdParty && name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const selectedWorker = allWorkers.find(x => String(x.name || '').toLowerCase() === String(name || '').toLowerCase());
+  const restriction = !isThirdParty ? assignmentRestriction(name, outletName) : null;
+  if (restriction) { toast(restriction, 'error'); return; }
   if (!isThirdParty && selectedWorker && normaliseCountry(selectedWorker.country) !== selectedCountry) { toast(`${name} is registered under ${normaliseCountry(selectedWorker.country)}, not ${selectedCountry}`, 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
@@ -3412,6 +3497,8 @@ async function loadWorkerCards() {
     const initials = w.name.split(/[\s.]+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
     const until = suspended && w.suspended_until ? new Date(w.suspended_until) : null;
     const recent = w._recent_cancellations || 0;
+    const meta = workerProfile(w.name);
+    const disliked = (meta.disliked_outlets || []).length ? `<div class="sub-text" style="margin-top:6px;color:var(--amber);">Avoid: ${escapeHtml(meta.disliked_outlets.join(', '))}</div>` : '';
     return `<div class="worker-card ${suspended?'suspended':''}">
       <div class="worker-card-top">
         <div class="worker-avatar">${initials}</div>
@@ -3431,6 +3518,8 @@ async function loadWorkerCards() {
         <div class="worker-stat"><div class="worker-stat-label">Cancellations (30d)</div><div class="worker-stat-val" style="color:${recent>=1?'var(--red)':'var(--green)'};">${recent}/2</div></div>
       </div>
       ${suspended && until ? `<div style="margin-top:10px;padding:8px 10px;background:var(--red-dim);border-radius:var(--radius);font-size:11px;color:var(--red);">Suspended until ${until.getDate()} ${MONTHS[until.getMonth()]} ${until.getFullYear()}</div>` : ''}
+      ${profileNoteBlock(meta.notes)}
+      ${disliked}
       ${suspended ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;justify-content:center;" onclick="liftSuspension('${w.name.replace(/'/g,"\\'")}')">Lift suspension</button>` : ''}
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;" onclick="editWorker('${w.id}')">Edit</button>
@@ -3467,6 +3556,8 @@ function resetWorkerModal() {
   document.getElementById('wf-phone').value = '';
   document.getElementById('wf-method').value = 'PayNow';
   document.getElementById('wf-bank').value = '';
+  document.getElementById('wf-notes').value = '';
+  document.getElementById('wf-disliked-outlets').value = '';
 }
 function openAddWorkerModal() { resetWorkerModal(); document.getElementById('add-worker-modal').classList.add('open'); }
 function editWorker(id) {
@@ -3480,6 +3571,9 @@ function editWorker(id) {
   document.getElementById('wf-phone').value = w.phone || '';
   document.getElementById('wf-method').value = w.bank_method || 'PayNow';
   document.getElementById('wf-bank').value = w.bank_details || '';
+  const meta = workerProfile(w.name);
+  document.getElementById('wf-notes').value = meta.notes || '';
+  document.getElementById('wf-disliked-outlets').value = (meta.disliked_outlets || []).join('\n');
   document.getElementById('add-worker-modal').classList.add('open');
 }
 
@@ -3490,6 +3584,13 @@ async function saveWorker() {
   const query = editingWorkerId ? supabaseClient.from('workers').update(payload).eq('id', editingWorkerId) : supabaseClient.from('workers').insert(payload);
   const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  const oldWorker = editingWorkerId ? allWorkers.find(x => x.id === editingWorkerId) : null;
+  if (oldWorker && normProfileKey(oldWorker.name) !== normProfileKey(name)) delete profileMeta.workers[normProfileKey(oldWorker.name)];
+  profileMeta.workers[normProfileKey(name)] = {
+    notes: document.getElementById('wf-notes').value.trim(),
+    disliked_outlets: splitProfileList(document.getElementById('wf-disliked-outlets').value)
+  };
+  saveProfileMeta();
   toast(editingWorkerId ? 'Worker updated!' : 'Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
   editingWorkerId = null;
@@ -3503,8 +3604,12 @@ function loadOutletsList() {
   const filteredOutlets = q ? allOutlets.filter(o => [o.name, o.location, normaliseCountry(o.country)].some(v => String(v || '').toLowerCase().includes(q))) : allOutlets;
   if (!filteredOutlets.length) { document.getElementById('outlets-body').innerHTML = `<div class="empty-state"><div class="empty-icon">🏪</div><p>${q ? 'No outlets or clients match your search.' : 'No outlets yet.'}</p></div>`; return; }
   document.getElementById('outlets-body').innerHTML = `<table>
-    <thead><tr><th>Outlet name</th><th>Country</th><th>Location</th><th>Added</th><th>Actions</th></tr></thead>
-    <tbody>${filteredOutlets.map(o => `<tr><td style="font-weight:500;">${o.name}</td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${o.location || '—'}</td><td style="font-family:var(--mono);font-size:12px;color:var(--text3);">${o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`).join('')}</tbody>
+    <thead><tr><th>Outlet name</th><th>Country</th><th>Location / notes</th><th>Commission</th><th>Actions</th></tr></thead>
+    <tbody>${filteredOutlets.map(o => {
+      const meta = outletProfile(o.name);
+      const banned = (meta.banned_workers || []).length ? `<div class="sub-text" style="color:var(--red);margin-top:4px;">Banned: ${escapeHtml(meta.banned_workers.join(', '))}</div>` : '';
+      return `<tr><td style="font-weight:500;">${escapeHtml(o.name)}</td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+    }).join('')}</tbody>
   </table>`;
 }
 
@@ -3515,6 +3620,9 @@ function resetOutletModal() {
   document.getElementById('of-name').value = '';
   document.getElementById('of-country').value = 'Singapore';
   document.getElementById('of-location').value = '';
+  document.getElementById('of-commission').value = '20';
+  document.getElementById('of-notes').value = '';
+  document.getElementById('of-banned-workers').value = '';
 }
 function openAddOutletModal() { resetOutletModal(); document.getElementById('add-outlet-modal').classList.add('open'); }
 function editOutlet(id) {
@@ -3526,6 +3634,10 @@ function editOutlet(id) {
   document.getElementById('of-name').value = o.name || '';
   document.getElementById('of-country').value = normaliseCountry(o.country);
   document.getElementById('of-location').value = o.location || '';
+  const meta = outletProfile(o.name);
+  document.getElementById('of-commission').value = meta.commission_pct ?? '20';
+  document.getElementById('of-notes').value = meta.notes || '';
+  document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
   document.getElementById('add-outlet-modal').classList.add('open');
 }
 
@@ -3536,6 +3648,14 @@ async function saveOutlet() {
   const query = editingOutletId ? supabaseClient.from('outlets').update(payload).eq('id', editingOutletId) : supabaseClient.from('outlets').insert(payload);
   const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  const oldOutlet = editingOutletId ? allOutlets.find(x => x.id === editingOutletId) : null;
+  if (oldOutlet && normProfileKey(oldOutlet.name) !== normProfileKey(name)) delete profileMeta.outlets[normProfileKey(oldOutlet.name)];
+  profileMeta.outlets[normProfileKey(name)] = {
+    commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
+    notes: document.getElementById('of-notes').value.trim(),
+    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value)
+  };
+  saveProfileMeta();
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
   editingOutletId = null;
@@ -5477,6 +5597,13 @@ async function confirmImportBookings() {
 
     // Skip rows marked cancelled in the preview
     if (r._cancelled) { skipped++; continue; }
+
+    const restriction = assignmentRestriction(r.worker_name, r.outlet);
+    if (restriction) {
+      skipped++;
+      toast(`Skipped ${r.worker_name}: ${restriction}`, 'error');
+      continue;
+    }
 
     // ── Overlap check: query DB for that date to catch conflicts across all dates ──
     if (r.worker_name && r.worker_name !== 'Available') {
