@@ -502,6 +502,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('activity',this)">
         <span class="nav-icon">🕘</span> Activity Log
       </button>
+      <button class="nav-item" onclick="switchPage('knowledge',this)">
+        <span class="nav-icon">📚</span> Business Knowledge
+      </button>
     </nav>
     <div class="sidebar-user">
       <div class="sidebar-user-label">Logged in as</div>
@@ -791,6 +794,51 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           <div id="activity-body"><div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet.</p></div></div>
         </div>
       </div>
+    </div>
+
+    <div id="page-knowledge" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>📚 Business Knowledge</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Store SOPs, attire rules, outlet info — the AI learns from this too</p></div>
+        <div class="topbar-right" style="gap:8px;">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('kb-upload-input').click()">⬆️ Upload .txt</button>
+          <input type="file" id="kb-upload-input" accept=".txt,.md" style="display:none" onchange="kbUploadFile(this)">
+          <button class="btn btn-primary btn-sm" onclick="kbOpenAddModal()">+ Add Entry</button>
+        </div>
+      </div>
+      <div class="content">
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
+          <input id="kb-search" class="form-input" placeholder="Search knowledge…" style="max-width:280px;font-size:13px;" oninput="renderKnowledgePage()">
+          <select id="kb-filter-cat" class="form-input" style="max-width:180px;font-size:13px;" onchange="renderKnowledgePage()">
+            <option value="">All categories</option>
+            <option>Attire</option><option>SOP</option><option>Outlet</option><option>Payroll</option><option>General</option>
+          </select>
+        </div>
+        <div id="kb-body"><div class="empty-state"><div class="empty-icon">📚</div><p>No knowledge entries yet. Add one or chat with the AI assistant.</p></div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- BUSINESS KNOWLEDGE PAGE -->
+<script>/* kb page injected */</script>
+
+<!-- KB ADD/EDIT MODAL -->
+<div class="modal-overlay" id="kb-modal">
+  <div class="modal" style="max-width:520px;">
+    <h3 id="kb-modal-title">Add Knowledge Entry</h3>
+    <input type="hidden" id="kb-edit-id">
+    <div class="form-row"><label>Topic / Title</label><input id="kb-topic" class="form-input" placeholder="e.g. DOMO Attire Requirements"></div>
+    <div class="form-row"><label>Category</label>
+      <select id="kb-category" class="form-input">
+        <option>General</option><option>Attire</option><option>SOP</option><option>Outlet</option><option>Payroll</option>
+      </select>
+    </div>
+    <div class="form-row"><label>Outlet (optional)</label><input id="kb-outlet" class="form-input" placeholder="Leave blank if applies to all outlets"></div>
+    <div class="form-row"><label>Content</label><textarea id="kb-content" class="form-input" rows="5" style="resize:vertical;" placeholder="Describe the rule, requirement or knowledge…"></textarea></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('kb-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="kbSaveModal()">Save</button>
     </div>
   </div>
 </div>
@@ -1083,7 +1131,7 @@ const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Satur
 const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
-let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [];
+let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [], allKnowledge = [];
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
 let importRows = [];
