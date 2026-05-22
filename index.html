@@ -6568,7 +6568,11 @@ RULES:
     throw new Error(`API error ${response.status}: ${errBody}`);
   }
   const data = await response.json();
+  if (data.type === 'error') {
+    throw new Error(data.error?.message || JSON.stringify(data.error));
+  }
   const reply = data.content?.[0]?.text || '';
+  if (!reply) throw new Error('Empty response from AI. Raw: ' + JSON.stringify(data).slice(0, 200));
   aiHistory.push({ role: 'assistant', content: reply });
   return reply;
 }
