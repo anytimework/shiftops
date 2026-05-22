@@ -1338,9 +1338,9 @@ async function init() {
   await loadShifts();
   updateSidebarDate();
   requireInternalLogin();
-  subscribeToReminderChanges(); // live sync from Supabase for all users
+  subscribeToReminderChanges(); // live sync + 30s polling fallback
   checkReminderAlerts();
-  setInterval(() => { checkReminderAlerts(); }, 60000); // recheck every minute
+  setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
 }
 
 function updateSidebarDate() {
@@ -1376,12 +1376,12 @@ async function loadReminders() {
   } catch(e) {}
 }
 async function persistReminder(shiftId) {
-  // Update localStorage cache immediately
+  // Always save to localStorage immediately so current user never loses data
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
-  // Persist to Supabase (upsert by shift_id)
+  // Save to Supabase so all other users can see it
   const r = shiftReminders[shiftId] || {};
   try {
-    await supabaseClient.from('shift_reminders').upsert({
+    const { error } = await supabaseClient.from('shift_reminders').upsert({
       shift_id: String(shiftId),
       night_sent: !!r.nightSent,
       night_acked: !!r.nightAcked,
@@ -1389,9 +1389,17 @@ async function persistReminder(shiftId) {
       clockin_responded: !!r.clockinResponded,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
-  } catch(e) { console.warn('Reminder sync failed (saved locally):', e); }
+    if (error) {
+      console.error('Reminder Supabase error:', error);
+      toast('⚠ Reminder saved locally only — Supabase sync failed. Run the shift_reminders SQL in Supabase to enable team sync.', 'error');
+    }
+  } catch(e) {
+    console.warn('Reminder sync exception:', e);
+    toast('⚠ Reminder saved locally only — could not reach Supabase.', 'error');
+  }
 }
 function subscribeToReminderChanges() {
+  // Real-time subscription — fires instantly when any user ticks a box
   try {
     supabaseClient
       .channel('shift_reminders_live')
@@ -1413,8 +1421,46 @@ function subscribeToReminderChanges() {
         updateReminderPanelInPlace(shiftId);
         checkReminderAlerts();
       })
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('✅ Reminder real-time active');
+        if (status === 'CHANNEL_ERROR') console.warn('⚠ Reminder real-time channel error — polling fallback active');
+      });
   } catch(e) { console.warn('Reminder real-time subscription failed:', e); }
+  // Polling fallback — catches any missed real-time events every 30s
+  setInterval(silentSyncReminders, 30000);
+}
+async function silentSyncReminders() {
+  // Fetch latest from Supabase and update only changed panels (no scroll jump, no full re-render)
+  try {
+    const { data, error } = await supabaseClient.from('shift_reminders').select('*');
+    if (error || !data || data.length === 0) return;
+    const incoming = {};
+    data.forEach(r => {
+      incoming[r.shift_id] = {
+        nightSent: !!r.night_sent,
+        nightAcked: !!r.night_acked,
+        clockinSent: !!r.clockin_sent,
+        clockinResponded: !!r.clockin_responded
+      };
+    });
+    // Find shift IDs where something changed
+    const allIds = new Set([...Object.keys(incoming), ...Object.keys(shiftReminders)]);
+    const changed = [];
+    allIds.forEach(id => {
+      const a = shiftReminders[id] || {};
+      const b = incoming[id] || {};
+      if (a.nightSent !== b.nightSent || a.nightAcked !== b.nightAcked ||
+          a.clockinSent !== b.clockinSent || a.clockinResponded !== b.clockinResponded) {
+        changed.push(id);
+      }
+    });
+    if (changed.length > 0) {
+      shiftReminders = incoming;
+      localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+      changed.forEach(id => updateReminderPanelInPlace(id));
+      checkReminderAlerts();
+    }
+  } catch(e) {}
 }
 async function toggleReminder(shiftId, field, checked) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
