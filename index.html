@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v25 — clickable country-split report cards with penalties -->
+<!-- Build patch: v26 — report penalty export, attendance comments and unpaid total-payment badge -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2500,7 +2500,7 @@ function renderTable() {
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
-          <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}</td>
+          <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}${s.payroll_notes ? `<div class="sub-text" style="margin-top:4px;color:var(--amber);">Note: ${escapeHtml(s.payroll_notes)}</div>` : ''}</td>
           <td style="font-family:var(--mono);font-size:12px;min-width:170px;">${paymentDisplay(s)}</td>
           <td>${statusBadge(s)}</td>
           <td>${penaltyDisplay(s)}</td>
@@ -2739,6 +2739,10 @@ function openEditRow(id) {
        <span style="font-size:11px;color:var(--text2);">🚕 Transport $</span>
        <input type="number" min="0" step="0.50" id="edit-tc-${id}" value="${tc > 0 ? tc.toFixed(2) : ''}" placeholder="0.00"
          style="width:70px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
+     </div>
+     <div style="margin-top:6px;">
+       <textarea id="edit-notes-${id}" rows="3" placeholder="Comments / internal notes"
+         style="width:100%;min-width:220px;font-size:12px;padding:6px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--font);resize:vertical;">${escapeHtml(s.payroll_notes || '')}</textarea>
      </div>` +
     `<div style="display:flex;gap:6px;margin-top:6px;">
        <button class="btn btn-primary btn-sm" onclick="saveRow('${id}')">Save</button>
@@ -2768,23 +2772,27 @@ async function saveRow(id) {
   const coInput = document.getElementById('edit-co-' + id);
   const brInput = document.getElementById('edit-break-' + id);
   const tcInput = document.getElementById('edit-tc-' + id);
+  const notesInput = document.getElementById('edit-notes-' + id);
   const ci = ciInput ? (ciInput.value || null) : (s.clock_in?.slice(0,5) || null);
   const co = coInput ? (coInput.value || null) : (s.clock_out?.slice(0,5) || null);
   const br = brInput ? parseInt(brInput.value || 0, 10) : breakMinsForShift(s);
   const tc = tcInput ? (parseFloat(tcInput.value) || 0) : parseFloat(s.transport_claim || 0);
+  const notes = notesInput ? notesInput.value.trim() : (s.payroll_notes || '');
   const lp = ci ? calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty : 0;
   const { error } = await supabaseClient.from('shifts').update({
     clock_in: ci, clock_out: co, break_mins: br,
     late_penalty: lp,
     transport_claim: tc || null,
+    payroll_notes: notes || null,
     updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Failed to save: ' + error.message, 'error'); return; }
   const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
+  const notesLog = notes ? `, notes: ${notes}` : '';
   const _dateFmt = s.shift_date ? new Date(s.shift_date+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}) : '';
   await logActivity(
     'Edited shift',
-    `${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}`,
+    `${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}${notesLog}`,
     'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
   );
   toast('Saved!');
@@ -2855,6 +2863,7 @@ function renderMetrics() {
   const srAbsorbedByCountry = splitAmountsByCountry(allShifts, srAbsorbedForShift);
   const srAbsorbedTotal = srAbsorbedByCountry.Singapore + srAbsorbedByCountry.Malaysia;
   const totalPaidOutRows = payableShifts.filter(s => s.clock_out);
+  const unpaidPaidOut = totalPaidOutRows.filter(s => !s.is_paid).length;
   const estimatedPayoutRows = payableShifts.filter(s => !s.clock_out);
   const totalPaidOutByCountry = splitAmountsByCountry(totalPaidOutRows, totalPaymentForShift);
   const estimatedPayoutByCountry = splitAmountsByCountry(estimatedPayoutRows, estimatedPaymentForShift);
@@ -2868,7 +2877,7 @@ function renderMetrics() {
     ${card('clocked_in','Clocked in', present, 'blue')}
     ${card('pending_clock_in','Pending clock-in', pendingClockIn, pendingClockIn>0?'amber':'green', pendingClockInLabel, pendingClockIn)}
     ${card('pending_clock_out','Pending clock-out', pendingClockOut, pendingClockOut>0?'amber':'green', pendingClockOutLabel, pendingClockOut)}
-    ${card('paid_out','Total payment', countrySplitMetric(totalPaidOutByCountry, 'green'), '')}
+    ${card('paid_out','Total payment', countrySplitMetric(totalPaidOutByCountry, 'green'), '', '', unpaidPaidOut)}
     ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
     ${card('late','Late', late, late>0?'red':'green')}
     ${card('cancelled','Cancelled', cancelled, cancelled>0?'red':'')}
@@ -4251,28 +4260,32 @@ function renderReport(from, to, outlet) {
 
 function exportReportCsv() {
   if (!currentReportRows.length) { toast('Generate a report first', 'error'); return; }
-  const header = ['Date','Employee','Outlet','Hours Worked','Rate (Client)','Client Billing','Worker Pay','SR Absorbed','Transport Claim','Total Billed to Client','Summary','Role / Payroll Notes','In','Out','Break'];
+  const header = ['Date','Employee','Outlet','Country','Hours Worked','Rate (Client)','Client Billing','Worker Pay','SR Absorbed','Penalties','Transport Claim','Total Billed to Client','Summary','Role / Payroll Notes','In','Out','Break'];
   const rows = currentReportRows.map(s => {
     const hours        = parseFloat(calcShiftHours(s) || 0);
     const tc           = transportClaim(s);
     const clientBilling = payoutForShift(s);
     const workerPay    = netPaymentForShift(s);
     const srAbs        = srAbsorbedForShift(s);
+    const penalty      = reportPenaltyForShift(s);
     const clientTotal  = clientBilling + tc;
-    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, hours,
+    return [formatDisplayDate(s.shift_date), s.worker_name, s.outlet, countryForShift(s), hours,
       parseFloat(s.rate || 0), clientBilling.toFixed(2), workerPay.toFixed(2),
       srAbs > 0 ? srAbs.toFixed(2) : '',
+      penalty > 0 ? penalty.toFixed(2) : '',
       tc > 0 ? tc.toFixed(2) : '', clientTotal.toFixed(2),
-      payrollSummary(s), s.role || '', s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
+      payrollSummary(s), [s.role || '', s.payroll_notes || ''].filter(Boolean).join(' — '), s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '', breakLabel(breakMinsForShift(s))];
   });
   const totalHours       = currentReportRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout      = currentReportRows.reduce((a,s) => a + payoutForShift(s), 0);
   const totalWorkerPay   = currentReportRows.reduce((a,s) => a + netPaymentForShift(s), 0);
   const totalSrAbsorbed  = currentReportRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
+  const totalPenalties   = currentReportRows.reduce((a,s) => a + reportPenaltyForShift(s), 0);
   const totalTransport   = currentReportRows.reduce((a,s) => a + transportClaim(s), 0);
   const totalClientBill  = totalPayout + totalTransport;
-  rows.push(['TOTAL','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalWorkerPay.toFixed(2),
+  rows.push(['TOTAL','','','',totalHours.toFixed(2),'',totalPayout.toFixed(2),totalWorkerPay.toFixed(2),
     totalSrAbsorbed > 0 ? totalSrAbsorbed.toFixed(2) : '',
+    totalPenalties > 0 ? totalPenalties.toFixed(2) : '',
     totalTransport > 0 ? totalTransport.toFixed(2) : '', totalClientBill.toFixed(2),
     '','','','','']);
   const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
@@ -4280,7 +4293,8 @@ function exportReportCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'usage_report.csv';
+  const filterSuffix = currentReportMetricFilter && currentReportMetricFilter !== 'all' ? `_${currentReportMetricFilter}` : '';
+  a.download = `usage_report${filterSuffix}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
