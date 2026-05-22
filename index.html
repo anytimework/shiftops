@@ -489,6 +489,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('reports',this)">
         <span class="nav-icon">📊</span> Reports
       </button>
+      <button class="nav-item" onclick="switchPage('analytics',this)">
+        <span class="nav-icon">📈</span> Analytics
+      </button>
       <button class="nav-item" onclick="switchPage('incidents',this)">
         <span class="nav-icon">⚠️</span> Incidents
       </button>
@@ -718,6 +721,26 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
     </div>
 
+
+    <!-- ANALYTICS PAGE -->
+    <div id="page-analytics" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>Analytics</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Trends, top performers and insights</p></div>
+        <div class="topbar-right">
+          <select id="analytics-period" onchange="loadAnalytics()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;">
+            <option value="30">Last 30 days</option>
+            <option value="60">Last 60 days</option>
+            <option value="90">Last 90 days</option>
+            <option value="this_month">This month</option>
+            <option value="last_month">Last month</option>
+            <option value="this_year">This year</option>
+          </select>
+        </div>
+      </div>
+      <div class="content" id="analytics-content">
+        <div class="empty-state"><div class="spinner"></div><p style="margin-top:12px;">Loading analytics…</p></div>
+      </div>
+    </div>
     <!-- INCIDENTS PAGE -->
     <div id="page-incidents" style="display:none;">
       <div class="topbar">
@@ -1313,6 +1336,7 @@ function switchPage(name, btn) {
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
   if (name === 'activity') { loadActivityLog(); }
+  if (name === 'analytics') { loadAnalytics(); }
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -5917,6 +5941,337 @@ async function removeCancellationRecord(id, workerName) {
   await openCancelLogModal(workerName); // refresh the modal
   loadWorkerCards(); // refresh count badges
 }
+
+
+// ═══════════════════════════════════════════════════════════════
+// ANALYTICS ENGINE
+// ═══════════════════════════════════════════════════════════════
+
+function analyticsDateRange() {
+  const val = document.getElementById('analytics-period')?.value || '30';
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  let from, to = new Date(today);
+  to.setDate(to.getDate() + 1);
+
+  if (val === 'this_month') {
+    from = new Date(today.getFullYear(), today.getMonth(), 1);
+    to   = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  } else if (val === 'last_month') {
+    from = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    to   = new Date(today.getFullYear(), today.getMonth(), 0);
+  } else if (val === 'this_year') {
+    from = new Date(today.getFullYear(), 0, 1);
+    to   = new Date(today.getFullYear(), 11, 31);
+  } else {
+    from = new Date(today);
+    from.setDate(from.getDate() - parseInt(val));
+  }
+  return {
+    from: from.toISOString().slice(0,10),
+    to:   to.toISOString().slice(0,10)
+  };
+}
+
+async function loadAnalytics() {
+  const el = document.getElementById('analytics-content');
+  if (!el) return;
+  el.innerHTML = '<div class="empty-state"><div class="spinner"></div><p style="margin-top:12px;">Crunching numbers…</p></div>';
+
+  const { from, to } = analyticsDateRange();
+  const { data, error } = await supabaseClient
+    .from('shifts').select('*')
+    .gte('shift_date', from).lte('shift_date', to)
+    .order('shift_date');
+
+  if (error) { el.innerHTML = `<div class="empty-state">Failed to load: ${error.message}</div>`; return; }
+  const rows = data || [];
+  renderAnalytics(rows, from, to);
+}
+
+function renderAnalytics(rows, from, to) {
+  const el = document.getElementById('analytics-content');
+  const completed = rows.filter(s => !s.cancelled && s.clock_in && s.clock_out);
+  const scheduled = rows.filter(s => !s.cancelled && !s.clock_out);
+  const cancelled = rows.filter(s => s.cancelled);
+  const withLate  = completed.filter(s => parseFloat(s.late_penalty||0) > 0);
+  const totalHrs  = completed.reduce((a,s) => a + parseFloat(calcShiftHours(s)||0), 0);
+  const totalPay  = completed.reduce((a,s) => a + netPaymentForShift(s), 0);
+  const totalPens = rows.reduce((a,s) => a + parseFloat(s.late_penalty||0) + parseFloat(s.cancellation_penalty||0), 0);
+  const totalSR   = rows.reduce((a,s) => a + parseFloat(s.sr_absorbed||0), 0);
+
+  // ── Summary cards ──
+  const summaryCards = `
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:20px;">
+    ${aCard('Total Shifts', rows.length, 'blue', '')}
+    ${aCard('Completed', completed.length, 'green', '')}
+    ${aCard('Cancelled', cancelled.length, 'red', '')}
+    ${aCard('Total Hours', totalHrs.toFixed(1)+'h', 'teal', '')}
+    ${aCard('Total Payout', '$'+totalPay.toFixed(0), 'green', '')}
+    ${aCard('Penalties', '$'+totalPens.toFixed(2), totalPens>0?'red':'green', '')}
+    ${aCard('Late Arrivals', withLate.length, withLate.length>0?'amber':'green', '')}
+    ${aCard('SR Absorbed', '$'+totalSR.toFixed(2), totalSR>0?'amber':'', '')}
+    ${aCard('Cancellation Rate', completed.length+cancelled.length > 0 ? (cancelled.length/(completed.length+cancelled.length)*100).toFixed(1)+'%' : '0%', cancelled.length>3?'amber':'green', '')}
+    ${aCard('Avg Hours/Shift', completed.length ? (totalHrs/completed.length).toFixed(1)+'h' : '—', '', '')}
+  </div>`;
+
+  // ── Weekly trend (last 8 weeks) ──
+  const weeklyTrend = buildWeeklyTrend(rows);
+
+  // ── Monthly trend ──
+  const monthlyTrend = buildMonthlyTrend(rows);
+
+  // ── Day-of-week analysis ──
+  const dowAnalysis = buildDowAnalysis(completed);
+
+  // ── Top 10 clients ──
+  const top10clients = buildTop10(completed, 'outlet', 'shifts');
+
+  // ── Top 10 workers (by shifts) ──
+  const top10workers = buildTop10(completed.filter(s => s.worker_name && s.worker_name !== 'Available'), 'worker_name', 'shifts');
+
+  // ── Top 10 workers by hours ──
+  const top10hours = buildTop10hours(completed.filter(s => s.worker_name && s.worker_name !== 'Available'));
+
+  // ── Top 10 late arrivals ──
+  const top10late = buildTop10Late(rows);
+
+  // ── Top 10 cancellations ──
+  const top10cancel = buildTop10Cancellations(cancelled);
+
+  // ── Top 10 earners ──
+  const top10earn = buildTop10Earners(completed.filter(s => s.worker_name && s.worker_name !== 'Available'));
+
+  el.innerHTML = `
+    ${summaryCards}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      ${weeklyTrend}
+      ${monthlyTrend}
+    </div>
+    ${dowAnalysis}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      ${top10clients}
+      ${top10workers}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      ${top10hours}
+      ${top10earn}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      ${top10late}
+      ${top10cancel}
+    </div>
+  `;
+}
+
+function aCard(label, val, color, sub) {
+  const colors = { blue:'var(--accent)', green:'var(--green)', red:'var(--red)', amber:'var(--amber)', teal:'var(--teal)' };
+  const c = colors[color] || 'var(--text)';
+  return `<div class="metric-card" style="min-width:0;">
+    <div class="metric-label">${label}</div>
+    <div style="font-size:22px;font-weight:700;color:${c};margin-top:4px;">${val}</div>
+    ${sub ? `<div style="font-size:11px;color:var(--text3);margin-top:2px;">${sub}</div>` : ''}
+  </div>`;
+}
+
+function analyticsSection(title, icon, content) {
+  return `<div class="table-wrap" style="margin-bottom:16px;">
+    <div class="table-header"><span class="table-title">${icon} ${title}</span></div>
+    <div style="padding:0 0 4px;">${content}</div>
+  </div>`;
+}
+
+function barChart(items, maxVal, colorFn) {
+  // items: [{label, value, sub}]
+  if (!items.length) return '<div style="padding:16px;color:var(--text3);font-size:13px;">No data</div>';
+  return `<div style="padding:8px 16px;">` + items.map((item, i) => {
+    const pct = maxVal > 0 ? Math.max(4, (item.value / maxVal) * 100) : 0;
+    const color = colorFn ? colorFn(item, i) : 'var(--teal)';
+    return `<div style="margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px;">
+        <span style="font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%;">${escapeHtml(String(item.label))}</span>
+        <span style="font-size:12px;font-family:var(--mono);color:var(--text2);white-space:nowrap;margin-left:8px;">${item.display || item.value}${item.sub ? ' <span style="font-size:10px;color:var(--text3);">'+item.sub+'</span>' : ''}</span>
+      </div>
+      <div style="background:var(--bg3);border-radius:3px;height:6px;overflow:hidden;">
+        <div style="width:${pct}%;background:${color};height:100%;border-radius:3px;transition:width 0.4s;"></div>
+      </div>
+    </div>`;
+  }).join('') + `</div>`;
+}
+
+function buildWeeklyTrend(rows) {
+  // Group by ISO week
+  const weeks = {};
+  rows.forEach(s => {
+    if (!s.shift_date) return;
+    const d = new Date(s.shift_date + 'T00:00:00');
+    const day = d.getDay();
+    const monday = new Date(d);
+    monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+    const key = monday.toISOString().slice(0,10);
+    if (!weeks[key]) weeks[key] = { total:0, completed:0, cancelled:0, hours:0, payout:0 };
+    weeks[key].total++;
+    if (!s.cancelled && s.clock_in && s.clock_out) {
+      weeks[key].completed++;
+      weeks[key].hours += parseFloat(calcShiftHours(s)||0);
+      weeks[key].payout += netPaymentForShift(s);
+    }
+    if (s.cancelled) weeks[key].cancelled++;
+  });
+  const sorted = Object.entries(weeks).sort((a,b) => a[0].localeCompare(b[0])).slice(-8);
+  const maxTotal = Math.max(...sorted.map(([,v]) => v.total), 1);
+  const items = sorted.map(([k, v]) => {
+    const d = new Date(k + 'T00:00:00');
+    const label = d.toLocaleDateString('en-SG', { day:'numeric', month:'short' });
+    return { label, value: v.total, display: v.total, sub: `${v.completed} done · ${v.cancelled} cancel` };
+  });
+  const bars = barChart(items, maxTotal, (_,i) => {
+    const hue = 180 + i * 8;
+    return `hsl(${hue},60%,50%)`;
+  });
+  return analyticsSection('Weekly Trend', '📅', bars);
+}
+
+function buildMonthlyTrend(rows) {
+  const months = {};
+  rows.forEach(s => {
+    if (!s.shift_date) return;
+    const key = s.shift_date.slice(0,7); // YYYY-MM
+    if (!months[key]) months[key] = { total:0, completed:0, hours:0, payout:0 };
+    months[key].total++;
+    if (!s.cancelled && s.clock_in && s.clock_out) {
+      months[key].completed++;
+      months[key].hours += parseFloat(calcShiftHours(s)||0);
+      months[key].payout += netPaymentForShift(s);
+    }
+  });
+  const sorted = Object.entries(months).sort((a,b) => a[0].localeCompare(b[0]));
+  const maxTotal = Math.max(...sorted.map(([,v]) => v.total), 1);
+  const items = sorted.map(([k, v]) => {
+    const [yr, mo] = k.split('-');
+    const label = new Date(parseInt(yr), parseInt(mo)-1, 1).toLocaleDateString('en-SG', { month:'short', year:'2-digit' });
+    return { label, value: v.total, display: v.total, sub: v.hours.toFixed(0)+'h · $'+v.payout.toFixed(0) };
+  });
+  const bars = barChart(items, maxTotal, () => 'var(--teal)');
+  return analyticsSection('Monthly Trend', '📆', bars);
+}
+
+function buildDowAnalysis(completed) {
+  const DOW = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const counts = [0,0,0,0,0,0,0];
+  const hours  = [0,0,0,0,0,0,0];
+  completed.forEach(s => {
+    if (!s.shift_date) return;
+    const d = new Date(s.shift_date + 'T00:00:00');
+    const dow = (d.getDay() + 6) % 7; // Mon=0
+    counts[dow]++;
+    hours[dow] += parseFloat(calcShiftHours(s)||0);
+  });
+  const maxC = Math.max(...counts, 1);
+  const items = DOW.map((day, i) => ({
+    label: day, value: counts[i], display: counts[i],
+    sub: counts[i] > 0 ? (hours[i]/counts[i]).toFixed(1)+'h avg' : ''
+  }));
+  const colors = ['var(--teal)','var(--teal)','var(--teal)','var(--teal)','var(--accent)','var(--amber)','var(--amber)'];
+  const bars = barChart(items, maxC, (_,i) => colors[i]);
+  return `<div class="table-wrap" style="margin-bottom:16px;">
+    <div class="table-header"><span class="table-title">📊 Busiest Days of Week</span></div>
+    ${bars}
+  </div>`;
+}
+
+function buildTop10(rows, field, metric) {
+  const counts = {};
+  rows.forEach(s => {
+    const key = s[field] || '—';
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,10);
+  const max = sorted[0]?.[1] || 1;
+  const items = sorted.map(([k,v]) => ({ label: k, value: v, display: v, sub: metric }));
+  const fieldLabel = field === 'outlet' ? 'Client / Outlet' : 'Worker';
+  const icon = field === 'outlet' ? '🏪' : '👤';
+  return analyticsSection(`Top 10 ${fieldLabel}s by Shifts`, icon,
+    barChart(items, max, () => field === 'outlet' ? 'var(--accent)' : 'var(--teal)'));
+}
+
+function buildTop10hours(rows) {
+  const data = {};
+  rows.forEach(s => {
+    const k = s.worker_name;
+    if (!data[k]) data[k] = { shifts:0, hours:0 };
+    data[k].shifts++;
+    data[k].hours += parseFloat(calcShiftHours(s)||0);
+  });
+  const sorted = Object.entries(data).sort((a,b) => b[1].hours - a[1].hours).slice(0,10);
+  const max = sorted[0]?.[1].hours || 1;
+  const items = sorted.map(([k,v]) => ({ label:k, value:v.hours, display: v.hours.toFixed(1)+'h', sub: v.shifts+' shifts' }));
+  return analyticsSection('Top 10 Workers by Hours', '⏱',
+    barChart(items, max, () => 'var(--green)'));
+}
+
+function buildTop10Earners(rows) {
+  const data = {};
+  rows.forEach(s => {
+    const k = s.worker_name;
+    if (!data[k]) data[k] = { shifts:0, pay:0 };
+    data[k].shifts++;
+    data[k].pay += netPaymentForShift(s);
+  });
+  const sorted = Object.entries(data).sort((a,b) => b[1].pay - a[1].pay).slice(0,10);
+  const max = sorted[0]?.[1].pay || 1;
+  const items = sorted.map(([k,v]) => ({ label:k, value:v.pay, display:'$'+v.pay.toFixed(0), sub: v.shifts+' shifts' }));
+  return analyticsSection('Top 10 Earners', '💵',
+    barChart(items, max, () => 'var(--amber)'));
+}
+
+function buildTop10Late(rows) {
+  const data = {};
+  rows.filter(s => !s.cancelled).forEach(s => {
+    const l = calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5));
+    if (l.penalty <= 0 || !s.worker_name || s.worker_name === 'Available') return;
+    const k = s.worker_name;
+    if (!data[k]) data[k] = { count:0, totalMins:0, totalPen:0 };
+    data[k].count++;
+    data[k].totalMins += l.mins || 0;
+    data[k].totalPen  += l.penalty;
+  });
+  const sorted = Object.entries(data).sort((a,b) => b[1].count - a[1].count).slice(0,10);
+  if (!sorted.length) return analyticsSection('Top 10 Late Arrivals', '🕐',
+    '<div style="padding:16px;color:var(--text3);font-size:13px;">No late arrivals in this period 🎉</div>');
+  const max = sorted[0]?.[1].count || 1;
+  const items = sorted.map(([k,v]) => ({
+    label:k, value:v.count,
+    display: v.count + 'x',
+    sub: 'avg '+(v.totalMins/v.count).toFixed(0)+'m late · -$'+v.totalPen.toFixed(2)
+  }));
+  return analyticsSection('Top 10 Late Arrivals', '🕐',
+    barChart(items, max, () => 'var(--red)'));
+}
+
+function buildTop10Cancellations(cancelled) {
+  const data = {};
+  cancelled.forEach(s => {
+    const k = s.worker_name && s.worker_name !== 'Available' ? s.worker_name : null;
+    if (!k) return;
+    if (!data[k]) data[k] = { count:0, withMC:0, penalty:0 };
+    data[k].count++;
+    if (s.mc_url) data[k].withMC++;
+    else data[k].penalty += parseFloat(s.cancellation_penalty||15);
+  });
+  const sorted = Object.entries(data).sort((a,b) => b[1].count - a[1].count).slice(0,10);
+  if (!sorted.length) return analyticsSection('Top 10 Cancellations', '🚫',
+    '<div style="padding:16px;color:var(--text3);font-size:13px;">No cancellations in this period 🎉</div>');
+  const max = sorted[0]?.[1].count || 1;
+  const items = sorted.map(([k,v]) => ({
+    label:k, value:v.count,
+    display: v.count+'x',
+    sub: v.withMC+' MC · -$'+v.penalty.toFixed(0)+' penalties'
+  }));
+  return analyticsSection('Top 10 Cancellations', '🚫',
+    barChart(items, max, (_,i) => i < 3 ? 'var(--red)' : 'var(--amber)'));
+}
+// ═══════════════════════════════════════════════════════════════
 
 // ── Close modals on overlay click ─────────────────────────────
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
