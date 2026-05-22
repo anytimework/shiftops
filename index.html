@@ -6511,7 +6511,7 @@ async function kbSaveEntry(entry) {
     const idx = rows.findIndex(r => r.id === entry.id);
     if (idx >= 0) rows[idx] = { ...rows[idx], ...entry, updated_at: new Date().toISOString() };
   } else {
-    const newEntry = { ...entry, id: 'local_' + Date.now(), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    const newEntry = { ...entry, id: (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2)), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     rows.unshift(newEntry);
   }
   localStorage.setItem('business_knowledge_local', JSON.stringify(rows));
@@ -6521,10 +6521,20 @@ async function kbSaveEntry(entry) {
 
 async function kbDeleteEntry(id) {
   if (!confirm('Delete this knowledge entry?')) return;
-  try { await supabaseClient.from('business_knowledge').delete().eq('id', id); } catch(e) {}
-  const rows = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]').filter(r => r.id !== id);
+  let deletedFromSupabase = false;
+  try {
+    const { error } = await supabaseClient.from('business_knowledge').delete().eq('id', String(id));
+    if (!error) deletedFromSupabase = true;
+  } catch(e) {}
+  // Always clean localStorage too
+  const rows = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]').filter(r => String(r.id) !== String(id));
   localStorage.setItem('business_knowledge_local', JSON.stringify(rows));
-  await loadKnowledge();
+  if (!deletedFromSupabase) {
+    // If Supabase failed, update allKnowledge from filtered localStorage
+    allKnowledge = rows;
+  } else {
+    await loadKnowledge();
+  }
   renderKnowledgePage();
   toast('Entry deleted');
 }
@@ -6565,6 +6575,15 @@ async function kbUploadFile(input) {
   input.value = '';
 }
 
+function kbToggle(id) {
+  const el = document.getElementById('kb-content-' + id);
+  const arrow = document.getElementById('kb-arrow-' + id);
+  if (!el) return;
+  const collapsed = el.style.display === 'none';
+  el.style.display = collapsed ? 'block' : 'none';
+  if (arrow) arrow.textContent = collapsed ? '▾' : '▸';
+}
+
 function renderKnowledgePage() {
   const search = (document.getElementById('kb-search')?.value || '').toLowerCase();
   const cat = document.getElementById('kb-filter-cat')?.value || '';
@@ -6579,25 +6598,31 @@ function renderKnowledgePage() {
     body.innerHTML = '<div class="empty-state"><div class="empty-icon">📚</div><p>No entries found.</p></div>';
     return;
   }
-  body.innerHTML = entries.map(e => `
-    <div class="card" style="margin-bottom:12px;">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
-        <div style="flex:1;">
-          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
-            <span style="font-weight:600;font-size:14px;color:var(--text);">${escapeHtml(e.topic||'')}</span>
-            <span style="background:var(--accent-dim);color:var(--accent);padding:2px 8px;border-radius:10px;font-size:11px;">${escapeHtml(e.category||'General')}</span>
-            ${e.outlet ? `<span style="background:var(--bg3);color:var(--text2);padding:2px 8px;border-radius:10px;font-size:11px;">📍 ${escapeHtml(e.outlet)}</span>` : ''}
-          </div>
-          <div style="font-size:13px;color:var(--text2);line-height:1.6;white-space:pre-wrap;">${escapeHtml(e.content||'')}</div>
-          <div style="font-size:11px;color:var(--text3);margin-top:6px;">Updated ${e.updated_at ? new Date(e.updated_at).toLocaleDateString('en-SG') : '—'}${e.created_by ? ' by ' + e.created_by : ''}</div>
+  const safeId = (id) => String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+  body.innerHTML = entries.map(e => {
+    const sid = safeId(e.id);
+    const preview = (e.content||'').slice(0, 80) + ((e.content||'').length > 80 ? '…' : '');
+    return `
+    <div class="card" style="margin-bottom:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;" onclick="kbToggle('${sid}')">
+        <div style="display:flex;gap:8px;align-items:center;flex:1;min-width:0;">
+          <span id="kb-arrow-${sid}" style="color:var(--text3);font-size:12px;flex-shrink:0;">▸</span>
+          <span style="font-weight:600;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(e.topic||'')}</span>
+          <span style="background:var(--accent-dim);color:var(--accent);padding:2px 8px;border-radius:10px;font-size:11px;flex-shrink:0;">${escapeHtml(e.category||'General')}</span>
+          ${e.outlet ? `<span style="background:var(--bg3);color:var(--text2);padding:2px 8px;border-radius:10px;font-size:11px;flex-shrink:0;">📍 ${escapeHtml(e.outlet)}</span>` : ''}
+          <span style="font-size:12px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(preview)}</span>
         </div>
-        <div style="display:flex;gap:6px;flex-shrink:0;">
+        <div style="display:flex;gap:6px;flex-shrink:0;" onclick="event.stopPropagation()">
           <button class="btn btn-ghost btn-sm" onclick="kbOpenAddModal(${JSON.stringify(e).replace(/"/g,'&quot;')})">Edit</button>
           <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="kbDeleteEntry('${e.id}')">Delete</button>
         </div>
       </div>
-    </div>
-  `).join('');
+      <div id="kb-content-${sid}" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+        <div style="font-size:13px;color:var(--text2);line-height:1.6;white-space:pre-wrap;">${escapeHtml(e.content||'')}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px;">Updated ${e.updated_at ? new Date(e.updated_at).toLocaleDateString('en-SG') : '—'}${e.created_by ? ' by ' + e.created_by : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 let aiHistory  = []; // {role, content} for Claude API
@@ -6727,6 +6752,7 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
 {"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
 {"type": "searchWorker", "query": "<partial or full name to search>"}
+{"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
 {"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
 \`\`\`
@@ -6744,6 +6770,7 @@ RULES:
 - If you can't find a worker in the WORKERS list, use searchWorker action to do a live database lookup — never say you can't find someone without trying this first.
 - If you can't find an outlet/client in the OUTLETS list, use searchOutlet to do a live lookup.
 - When a user tells you a fact, rule, policy or requirement (e.g. attire, SOPs, outlet info), AUTOMATICALLY save it using saveKnowledge WITHOUT asking for confirmation — just do it and confirm you saved it.
+- IMPORTANT: saveKnowledge is ONLY for general business knowledge (SOPs, rules, policies). For updating a specific worker's phone, payment method, country, or notes, ALWAYS use updateWorkerProfile instead — never save personal worker data to business knowledge.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - Speak naturally, like a helpful colleague.`;
 
@@ -6931,6 +6958,17 @@ async function executeAIAction(actionJson) {
         localStorage.setItem('standby_workers_local', JSON.stringify(rows));
       }
       return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby list for ${a.availableDate}`;
+    }
+
+    case 'updateWorkerProfile': {
+      const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
+      if (!w) return `❌ Worker "${a.workerName}" not found`;
+      const allowed = ['phone', 'bank_method', 'country', 'notes', 'contact'];
+      if (!allowed.includes(a.field)) return `❌ Field "${a.field}" cannot be updated here. Allowed: ${allowed.join(', ')}`;
+      const { error } = await supabaseClient.from('workers').update({ [a.field]: a.value, updated_at: new Date().toISOString() }).eq('id', w.id);
+      if (error) return `❌ Failed to update: ${error.message}`;
+      await loadWorkers();
+      return `✅ Updated **${w.name}'s** ${a.field} to "${a.value}"`;
     }
 
     case 'searchOutlet': {
