@@ -2218,6 +2218,19 @@ function srAbsorbedForShift(s) {
     const delta = parseFloat(s.sr_rate || 0) - parseFloat(s.rate || 0);
     return Math.max(0, hours * delta);
   }
+  // 3rd party hourly SR: recalculate absorbed based on actual/estimated hours
+  // sr_hours > 0 means hourly type (vs fixed_fee which stores sr_hours = 0)
+  const storedSrHours = parseFloat(s.sr_hours || 0);
+  if (s.sr_worker && storedSrHours > 0) {
+    const actualHours = parseFloat(calcShiftHours(s) || 0);
+    if (actualHours > 0) {
+      const delta = Math.max(0, parseFloat(s.sr_rate || 0) - parseFloat(s.rate || 0));
+      const storedAbsorbed = parseFloat(s.sr_absorbed || 0);
+      // Preserve any flat platform fee charged on top of the hourly rate diff
+      const platformFee = Math.max(0, storedAbsorbed - delta * storedSrHours);
+      return Math.max(0, delta * actualHours + platformFee);
+    }
+  }
   return parseFloat(s.sr_absorbed || 0);
 }
 function specialRateCommissionInfo(s) {
@@ -2245,11 +2258,15 @@ function shiftPenaltyAmount(s) {
   return latePen + cancelPen;
 }
 function serviceRecoveryPayment(s) {
-  const hrs = parseFloat(s.sr_hours || 0);
   const rate = parseFloat(s.sr_rate || s.rate || 0);
-  // For 3rd party bookings created directly, sr_hours is intentionally blank so payout follows actual/estimated clocked hours.
-  if (!hrs) return payoutForShift(s);
-  return hrs * rate;
+  const storedSrHours = parseFloat(s.sr_hours || 0);
+  // Once hours are available (clocked in), use actual/estimated hours so payout
+  // reflects real work — not the agreed estimate stored at booking time.
+  const actualHours = parseFloat(calcShiftHours(s) || 0);
+  if (actualHours > 0) return actualHours * rate;
+  // No clocked hours yet — fall back to agreed hours or scheduled duration
+  if (storedSrHours > 0) return storedSrHours * rate;
+  return payoutForShift(s);
 }
 function transportClaim(s) {
   return parseFloat(s.transport_claim || 0);
@@ -2272,12 +2289,15 @@ function totalPaymentForShift(s) {
 }
 function thirdPartyPlatformFeeForShift(s) {
   if (!s?.sr_worker) return 0;
-  const absorbed = srAbsorbedForShift(s);
-  const hrs = parseFloat(s.sr_hours || 0);
-  const srRate = parseFloat(s.sr_rate || s.rate || 0);
-  const baseRate = parseFloat(s.rate || 0);
-  const hourlyUplift = hrs > 0 ? Math.max(0, (srRate - baseRate) * hrs) : 0;
-  return Math.max(0, absorbed - hourlyUplift);
+  const storedSrHours = parseFloat(s.sr_hours || 0);
+  const storedAbsorbed = parseFloat(s.sr_absorbed || 0);
+  if (storedSrHours > 0) {
+    // Hourly type: platform fee = any amount above (rate diff × agreed hours)
+    const delta = Math.max(0, parseFloat(s.sr_rate || 0) - parseFloat(s.rate || 0));
+    return Math.max(0, storedAbsorbed - delta * storedSrHours);
+  }
+  // Fixed fee type (sr_hours = 0): entire stored absorbed is the platform fee
+  return storedAbsorbed;
 }
 function isPayableShift(s) {
   const workerName = String(s?.worker_name || '').trim().toLowerCase();
@@ -3292,8 +3312,7 @@ function renderTable() {
           <table style="width:100%;border-collapse:collapse;">
             <tr>
               <td style="padding:8px 14px;vertical-align:middle;min-width:160px;">
-                <div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>
-                ${!isAvailable ? workerPhoneLine(workerName) : ''}
+                <div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div>
                 <div class="sub-text">${s.outlet}</div>
                 ${srTag}${reminderPanelHtml(s)}
               </td>
@@ -3666,6 +3685,15 @@ function openEditRow(id) {
   const coCell = document.getElementById(`co-disp-${id}`);
   const brCell = document.getElementById(`break-disp-${id}`);
   if (!ciCell || !coCell || !brCell) return;
+  const isAvailableSlot = !s.worker_name || s.worker_name.trim().toLowerCase() === 'available';
+  // For Available slots — inject a worker name input
+  const wnCell = document.getElementById(`wn-disp-${id}`);
+  if (isAvailableSlot && wnCell) {
+    wnCell.innerHTML = `<input type="text" id="edit-wn-${id}" list="worker-datalist" autocomplete="off"
+      placeholder="Assign worker name…"
+      style="width:100%;font-size:12px;padding:5px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:4px;font-family:var(--font);box-sizing:border-box;">`;
+    setTimeout(() => document.getElementById(`edit-wn-${id}`)?.focus(), 50);
+  }
   ciCell.innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
   coCell.innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
   const tc = parseFloat(s.transport_claim || 0);
@@ -3701,15 +3729,20 @@ function toggleCommentEditor(id) {
 }
 
 function cancelEditRow(id) {
-  // Restore all three cells to display mode without saving
+  // Restore all cells to display mode without saving
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
   const ciCell = document.getElementById(`ci-disp-${id}`);
   const coCell = document.getElementById(`co-disp-${id}`);
   const brCell = document.getElementById(`break-disp-${id}`);
+  const wnCell = document.getElementById(`wn-disp-${id}`);
   if (ciCell) ciCell.innerHTML = renderTimeCell(s, 'clock_in');
   if (coCell) coCell.innerHTML = renderTimeCell(s, 'clock_out');
   if (brCell) brCell.innerHTML = `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</span>`;
+  const isAvailableSlot = !s.worker_name || s.worker_name.trim().toLowerCase() === 'available';
+  if (wnCell && isAvailableSlot) {
+    wnCell.innerHTML = `<div class="worker-name"><span class="available-name">Available</span></div>`;
+  }
 }
 
 async function saveRow(id) {
@@ -3721,27 +3754,40 @@ async function saveRow(id) {
   const brInput = document.getElementById('edit-break-' + id);
   const tcInput = document.getElementById('edit-tc-' + id);
   const notesInput = document.getElementById('edit-notes-' + id);
+  const wnInput = document.getElementById('edit-wn-' + id);
   const ci = ciInput ? (ciInput.value || null) : (s.clock_in?.slice(0,5) || null);
   const co = coInput ? (coInput.value || null) : (s.clock_out?.slice(0,5) || null);
   const br = brInput ? parseInt(brInput.value || 0, 10) : breakMinsForShift(s);
   const tc = tcInput ? (parseFloat(tcInput.value) || 0) : parseFloat(s.transport_claim || 0);
   const notes = notesInput ? notesInput.value.trim() : commentForShift(id);
   const lp = ci ? calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty : 0;
-  const { error } = await supabaseClient.from('shifts').update({
+  // Resolve worker name — if the edit-wn input was shown, use its value
+  const typedWorker = wnInput ? wnInput.value.trim() : '';
+  const resolvedWorker = typedWorker && typedWorker.toLowerCase() !== 'available'
+    ? (allWorkers.find(w => w.name.toLowerCase() === typedWorker.toLowerCase())?.name || typedWorker)
+    : null;
+  const updatePayload = {
     clock_in: ci, clock_out: co, break_mins: br,
     late_penalty: lp,
     transport_claim: tc || null,
     updated_at: new Date().toISOString()
-  }).eq('id', id);
+  };
+  if (resolvedWorker) updatePayload.worker_name = resolvedWorker;
+  const { error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id);
   if (error) { toast('Failed to save: ' + error.message, 'error'); return; }
+  // Auto-create worker record if not found in DB
+  if (resolvedWorker && !allWorkers.find(w => w.name.toLowerCase() === resolvedWorker.toLowerCase())) {
+    try { await supabaseClient.from('workers').insert({ name: resolvedWorker }); await loadWorkers(); } catch(e) {}
+  }
   setShiftComment(id, notes);
   const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
   const notesLog = notes ? `, notes: ${notes}` : '';
+  const workerLabel = resolvedWorker || s.worker_name || 'Available';
   const _dateFmt = s.shift_date ? new Date(s.shift_date+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}) : '';
   await logActivity(
-    'Edited shift',
-    `${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}${notesLog}`,
-    'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
+    resolvedWorker ? `Assigned ${resolvedWorker} to slot` : 'Edited shift',
+    `${workerLabel} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}${notesLog}`,
+    'shift', id, { shift_date: s.shift_date, worker_name: workerLabel, outlet: s.outlet }
   );
   toast('Saved!');
   await loadShifts();
