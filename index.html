@@ -3132,15 +3132,19 @@ function renderTable() {
       const rowClass = isCancelled ? 'row-cancelled' : (s.is_paid ? 'row-paid' : '');
       const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
       const isPaid = !!s.is_paid;
+      const assignAction = (isAvailable && !s.sr_worker)
+        ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
+           <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
       const actions = `<div class="action-stack">
         ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
         <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
+        ${assignAction}
         <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
       return `<tr class="${rowClass}" id="row-${s.id}">
-        <td><div class="worker-name">${workerName}</div>${workerPhoneLine(workerName)}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+        <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
         <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
-        <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+        <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
         <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
         <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
         <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
@@ -3215,15 +3219,19 @@ function renderTable() {
             : '';
         const rowClass = s.is_paid ? 'row-paid' : '';
         const showClockIn = !isAvailable && !s.clock_in && !s.cancelled;
+        const assignAction2 = (isAvailable && !s.sr_worker)
+          ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
+             <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
         const actions = `<div class="action-stack">
           ${showClockIn ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
           <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
+          ${assignAction2}
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+          <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
@@ -3395,7 +3403,8 @@ function renderTable() {
           actions = `<div class="action-stack">${srAction}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`;
         } else {
           const replacementAction = (isAvailable && !s.sr_worker)
-            ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`
+            ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
+               <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>`
             : '';
           const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
           const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
@@ -3416,9 +3425,9 @@ function renderTable() {
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+          <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
