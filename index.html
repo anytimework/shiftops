@@ -139,6 +139,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .reminder-alert-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 18px; font-size: 12px; font-weight: 500; border-bottom: 1px solid transparent; }
 .reminder-alert-urgent { background: rgba(255,59,48,0.08); border-bottom-color: rgba(255,59,48,0.2); color: var(--red); }
 .reminder-alert-warn { background: rgba(255,149,0,0.09); border-bottom-color: rgba(255,149,0,0.2); color: var(--amber); }
+/* Grouped collapsible night-reminder alert */
+.ra-grouped { flex-direction: column; cursor: pointer; user-select: none; }
+.ra-summary { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ra-toggle-hint { font-size: 10px; opacity: 0.6; margin-left: 4px; transition: transform 0.2s; display: inline-block; }
+.ra-grouped.ra-open .ra-toggle-hint { transform: rotate(180deg); }
+.ra-detail { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,59,48,0.2); width: 100%; }
+.ra-grouped.ra-open .ra-detail { display: block; }
+.ra-detail-row { padding: 3px 0; font-size: 11px; font-weight: 400; border-bottom: 1px solid rgba(255,59,48,0.08); }
+.ra-detail-row:last-child { border-bottom: none; }
 .sub-text { font-size: 11px; color: var(--text3); margin-top: 1px; }
 
 /* Badges */
@@ -1541,31 +1550,59 @@ function checkReminderAlerts() {
   const now = new Date();
   const todayStr = formatDate(now);
   const nowMins = now.getHours() * 60 + now.getMinutes();
-  const alerts = [];
+  const firstName = name => String(name || '').trim().split(' ')[0];
+
+  const nightUnacked = [];   // grouped into one collapsible alert
+  const clockinAlerts = [];  // shown individually — urgent, time-sensitive
+
   (allShifts || []).forEach(s => {
     const r = shiftReminders[s.id] || {};
     const workerName = String(s.worker_name || '').trim();
     if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) return;
     if (s.shift_date !== todayStr) return;
-    // Alert: night reminder sent but not acked, and it's past 8am
+
+    // Night reminder: collect all who haven't acked (past 8am)
     if (r.nightSent && !r.nightAcked && nowMins >= 480) {
-      alerts.push({ type: 'urgent', msg: `⚠️ <strong>${workerName}</strong> (${s.outlet || ''} ${s.scheduled_start ? s.scheduled_start.slice(0,5) : ''}) hasn't acknowledged last night's shift reminder` });
+      nightUnacked.push({ name: workerName, outlet: s.outlet || '', time: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
     }
-    // Alert: clock-in reminder sent but not responded, within 2 hrs of shift start
+    // Clock-in: individual alert, within 2hrs of shift start
     if (r.clockinSent && !r.clockinResponded && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
       if (nowMins >= shiftMins - 120) {
         const remaining = shiftMins - nowMins;
         const label = remaining > 0 ? `in ${remaining} min` : 'starting NOW';
-        alerts.push({ type: 'warn', msg: `🔔 <strong>${workerName}</strong> (${s.outlet || ''}) hasn't responded to clock-in reminder — shift ${label}` });
+        clockinAlerts.push({ name: workerName, outlet: s.outlet || '', label });
       }
     }
   });
-  if (!alerts.length) { container.innerHTML = ''; return; }
-  container.innerHTML = alerts.map(a =>
-    `<div class="reminder-alert-item ${a.type === 'urgent' ? 'reminder-alert-urgent' : 'reminder-alert-warn'}">${a.msg}</div>`
-  ).join('');
+
+  let html = '';
+
+  // ── Night reminder: one grouped collapsible alert ──
+  if (nightUnacked.length > 0) {
+    const firstNames = nightUnacked.map(w => firstName(w.name));
+    let summary;
+    if (firstNames.length <= 4) {
+      summary = firstNames.join(', ');
+    } else {
+      summary = firstNames.slice(0, 4).join(', ') + ` +${firstNames.length - 4} more`;
+    }
+    const detailRows = nightUnacked.map(w =>
+      `<div class="ra-detail-row"><span style="font-weight:600;">${w.name}</span><span style="color:rgba(255,59,48,0.7);margin-left:6px;">${w.outlet}${w.time ? ' · ' + w.time : ''}</span></div>`
+    ).join('');
+    html += `<div class="reminder-alert-item reminder-alert-urgent ra-grouped" onclick="this.classList.toggle('ra-open')">
+      <div class="ra-summary">⚠️ <strong>${summary}</strong> haven't acknowledged last night's shift reminder <span class="ra-toggle-hint">▾ see all</span></div>
+      <div class="ra-detail">${detailRows}</div>
+    </div>`;
+  }
+
+  // ── Clock-in: individual lines ──
+  clockinAlerts.forEach(a => {
+    html += `<div class="reminder-alert-item reminder-alert-warn">🔔 <strong>${firstName(a.name)}</strong> (${a.outlet}) hasn't responded to clock-in reminder — shift ${a.label}</div>`;
+  });
+
+  container.innerHTML = html;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
