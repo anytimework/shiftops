@@ -270,6 +270,53 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .activity-line { font-size:12px;color:var(--text2);line-height:1.45; }
 .activity-action { font-weight:700;color:var(--accent); }
 
+/* Shift audit trail */
+.audit-entry { display:flex; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); align-items:flex-start; }
+.audit-entry:last-child { border-bottom:none; }
+.audit-dot { width:8px; height:8px; border-radius:50%; background:var(--accent); flex-shrink:0; margin-top:4px; }
+.audit-dot.create { background:var(--green); }
+.audit-dot.edit { background:var(--accent); }
+.audit-dot.clock { background:var(--amber); }
+.audit-dot.cancel { background:var(--red); }
+.audit-body { flex:1; min-width:0; }
+.audit-action { font-size:12px; font-weight:600; color:var(--text); }
+.audit-detail { font-size:11px; color:var(--text2); margin-top:2px; line-height:1.5; word-break:break-word; }
+.audit-meta { font-size:10px; color:var(--text3); font-family:var(--mono); margin-top:3px; }
+.btn-audit { display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--text3);font-size:10px;font-family:var(--mono);cursor:pointer;transition:all 0.15s; }
+.btn-audit:hover { border-color:var(--accent);color:var(--accent); }
+
+/* Search autocomplete dropdown */
+.search-wrap { position:relative; }
+.search-dropdown { position:absolute; top:calc(100% + 4px); left:0; min-width:300px; max-width:440px; background:var(--bg2); border:1px solid var(--border2); border-radius:var(--radius-lg); z-index:300; max-height:380px; overflow-y:auto; box-shadow:0 12px 32px rgba(0,0,0,0.5); }
+.search-dd-section { padding:6px 12px; font-size:10px; color:var(--text3); font-family:var(--mono); text-transform:uppercase; letter-spacing:0.08em; background:var(--bg3); border-bottom:1px solid var(--border); position:sticky; top:0; }
+.search-dd-item { padding:10px 14px; cursor:pointer; border-bottom:1px solid var(--border); }
+.search-dd-item:last-child { border-bottom:none; }
+.search-dd-item:hover { background:var(--bg3); }
+.search-dd-name { font-weight:600; color:var(--text); font-size:13px; }
+.search-dd-phone { font-size:11px; color:var(--text3); font-family:var(--mono); margin-top:2px; }
+.search-dd-shift { display:flex; align-items:center; gap:8px; padding:9px 14px; cursor:pointer; border-bottom:1px solid var(--border); font-size:12px; }
+.search-dd-shift:last-child { border-bottom:none; }
+.search-dd-shift:hover { background:var(--accent-dim); }
+.search-dd-date { font-family:var(--mono); font-size:11px; color:var(--text3); min-width:52px; flex-shrink:0; }
+.search-dd-outlet { flex:1; font-weight:500; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.search-dd-time { font-family:var(--mono); font-size:11px; color:var(--text2); flex-shrink:0; }
+.search-dd-empty { padding:14px; text-align:center; font-size:12px; color:var(--text3); }
+
+/* Collapsed view */
+.btn-collapse-toggle { display:inline-flex;align-items:center;gap:5px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg3);color:var(--text2);font-size:12px;font-weight:500;cursor:pointer;transition:all 0.15s;white-space:nowrap; }
+.btn-collapse-toggle:hover { border-color:var(--border2);color:var(--text); }
+.btn-collapse-toggle.active { background:var(--accent-dim);color:var(--accent);border-color:rgba(79,142,247,0.35); }
+.collapsed-row { cursor:pointer;user-select:none; }
+.collapsed-row:hover td { background:rgba(255,255,255,0.04) !important; }
+.collapsed-expand-hint { color:var(--text3);font-size:13px;text-align:right; }
+.collapsed-expanded-row td { background:rgba(79,142,247,0.04); }
+.collapsed-expanded-row .collapse-bar { display:flex;align-items:center;gap:6px;padding:5px 0 10px;cursor:pointer;color:var(--text3);font-size:11px;font-family:var(--mono); }
+.collapsed-expanded-row .collapse-bar:hover { color:var(--text2); }
+/* Compact week card */
+.week-shift-compact { cursor:pointer;min-height:0 !important;padding:8px 9px !important; }
+.week-shift-compact:hover { border-color:var(--accent) !important;background:rgba(79,142,247,0.07) !important; }
+.week-shift-expanded { outline:2px solid rgba(79,142,247,0.35);outline-offset:-1px; }
+
 @media (max-width: 900px) {
   .topbar { align-items:flex-start; gap:12px; flex-direction:column; }
   .attendance-toolbar { width:100%; }
@@ -547,7 +594,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
           </div>
         </div>
         <div class="topbar-right attendance-toolbar">
-          <input id="attendance-search" class="attendance-search" type="search" placeholder="Search worker / outlet" oninput="renderTable()">
+          <div class="search-wrap">
+            <input id="attendance-search" class="attendance-search" type="search" placeholder="Search worker / outlet" oninput="handleSearchInput(this.value)" autocomplete="off">
+            <div id="search-dropdown" class="search-dropdown" style="display:none;"></div>
+          </div>
+          <button id="collapse-view-btn" class="btn-collapse-toggle" onclick="toggleCollapsedView()" title="Compact view — click shifts to expand">⊟ Compact</button>
           <select id="week-status-filter" onchange="renderTable()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;">
             <option value="active" selected>Active only</option>
             <option value="confirmed">Confirmed only</option>
@@ -846,6 +897,20 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <script>/* kb page injected */</script>
 
 <!-- KB ADD/EDIT MODAL -->
+<!-- Shift audit trail modal -->
+<div class="modal-overlay" id="audit-modal">
+  <div class="modal" style="max-width:500px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;" id="audit-modal-title">Shift History</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('audit-modal')">✕</button>
+    </div>
+    <div id="audit-modal-shift-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--text2);"></div>
+    <div id="audit-modal-body" style="min-height:80px;">
+      <div style="text-align:center;padding:24px;"><div class="spinner"></div></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="kb-modal">
   <div class="modal" style="max-width:520px;">
     <h3 id="kb-modal-title">Add Knowledge Entry</h3>
@@ -1157,6 +1222,8 @@ let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded }
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
+let collapsedView = false;
+const expandedRows = new Set();
 let importRows = [];
 let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLogs = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
@@ -1505,6 +1572,8 @@ function updateReminderPanelInPlace(shiftId) {
 function reminderPanelHtml(s) {
   const workerName = String(s.worker_name || '').trim();
   if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) return '';
+  // Once the worker is onsite (clocked in or already clocked out), reminders are irrelevant — hide the panel
+  if (s.clock_in) return '';
   const today = new Date(); today.setHours(0,0,0,0);
   const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
   const shiftDay = new Date(s.shift_date + 'T00:00:00');
@@ -2818,6 +2887,145 @@ function srDisplay(s) {
   return `${feeLine}<div class="sub-text">${label}</div>${commissionLine}`;
 }
 
+// ── Search autocomplete dropdown ──────────────────────────────────────────────
+function handleSearchInput(value) {
+  renderTable(); // existing filter behaviour
+  updateSearchDropdown(value);
+}
+
+function updateSearchDropdown(query) {
+  const dd = document.getElementById('search-dropdown');
+  if (!dd) return;
+  const q = (query || '').trim().toLowerCase();
+  if (!q) { dd.style.display = 'none'; return; }
+
+  const matchedWorkers = allWorkers
+    .filter(w => String(w.name || '').toLowerCase().includes(q))
+    .slice(0, 8);
+  const matchedOutlets = allOutlets
+    .filter(o => String(o.name || '').toLowerCase().includes(q))
+    .slice(0, 5);
+
+  if (!matchedWorkers.length && !matchedOutlets.length) { dd.style.display = 'none'; return; }
+
+  let html = '';
+  if (matchedWorkers.length) {
+    html += `<div class="search-dd-section">Workers</div>`;
+    matchedWorkers.forEach(w => {
+      html += `<div class="search-dd-item" onclick="selectSearchSuggestion('worker','${escapeAttr(w.name || '')}')">
+        <div class="search-dd-name">${escapeHtml(w.name || '')}</div>
+        ${w.phone ? `<div class="search-dd-phone">☎ ${escapeHtml(w.phone)}</div>` : ''}
+      </div>`;
+    });
+  }
+  if (matchedOutlets.length) {
+    html += `<div class="search-dd-section">Outlets</div>`;
+    matchedOutlets.forEach(o => {
+      html += `<div class="search-dd-item" onclick="selectSearchSuggestion('outlet','${escapeAttr(o.name || '')}')">
+        <div class="search-dd-name">${escapeHtml(o.name || '')}</div>
+      </div>`;
+    });
+  }
+  dd.innerHTML = html;
+  dd.style.display = 'block';
+}
+
+function selectSearchSuggestion(type, name) {
+  const input = document.getElementById('attendance-search');
+  if (input) { input.value = name; renderTable(); }
+
+  const dd = document.getElementById('search-dropdown');
+  if (!dd) return;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  let upcoming = allShifts.filter(s => {
+    if (s.cancelled) return false;
+    if (s.shift_date < todayStr) return false;
+    if (type === 'worker') return String(s.worker_name || '').trim().toLowerCase() === name.toLowerCase();
+    return String(s.outlet || '').trim().toLowerCase() === name.toLowerCase();
+  }).sort((a, b) => a.shift_date.localeCompare(b.shift_date) || String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')));
+
+  if (!upcoming.length) {
+    dd.innerHTML = `<div class="search-dd-section">${escapeHtml(name)}</div><div class="search-dd-empty">No upcoming shifts found</div>`;
+    dd.style.display = 'block';
+    return;
+  }
+
+  const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  let html = `<div class="search-dd-section">${escapeHtml(name)} — Upcoming shifts</div>`;
+  upcoming.slice(0, 20).forEach(s => {
+    const d = new Date(s.shift_date + 'T00:00:00');
+    const dateLabel = `${DAYS[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`;
+    const timeLabel = `${(s.scheduled_start||'?').slice(0,5)}–${(s.scheduled_end||'?').slice(0,5)}`;
+    const secondary = type === 'worker' ? escapeHtml(s.outlet || '—') : escapeHtml(s.worker_name || '—');
+    html += `<div class="search-dd-shift" onclick="jumpToShiftFromSearch('${s.shift_date}','${s.id}')">
+      <span class="search-dd-date">${dateLabel}</span>
+      <span class="search-dd-outlet">${secondary}</span>
+      <span class="search-dd-time">${timeLabel}</span>
+      <span style="flex-shrink:0;">${statusBadge(s)}</span>
+    </div>`;
+  });
+  dd.innerHTML = html;
+  dd.style.display = 'block';
+}
+
+async function jumpToShiftFromSearch(date, id) {
+  closeSearchDropdown();
+  currentDate = new Date(date + 'T00:00:00');
+  setAttendanceView('day');
+  updateDateLabel();
+  await loadShifts();
+  setTimeout(() => {
+    const row = document.getElementById('row-' + id);
+    if (row) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const origOutline = row.style.outline;
+      row.style.outline = '2px solid var(--accent)';
+      row.style.outlineOffset = '-2px';
+      row.style.transition = 'outline 0.4s';
+      setTimeout(() => { row.style.outline = origOutline; row.style.outlineOffset = ''; }, 2500);
+    }
+  }, 350);
+}
+
+function closeSearchDropdown() {
+  const dd = document.getElementById('search-dropdown');
+  if (dd) dd.style.display = 'none';
+}
+
+// Close dropdown on outside click
+document.addEventListener('click', (e) => {
+  const wrap = document.querySelector('.search-wrap');
+  if (wrap && !wrap.contains(e.target)) closeSearchDropdown();
+}, true);
+
+// ── End search autocomplete ───────────────────────────────────────────────────
+
+function toggleCollapsedView() {
+  collapsedView = !collapsedView;
+  expandedRows.clear();
+  const btn = document.getElementById('collapse-view-btn');
+  if (btn) btn.classList.toggle('active', collapsedView);
+  renderTable();
+}
+
+function toggleExpandRow(id, event) {
+  // Don't toggle when clicking buttons or inputs inside the row
+  if (event && (event.target.closest('button, input, select, a, label'))) return;
+  // Save scroll position before re-render so the view doesn't jump to top
+  const scrollEl = document.querySelector('.attendance-scroll');
+  const savedScroll = scrollEl ? scrollEl.scrollTop : 0;
+  if (expandedRows.has(id)) {
+    expandedRows.delete(id);
+  } else {
+    expandedRows.add(id);
+  }
+  renderTable();
+  // Restore scroll position after re-render
+  const newScrollEl = document.querySelector('.attendance-scroll');
+  if (newScrollEl && savedScroll > 0) newScrollEl.scrollTop = savedScroll;
+}
+
 function renderTable() {
   renderStandbyDayPanel();
   if (attendanceView === 'week') { renderWeeklyGrid(); return; }
@@ -2885,6 +3093,7 @@ function renderTable() {
       const actions = `<div class="action-stack">
         ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+        <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
         <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
       return `<tr class="${rowClass}" id="row-${s.id}">
         <td><div class="worker-name">${workerName}</div>${workerPhoneLine(workerName)}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
@@ -2967,6 +3176,7 @@ function renderTable() {
         const actions = `<div class="action-stack">
           ${showClockIn ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+          <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         return `<tr class="${rowClass}" id="row-${s.id}">
           <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
@@ -3018,6 +3228,105 @@ function renderTable() {
     document.getElementById('table-body-wrap').innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div><p>No shifts for this day.<br>Click <strong>+ Add shift</strong> to get started.</p></div>';
     return;
   }
+
+  // ── Collapsed (compact) view ────────────────────────────────────────────────
+  if (collapsedView) {
+    const buildFullRow = (s) => {
+      const hours = calcShiftHours(s);
+      const workerName = String(s.worker_name || '').trim() || 'Available';
+      const isAvailable = workerName.toLowerCase() === 'available';
+      const srTag = s.sr_worker
+        ? `<div class="sr-tag">↺ ${parseFloat(s.sr_absorbed||0)>0?'3rd party':'SR'}: ${s.sr_worker}</div>`
+        : (!s.sr_worker && s.sr_rate && parseFloat(s.sr_rate)>parseFloat(s.rate||0))
+          ? `<div class="sr-tag" style="color:var(--teal);border-color:rgba(41,184,204,0.3);background:rgba(41,184,204,0.1);">★ Special rate ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.sr_rate).toFixed(0)}/hr</div>`
+          : '';
+      const isCancelled = s.cancelled;
+      const rowClass = 'collapsed-expanded-row' + (isCancelled ? ' row-cancelled' : (s.is_paid ? ' row-paid' : ''));
+      let actions = '';
+      if (isCancelled) {
+        const srAction = s.sr_worker
+          ? `<span style="font-size:11px;color:var(--text3);">${s.sr_worker} covering</span>`
+          : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(s.worker_name)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`;
+        actions = `<div class="action-stack">${srAction}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`;
+      } else {
+        const replacementAction = (isAvailable && !s.sr_worker)
+          ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`
+          : '';
+        const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
+        const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
+        const showPaidTick = !isAvailable && !!s.clock_out && !s.cancelled;
+        const isPaid = !!s.is_paid;
+        actions = `<div class="action-stack">
+          ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
+          ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
+          ${showPaidTick ? `<button onclick="togglePaid('${s.id}',${isPaid})"
+            style="font-size:11px;padding:3px 8px;border:1px solid ${isPaid?'var(--green)':'var(--border2)'};background:${isPaid?'rgba(52,199,123,0.15)':'transparent'};color:${isPaid?'var(--green)':'var(--text3)'};border-radius:4px;cursor:pointer;white-space:nowrap;font-weight:600;"
+            title="${isPaid?'Mark as unpaid':'Mark as paid'}">${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+          <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
+          ${replacementAction}
+          <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
+      }
+      return `<tr class="${rowClass}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
+        <td colspan="5" style="padding:0;">
+          <div class="collapse-bar" onclick="toggleExpandRow('${s.id}', event)">▲ collapse</div>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr>
+              <td style="padding:8px 14px;vertical-align:middle;min-width:160px;">
+                <div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>
+                ${!isAvailable ? workerPhoneLine(workerName) : ''}
+                <div class="sub-text">${s.outlet}</div>
+                ${srTag}${reminderPanelHtml(s)}
+              </td>
+              <td style="padding:8px 14px;vertical-align:middle;">
+                <span class="badge badge-gray" style="font-size:9px;">${s.role}</span>
+              </td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;" id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
+              <td style="padding:8px 14px;vertical-align:middle;" id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);" id="break-disp-${s.id}">${breakLabel(breakMinsForShift(s))}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}${renderCommentControl(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;min-width:170px;">${paymentDisplay(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;">${statusBadge(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;">${penaltyDisplay(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;">${actions}</td>
+            </tr>
+          </table>
+        </td>
+      </tr>`;
+    };
+
+    const compactRowHtml = rows.map(s => {
+      const workerName = String(s.worker_name || '').trim() || 'Available';
+      const isAvailable = workerName.toLowerCase() === 'available';
+      const isCancelled = s.cancelled;
+      const rowClass = 'collapsed-row' + (isCancelled ? ' row-cancelled' : (s.is_paid ? ' row-paid' : ''));
+      if (expandedRows.has(s.id)) return buildFullRow(s);
+      return `<tr class="${rowClass}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
+        <td>
+          <div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : escapeHtml(workerName)}</div>
+          <div class="sub-text">${escapeHtml(s.outlet||'')}</div>
+        </td>
+        <td><span class="badge badge-gray" style="font-size:9px;">${escapeHtml(s.role||'')}</span></td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+        <td>${statusBadge(s)}</td>
+        <td class="collapsed-expand-hint">›</td>
+      </tr>`;
+    }).join('');
+
+    const compactTable = `<table>
+      <thead><tr>
+        <th>Worker</th><th>Role</th><th>Scheduled</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>${compactRowHtml}</tbody>
+    </table>`;
+    document.getElementById('table-body-wrap').innerHTML = `<div class="attendance-scroll">${compactTable}</div>`;
+    return;
+  }
+  // ── End collapsed view ──────────────────────────────────────────────────────
+
   const tbody = `<table>
     <thead><tr>
       <th>Worker</th><th>Role</th><th>Scheduled</th>
@@ -3060,6 +3369,7 @@ function renderTable() {
               title="${isPaid ? 'Mark as unpaid' : 'Mark as paid'}">
               ${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+            <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
             ${replacementAction}
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
@@ -3116,7 +3426,39 @@ function renderWeeklyGrid() {
     const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${moneyForShift(netPaymentForShift(s), s)}</div>` : '';
     const actions = s.cancelled
       ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
-      : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button>${(isAvailable && !s.sr_worker) ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>` : ''}<button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
+      : `<div class="week-actions"><button class="btn btn-ghost btn-sm" onclick="setAttendanceView('day'); currentDate = new Date('${s.shift_date}T00:00:00'); updateDateLabel(); loadShifts(); setTimeout(()=>openEditRow('${s.id}'),250);">✎</button><button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱</button>${(isAvailable && !s.sr_worker) ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>` : ''}<button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">🗑</button></div>`;
+
+    // ── Collapsed week card ──
+    if (collapsedView) {
+      const isExp = expandedRows.has(s.id);
+      const expandedCls = isExp ? ' week-shift-expanded' : ' week-shift-compact';
+      const toggleFn = `event.stopPropagation();if(!event.target.closest('button,input,a')){if(expandedRows.has('${s.id}'){expandedRows.delete('${s.id}')}else{expandedRows.add('${s.id}')}renderTable();}`;
+      if (!isExp) {
+        return `<div class="week-shift${cls}${expandedCls}" onclick="if(!event.target.closest('button,input,a')){expandedRows.has('${s.id}')?expandedRows.delete('${s.id}'):expandedRows.add('${s.id}');renderTable();}" draggable="false">
+          <div class="week-meta" style="color:var(--text);font-weight:600;font-size:12px;">${escapeHtml(s.outlet||'—')}</div>
+          <div class="week-meta" style="font-size:11px;">${isAvailable?'<span class="available-name">Available</span>':`<strong style="font-size:12px;">${escapeHtml(workerName)}</strong>`}</div>
+          <div class="week-time" style="font-size:11px;">${scheduledRange(s)}</div>
+          <div class="week-meta" style="font-size:11px;color:var(--text3);">${escapeHtml(s.role||'—')}</div>
+          <div style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;">${statusBadge(s)}<span style="color:var(--text3);font-size:11px;">›</span></div>
+        </div>`;
+      }
+      // Expanded card in grid
+      return `<div class="week-shift${cls}${expandedCls}" draggable="${!s.cancelled}" ondragstart="handleShiftDragStart(event, '${s.id}')" ondragend="handleShiftDragEnd(event)">
+        <div onclick="if(!event.target.closest('button,input,a')){expandedRows.delete('${s.id}');renderTable();}" style="cursor:pointer;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+            <span style="font-size:10px;color:var(--accent);font-family:var(--mono);font-weight:700;">▲ COLLAPSE</span>
+          </div>
+          <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
+          <div class="week-meta">${nameHtml}</div>
+          <div class="week-time">${scheduledRange(s)}</div>
+          <div class="week-meta">${s.role || '—'}${hours ? ' · '+hours+'h' : ''}</div>
+          ${isAvailable ? '' : `<div class="week-meta">Net: ${moneyForShift(netPaymentForShift(s), s)}</div>`}
+          <div style="margin-top:4px;">${statusBadge(s)}</div>
+        </div>
+        ${replacement}${actions}
+      </div>`;
+    }
+    // ── Normal (full) week card ──
     return `<div class="week-shift${cls}" draggable="${!s.cancelled}" ondragstart="handleShiftDragStart(event, '${s.id}')" ondragend="handleShiftDragEnd(event)">
       <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
       <div class="week-meta">${nameHtml}</div>
@@ -3805,6 +4147,85 @@ async function addShift() {
 }
 
 // ── Cancel shift ──────────────────────────────────────────────
+function closeModal(id) { document.getElementById(id)?.classList.remove('open'); }
+
+// ── Shift audit trail ─────────────────────────────────────────────────────────
+async function openAuditModal(shiftId) {
+  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  if (!s) return;
+
+  const modal = document.getElementById('audit-modal');
+  const body = document.getElementById('audit-modal-body');
+  const info = document.getElementById('audit-modal-shift-info');
+  const title = document.getElementById('audit-modal-title');
+
+  title.textContent = 'Shift History';
+  info.innerHTML = `
+    <strong>${escapeHtml(s.worker_name || 'Available')}</strong> · ${escapeHtml(s.outlet || '—')}
+    <span style="margin-left:10px;font-family:var(--mono);">${escapeHtml(s.scheduled_start?.slice(0,5)||'?')}–${escapeHtml(s.scheduled_end?.slice(0,5)||'?')}</span>
+    <span style="margin-left:10px;">${escapeHtml(s.shift_date||'')}</span>`;
+  body.innerHTML = `<div style="text-align:center;padding:24px;"><div class="spinner"></div></div>`;
+  modal.classList.add('open');
+
+  // Fetch all activity log entries for this shift id
+  let entries = [];
+  try {
+    const { data } = await supabaseClient
+      .from('activity_logs')
+      .select('*')
+      .eq('ref_id', String(shiftId))
+      .order('created_at', { ascending: true });
+    entries = data || [];
+  } catch(e) {}
+  // Also include local log entries
+  const local = (readLocalActivityLog() || []).filter(r => String(r.ref_id) === String(shiftId));
+  // Merge, deduplicate by id
+  const seen = new Set(entries.map(r => r.id));
+  local.forEach(r => { if (!seen.has(r.id)) entries.push(r); });
+  entries.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+  // If shift has created_at, prepend a synthetic "Created" entry
+  const syntheticEntries = [];
+  if (s.created_at) {
+    syntheticEntries.push({
+      _synthetic: true,
+      action: 'Shift created',
+      details: `Scheduled ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'} · ${s.role||''}`,
+      created_by: s.created_by || '—',
+      created_at: s.created_at
+    });
+  }
+  const all = [...syntheticEntries, ...entries];
+
+  if (!all.length) {
+    body.innerHTML = `<div class="empty-state" style="padding:24px 0;"><div class="empty-icon">📋</div><p>No history found for this shift.</p></div>`;
+    return;
+  }
+
+  const dotClass = (action) => {
+    const a = (action || '').toLowerCase();
+    if (a.includes('creat')) return 'create';
+    if (a.includes('clock')) return 'clock';
+    if (a.includes('cancel')) return 'cancel';
+    return 'edit';
+  };
+
+  body.innerHTML = all.map(r => {
+    const when = r.created_at ? new Date(r.created_at).toLocaleString('en-SG', {
+      day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:true
+    }) : '—';
+    return `<div class="audit-entry">
+      <div class="audit-dot ${dotClass(r.action)}"></div>
+      <div class="audit-body">
+        <div class="audit-action">${escapeHtml(r.action || '')}</div>
+        ${r.details ? `<div class="audit-detail">${escapeHtml(r.details)}</div>` : ''}
+        <div class="audit-meta">${escapeHtml(r.created_by || '—')} · ${when}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+// ── End shift audit trail ─────────────────────────────────────────────────────
+
 function openCancelModal(id, workerName, outlet, sched) {
   pendingCancelId = id; mcDataUrl = null;
   const recent = getRecentCancellations(workerName);
