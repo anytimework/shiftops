@@ -3232,6 +3232,10 @@ async function confirmClockIn(id) {
     clock_in: ci, late_penalty: lp, updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Clock-in failed: ' + error.message, 'error'); return; }
+  // Auto-acknowledge all reminders — worker is onsite, reminders are irrelevant
+  shiftReminders[id] = { nightSent: true, nightAcked: true, clockinSent: true, clockinResponded: true };
+  localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+  await persistReminder(id);
   await logActivity(
     'Clocked in',
     `${s.worker_name} clocked in at ${ci} for shift at ${s.outlet} (scheduled ${s.scheduled_start?.slice(0,5)||'?'})`,
@@ -7264,6 +7268,10 @@ async function executeAIAction(actionJson) {
       const time = a.time || new Date().toTimeString().slice(0,5);
       const lp = calcLatePenalty(s.scheduled_start?.slice(0,5), time).penalty;
       await supabaseClient.from('shifts').update({ clock_in: time, late_penalty: lp, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
+      // Auto-acknowledge all reminders — worker is onsite
+      shiftReminders[a.shiftId] = { nightSent: true, nightAcked: true, clockinSent: true, clockinResponded: true };
+      localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+      await persistReminder(a.shiftId);
       await logActivity('AI: Clocked in', `${a.workerName} clocked in at ${time}`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
       await loadShifts();
       return `✅ Clocked in **${a.workerName}** at ${time}${lp > 0 ? ` (late penalty $${lp.toFixed(2)} applied)` : ''}`;
