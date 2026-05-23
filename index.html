@@ -2343,7 +2343,9 @@ function paymentDisplay(s) {
   const platformFee = thirdPartyPlatformFeeForShift(s);
   if (!s.clock_out && !s.cancelled) {
     const est = estimatedPaymentForShift(s);
-    return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:var(--amber);font-weight:600;">${isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing'}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${platformFee?` · Platform fee ${moneyForShift(platformFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
+    const statusLabel = !s.clock_in ? 'Scheduled' : (isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing');
+    const statusColor = !s.clock_in ? 'var(--text3)' : 'var(--amber)';
+    return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:${statusColor};font-weight:600;">${statusLabel}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${platformFee?` · Platform fee ${moneyForShift(platformFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}`;
   }
   if (s.sr_worker) {
     return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)} client rate</div><div style="margin-top:4px;color:var(--green);font-weight:600;">Paid to 3rd party: ${moneyForShift(net, s)}</div>${srFee?`<div class="sub-text">SR absorbed: ${moneyForShift(srFee, s)}${platformFee?` incl. ${moneyForShift(platformFee, s)} fee`:''}</div>`:''}<div class="sub-text">Provider: ${s.sr_worker}</div>`;
@@ -2768,6 +2770,7 @@ function penaltyDisplay(s) {
 function metricFilterLabel() {
   const labels = {
     all: 'all shifts',
+    not_clocked_in: 'scheduled (not clocked-in) shifts',
     clocked_in: 'clocked-in shifts',
     pending_clock_in: 'pending clock-in shifts',
     pending_clock_out: 'pending clock-out shifts',
@@ -2783,6 +2786,7 @@ function metricFilterLabel() {
 
 function matchesMetricFilter(s) {
   if (!activeMetricFilter || activeMetricFilter === 'all') return true;
+  if (activeMetricFilter === 'not_clocked_in') return isPayableShift(s) && !s.clock_in;
   if (activeMetricFilter === 'clocked_in') return isPayableShift(s) && !!s.clock_in;
   if (activeMetricFilter === 'pending_clock_in') return isPendingClockIn(s);
   if (activeMetricFilter === 'pending_clock_out') return isPendingClockOut(s);
@@ -2819,6 +2823,21 @@ function renderTable() {
   if (attendanceView === 'week') { renderWeeklyGrid(); return; }
   const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
   let rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  // When viewing Clocked-In tab, sort by earliest scheduled clock-out time (ascending)
+  // so ops team can see who is clocking out first at the top
+  if (activeMetricFilter === 'clocked_in') {
+    const toM = t => { const [h,m] = (String(t||'00:00')).split(':').map(Number); return h*60+m; };
+    rows = [...rows].sort((a, b) => {
+      const aEnd = toM(a.scheduled_end?.slice(0,5));
+      const bEnd = toM(b.scheduled_end?.slice(0,5));
+      const aStart = toM(a.scheduled_start?.slice(0,5));
+      const bStart = toM(b.scheduled_start?.slice(0,5));
+      // Handle overnight shifts: if end <= start, it crosses midnight, add 1440
+      const aEndAdj = aEnd <= aStart ? aEnd + 1440 : aEnd;
+      const bEndAdj = bEnd <= bStart ? bEnd + 1440 : bEnd;
+      return aEndAdj - bEndAdj;
+    });
+  }
   // When viewing Total Payment tab, sort by effective finish time descending
   // Overnight shifts (clock_out < scheduled_start) count as next day for sorting
   if (activeMetricFilter === 'paid_out') {
@@ -2832,6 +2851,168 @@ function renderTable() {
     };
     rows = [...rows].sort((a, b) => effectiveFinishMins(b) - effectiveFinishMins(a));
   }
+  // ── Special grouped view for Pending Clock-Out filter ──────────────────────
+  if (activeMetricFilter === 'pending_clock_out') {
+    const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
+    const dueNowRows = rows; // already filtered by isPendingClockOut via matchesMetricFilter
+    // Upcoming = clocked in, not yet past scheduled end time
+    const upcomingRows = allShifts.filter(s =>
+      isPayableShift(s) && s.clock_in && !s.clock_out && !isPendingClockOut(s) &&
+      (!search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role].some(v => String(v||'').toLowerCase().includes(search)))
+    ).sort((a, b) => String(a.scheduled_end||'').localeCompare(String(b.scheduled_end||'')));
+    // Group upcoming rows by scheduled_end time
+    const upcomingGroupMap = {};
+    upcomingRows.forEach(s => {
+      const t = s.scheduled_end?.slice(0,5) || '—';
+      if (!upcomingGroupMap[t]) upcomingGroupMap[t] = [];
+      upcomingGroupMap[t].push(s);
+    });
+    const upcomingTimes = Object.keys(upcomingGroupMap).sort();
+    const colCount = 13;
+    const buildRow = (s) => {
+      const hours = calcShiftHours(s);
+      const workerName = String(s.worker_name || '').trim() || 'Available';
+      const isAvailable = workerName.toLowerCase() === 'available';
+      const srTag = s.sr_worker
+        ? `<div class="sr-tag">↺ ${parseFloat(s.sr_absorbed||0)>0?'3rd party':'SR'}: ${s.sr_worker}</div>`
+        : (!s.sr_worker && s.sr_rate && parseFloat(s.sr_rate)>parseFloat(s.rate||0))
+          ? `<div class="sr-tag" style="color:var(--teal);border-color:rgba(41,184,204,0.3);background:rgba(41,184,204,0.1);">★ Special rate ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.sr_rate).toFixed(0)}/hr</div>`
+          : '';
+      const isCancelled = s.cancelled;
+      const rowClass = isCancelled ? 'row-cancelled' : (s.is_paid ? 'row-paid' : '');
+      const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
+      const isPaid = !!s.is_paid;
+      const actions = `<div class="action-stack">
+        ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
+      return `<tr class="${rowClass}" id="row-${s.id}">
+        <td><div class="worker-name">${workerName}</div>${workerPhoneLine(workerName)}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+        <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+        <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
+        <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
+        <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
+        <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}${renderCommentControl(s)}</td>
+        <td style="font-family:var(--mono);font-size:12px;min-width:170px;">${paymentDisplay(s)}</td>
+        <td>${statusBadge(s)}</td>
+        <td>${penaltyDisplay(s)}</td>
+        <td style="font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+        <td>${actions}</td>
+      </tr>`;
+    };
+    const sectionHeader = (label, color = 'var(--amber)') =>
+      `<tr><td colspan="${colCount}" style="padding:10px 14px 8px;background:var(--bg3);border-bottom:1px solid var(--border2);font-size:11px;font-weight:700;color:${color};font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;">${label}</td></tr>`;
+    const dividerRow =
+      `<tr><td colspan="${colCount}" style="padding:0;border-top:2px solid var(--border2);"></td></tr>`;
+    let bodyRows = '';
+    // Section 1: Due now
+    bodyRows += sectionHeader('Due Now — Pending Clock-Out', 'var(--amber)');
+    if (dueNowRows.length) {
+      bodyRows += dueNowRows.map(buildRow).join('');
+    } else {
+      bodyRows += `<tr><td colspan="${colCount}" style="padding:18px 14px;color:var(--text3);font-size:12px;font-style:italic;">No one is due for clock-out right now.</td></tr>`;
+    }
+    // Divider + upcoming sections
+    if (upcomingTimes.length) {
+      bodyRows += dividerRow;
+      upcomingTimes.forEach(t => {
+        bodyRows += sectionHeader(`Upcoming Clock-Out at ${formatTimeFriendly(t)}`, 'var(--accent)');
+        bodyRows += upcomingGroupMap[t].map(buildRow).join('');
+      });
+    }
+    const totalVisible = dueNowRows.length + upcomingRows.length;
+    document.getElementById('shift-count').textContent = `${totalVisible} pending clock-out shifts`;
+    const tableHtml = `<table>
+      <thead><tr>
+        <th>Worker</th><th>Role</th><th>Scheduled</th>
+        <th>Clock-in</th><th>Clock-out</th><th>Break</th><th>Hours</th>
+        <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Actions</th>
+      </tr></thead>
+      <tbody>${bodyRows}</tbody>
+    </table>`;
+    document.getElementById('table-body-wrap').innerHTML = `<div class="attendance-scroll">${tableHtml}</div>`;
+    return;
+  }
+  // ── End special pending clock-out view ─────────────────────────────────────
+
+  // ── Special grouped view for Scheduled (Not Clocked-In Yet) — today only ──
+  if (activeMetricFilter === 'not_clocked_in') {
+    const todayStr = formatDate(new Date());
+    const viewingToday = formatDate(currentDate) === todayStr;
+    if (viewingToday) {
+      const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
+      const scheduledRows = rows; // already filtered by matchesMetricFilter (not_clocked_in)
+      // Group by scheduled_start time
+      const groupMap = {};
+      scheduledRows.forEach(s => {
+        const t = s.scheduled_start?.slice(0,5) || '—';
+        if (!groupMap[t]) groupMap[t] = [];
+        groupMap[t].push(s);
+      });
+      const groupTimes = Object.keys(groupMap).sort();
+      const colCount = 13;
+      const buildRow = (s) => {
+        const hours = calcShiftHours(s);
+        const workerName = String(s.worker_name || '').trim() || 'Available';
+        const isAvailable = workerName.toLowerCase() === 'available';
+        const srTag = s.sr_worker
+          ? `<div class="sr-tag">↺ ${parseFloat(s.sr_absorbed||0)>0?'3rd party':'SR'}: ${s.sr_worker}</div>`
+          : (!s.sr_worker && s.sr_rate && parseFloat(s.sr_rate)>parseFloat(s.rate||0))
+            ? `<div class="sr-tag" style="color:var(--teal);border-color:rgba(41,184,204,0.3);background:rgba(41,184,204,0.1);">★ Special rate ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.sr_rate).toFixed(0)}/hr</div>`
+            : '';
+        const rowClass = s.is_paid ? 'row-paid' : '';
+        const showClockIn = !isAvailable && !s.clock_in && !s.cancelled;
+        const actions = `<div class="action-stack">
+          ${showClockIn ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
+          <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
+        return `<tr class="${rowClass}" id="row-${s.id}">
+          <td><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}<div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+          <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+          <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
+          <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
+          <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${hours ? hours+'h' : '—'}</td>
+          <td style="font-size:12px;color:var(--text2);min-width:190px;">${simplePayrollText(s)}${renderCommentControl(s)}</td>
+          <td style="font-family:var(--mono);font-size:12px;min-width:170px;">${paymentDisplay(s)}</td>
+          <td>${statusBadge(s)}</td>
+          <td>${penaltyDisplay(s)}</td>
+          <td style="font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+          <td>${actions}</td>
+        </tr>`;
+      };
+      const sectionHeader = (label) =>
+        `<tr><td colspan="${colCount}" style="padding:10px 14px 8px;background:var(--bg3);border-bottom:1px solid var(--border2);font-size:11px;font-weight:700;color:var(--accent);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.08em;">${label}</td></tr>`;
+      const dividerRow =
+        `<tr><td colspan="${colCount}" style="padding:0;border-top:2px solid var(--border2);"></td></tr>`;
+      let bodyRows = '';
+      if (!groupTimes.length) {
+        bodyRows = `<tr><td colspan="${colCount}" style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13px;"><div style="font-size:28px;margin-bottom:10px;">✓</div><p>Everyone is clocked in.</p></td></tr>`;
+      } else {
+        groupTimes.forEach((t, i) => {
+          if (i > 0) bodyRows += dividerRow;
+          bodyRows += sectionHeader(`Scheduled at ${formatTimeFriendly(t)}`);
+          bodyRows += groupMap[t].map(buildRow).join('');
+        });
+      }
+      document.getElementById('shift-count').textContent = `${scheduledRows.length} scheduled (not clocked-in) shifts`;
+      const tableHtml = `<table>
+        <thead><tr>
+          <th>Worker</th><th>Role</th><th>Scheduled</th>
+          <th>Clock-in</th><th>Clock-out</th><th>Break</th><th>Hours</th>
+          <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table>`;
+      document.getElementById('table-body-wrap').innerHTML = `<div class="attendance-scroll">${tableHtml}</div>`;
+      return;
+    }
+  }
+  // ── End special scheduled view ─────────────────────────────────────────────
+
   document.getElementById('shift-count').textContent = rows.length ? `${rows.length} ${metricFilterLabel()}` : metricFilterLabel();
   if (!rows.length) {
     document.getElementById('table-body-wrap').innerHTML = '<div class="empty-state"><div class="empty-icon">📋</div><p>No shifts for this day.<br>Click <strong>+ Add shift</strong> to get started.</p></div>';
@@ -3245,6 +3426,7 @@ async function deleteCancelledShift(id) {
 // ── Metrics ──────────────────────────────────────────────────
 function renderMetrics() {
   const payableShifts = allShifts.filter(isPayableShift);
+  const notClockedIn = payableShifts.filter(s => !s.clock_in).length;
   const present = payableShifts.filter(s => s.clock_in).length;
   const pendingClockInRows = payableShifts.filter(isPendingClockIn);
   const pendingClockIn = pendingClockInRows.length;
@@ -3275,7 +3457,7 @@ function renderMetrics() {
   updatePendingClockOutBadge(pendingClockOut);
   const card = (filter, label, value, cls = '', sub = '', badge = 0) => `<div class="metric-card clickable ${activeMetricFilter===filter?'active-filter':''}" onclick="setMetricFilter('${filter}')">${notificationBubble(badge)}<div class="metric-label">${label}</div><div class="metric-val ${cls}">${value}</div>${sub ? `<div class="metric-sub">${sub}</div>` : ''}</div>`;
   document.getElementById('metrics').innerHTML = `
-    ${card('all','Shifts', allShifts.length, '')}
+    ${card('not_clocked_in','Scheduled (Not Clocked-In Yet)', notClockedIn, '')}
     ${card('clocked_in','Clocked in', present, 'blue')}
     ${card('pending_clock_in','Pending clock-in', pendingClockIn, pendingClockIn>0?'amber':'green', pendingClockInLabel, pendingClockIn)}
     ${card('pending_clock_out','Pending clock-out', pendingClockOut, pendingClockOut>0?'amber':'green', pendingClockOutLabel, pendingClockOut)}
