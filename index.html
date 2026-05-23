@@ -2003,8 +2003,11 @@ function payrollStartTime(s) {
   let ciM = toMins(ci);
   // If a shift starts late night and clock-in is after midnight, compare as next day.
   if (ciM < schedM - 720) ciM += 1440;
+  // Early arrival: count payroll from actual clock-in (worker is here, they should be paid)
+  if (ciM < schedM) return ci;
+  // On time or within 5-min grace: count from scheduled start
   if (ciM - schedM <= 5) return sched;
-  // Payroll is counted in 15-minute blocks. After grace, round clock-in up to the next 15-minute mark.
+  // Late arrival: round clock-in up to the next 15-minute block
   return minsToTime(Math.ceil(ciM / 15) * 15);
 }
 function calcShiftHours(s) {
@@ -3289,7 +3292,8 @@ function renderTable() {
         actions = `<div class="action-stack">${srAction}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`;
       } else {
         const replacementAction = (isAvailable && !s.sr_worker)
-          ? `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ Find replacement</button>`
+          ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign worker</button>
+             <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>`
           : '';
         const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
         const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
@@ -3319,7 +3323,7 @@ function renderTable() {
               <td style="padding:8px 14px;vertical-align:middle;">
                 <span class="badge badge-gray" style="font-size:9px;">${s.role}</span>
               </td>
-              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);" id="sched-disp-${s.id}">${scheduledRange(s)}</td>
               <td style="padding:8px 14px;vertical-align:middle;" id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
               <td style="padding:8px 14px;vertical-align:middle;" id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
               <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);" id="break-disp-${s.id}">${breakLabel(breakMinsForShift(s))}</td>
@@ -3694,6 +3698,18 @@ function openEditRow(id) {
       style="width:100%;font-size:12px;padding:5px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:4px;font-family:var(--font);box-sizing:border-box;">`;
     setTimeout(() => document.getElementById(`edit-wn-${id}`)?.focus(), 50);
   }
+  // Scheduled time inputs
+  const schedCell = document.getElementById(`sched-disp-${id}`);
+  if (schedCell) {
+    schedCell.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px;">
+      <div style="font-size:10px;color:var(--text3);font-family:var(--font);">Scheduled</div>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <input type="time" class="time-inp" id="edit-ss-${id}" value="${s.scheduled_start?.slice(0,5)||''}" style="width:88px;">
+        <span style="color:var(--text3);font-size:11px;">–</span>
+        <input type="time" class="time-inp" id="edit-se-${id}" value="${s.scheduled_end?.slice(0,5)||''}" style="width:88px;">
+      </div>
+    </div>`;
+  }
   ciCell.innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
   coCell.innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
   const tc = parseFloat(s.transport_claim || 0);
@@ -3721,6 +3737,46 @@ function openEditRow(id) {
   document.getElementById(`edit-ci-${id}`)?.focus();
 }
 
+// Inline worker assignment for Available slots (without opening full edit)
+function openAssignWorkerInline(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const wnCell = document.getElementById(`wn-disp-${id}`);
+  if (!wnCell) { openEditRow(id); return; } // fallback to full edit
+  wnCell.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <input type="text" id="assign-wn-${id}" list="worker-datalist" autocomplete="off"
+        placeholder="Type worker name…"
+        style="width:100%;font-size:12px;padding:5px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:4px;font-family:var(--font);box-sizing:border-box;">
+      <div style="display:flex;gap:4px;">
+        <button class="btn btn-primary btn-sm" onclick="confirmAssignWorker('${id}')">Assign</button>
+        <button class="btn btn-ghost btn-sm" onclick="cancelAssignWorker('${id}')">Cancel</button>
+      </div>
+    </div>`;
+  setTimeout(() => document.getElementById(`assign-wn-${id}`)?.focus(), 50);
+}
+async function confirmAssignWorker(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const input = document.getElementById(`assign-wn-${id}`);
+  const typed = input ? input.value.trim() : '';
+  if (!typed) { toast('Please enter a worker name', 'error'); return; }
+  const matched = allWorkers.find(w => w.name.toLowerCase() === typed.toLowerCase());
+  const name = matched ? matched.name : typed;
+  const { error } = await supabaseClient.from('shifts').update({ worker_name: name, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error) { toast('Failed to assign: ' + error.message, 'error'); return; }
+  if (!matched) {
+    try { await supabaseClient.from('workers').insert({ name }); await loadWorkers(); } catch(e) {}
+  }
+  await logActivity('Assigned worker to slot', `${name} assigned to slot at ${s.outlet} on ${s.shift_date}`, 'shift', id, { worker_name: name, outlet: s.outlet });
+  toast(`✓ Assigned ${name}`);
+  await loadShifts();
+}
+function cancelAssignWorker(id) {
+  const wnCell = document.getElementById(`wn-disp-${id}`);
+  if (wnCell) wnCell.innerHTML = `<div class="worker-name"><span class="available-name">Available</span></div>`;
+}
+
 function toggleCommentEditor(id) {
   const el = document.getElementById(`comment-editor-${id}`);
   if (!el) return;
@@ -3736,9 +3792,11 @@ function cancelEditRow(id) {
   const coCell = document.getElementById(`co-disp-${id}`);
   const brCell = document.getElementById(`break-disp-${id}`);
   const wnCell = document.getElementById(`wn-disp-${id}`);
+  const schedCell = document.getElementById(`sched-disp-${id}`);
   if (ciCell) ciCell.innerHTML = renderTimeCell(s, 'clock_in');
   if (coCell) coCell.innerHTML = renderTimeCell(s, 'clock_out');
   if (brCell) brCell.innerHTML = `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</span>`;
+  if (schedCell) schedCell.innerHTML = scheduledRange(s);
   const isAvailableSlot = !s.worker_name || s.worker_name.trim().toLowerCase() === 'available';
   if (wnCell && isAvailableSlot) {
     wnCell.innerHTML = `<div class="worker-name"><span class="available-name">Available</span></div>`;
@@ -3755,12 +3813,16 @@ async function saveRow(id) {
   const tcInput = document.getElementById('edit-tc-' + id);
   const notesInput = document.getElementById('edit-notes-' + id);
   const wnInput = document.getElementById('edit-wn-' + id);
+  const ssInput = document.getElementById('edit-ss-' + id);
+  const seInput = document.getElementById('edit-se-' + id);
   const ci = ciInput ? (ciInput.value || null) : (s.clock_in?.slice(0,5) || null);
   const co = coInput ? (coInput.value || null) : (s.clock_out?.slice(0,5) || null);
   const br = brInput ? parseInt(brInput.value || 0, 10) : breakMinsForShift(s);
   const tc = tcInput ? (parseFloat(tcInput.value) || 0) : parseFloat(s.transport_claim || 0);
   const notes = notesInput ? notesInput.value.trim() : commentForShift(id);
-  const lp = ci ? calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty : 0;
+  const newSchedStart = ssInput?.value || s.scheduled_start?.slice(0,5) || null;
+  const newSchedEnd = seInput?.value || s.scheduled_end?.slice(0,5) || null;
+  const lp = ci ? calcLatePenalty(newSchedStart, ci).penalty : 0;
   // Resolve worker name — if the edit-wn input was shown, use its value
   const typedWorker = wnInput ? wnInput.value.trim() : '';
   const resolvedWorker = typedWorker && typedWorker.toLowerCase() !== 'available'
@@ -3770,6 +3832,8 @@ async function saveRow(id) {
     clock_in: ci, clock_out: co, break_mins: br,
     late_penalty: lp,
     transport_claim: tc || null,
+    scheduled_start: newSchedStart ? newSchedStart + ':00' : s.scheduled_start,
+    scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
     updated_at: new Date().toISOString()
   };
   if (resolvedWorker) updatePayload.worker_name = resolvedWorker;
