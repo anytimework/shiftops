@@ -3067,15 +3067,34 @@ function renderTable() {
     const upcomingRows = allShifts.filter(s =>
       isPayableShift(s) && s.clock_in && !s.clock_out && !isPendingClockOut(s) &&
       (!search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role].some(v => String(v||'').toLowerCase().includes(search)))
-    ).sort((a, b) => String(a.scheduled_end||'').localeCompare(String(b.scheduled_end||'')));
+    ).sort((a, b) => {
+      // Overnight-aware sort: if scheduled_end <= scheduled_start, the shift crosses midnight
+      // → treat those end times as next-day (add 1440 mins) so they sort AFTER same-day shifts
+      const toM = t => { const [h, m] = (String(t || '00:00')).split(':').map(Number); return h * 60 + m; };
+      const adjEnd = s => {
+        const e = toM(s.scheduled_end?.slice(0, 5));
+        const st = toM(s.scheduled_start?.slice(0, 5));
+        return (e <= st) ? e + 1440 : e; // overnight → push past midnight
+      };
+      return adjEnd(a) - adjEnd(b);
+    });
     // Group upcoming rows by scheduled_end time
     const upcomingGroupMap = {};
+    const toM2 = t => { const [h,m] = (String(t||'00:00')).split(':').map(Number); return h*60+m; };
     upcomingRows.forEach(s => {
       const t = s.scheduled_end?.slice(0,5) || '—';
       if (!upcomingGroupMap[t]) upcomingGroupMap[t] = [];
       upcomingGroupMap[t].push(s);
     });
-    const upcomingTimes = Object.keys(upcomingGroupMap).sort();
+    // Sort group keys overnight-aware (same logic as row sort above)
+    const upcomingTimes = Object.keys(upcomingGroupMap).sort((a, b) => {
+      // Use the first row in each group to get the start time for overnight detection
+      const refA = upcomingGroupMap[a][0];
+      const refB = upcomingGroupMap[b][0];
+      const adjA = toM2(a) <= toM2(refA?.scheduled_start?.slice(0,5)) ? toM2(a) + 1440 : toM2(a);
+      const adjB = toM2(b) <= toM2(refB?.scheduled_start?.slice(0,5)) ? toM2(b) + 1440 : toM2(b);
+      return adjA - adjB;
+    });
     const colCount = 13;
     const buildRow = (s) => {
       const hours = calcShiftHours(s);
@@ -7628,6 +7647,7 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "markPaid", "shiftId": "<id>", "workerName": "<name>"}
 {"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
 {"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
+{"type": "batchCreateSlots", "outlet": "<exact outlet name from DB>", "role": "<default role for all slots>", "slots": [{"date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<override role or omit>"}, ...]}
 {"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
 {"type": "searchWorker", "query": "<partial or full name to search>"}
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
@@ -7638,7 +7658,8 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 RULES:
 - Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
 - BEFORE creating a shift: confirm with the user by showing the worker's full name AND phone number from the WORKERS list, plus the exact outlet name. Wait for "yes/confirm" before executing.
-- BEFORE creating an available slot: confirm outlet name and time, then execute.
+- BEFORE creating an available slot or batch of slots: confirm outlet name, dates, and times with the user, then execute on confirmation.
+- BATCH SLOT CREATION: When a user pastes a schedule or roster with multiple shifts (e.g., a weekly rota, WhatsApp schedule message), parse ALL shifts from it and use a SINGLE batchCreateSlots action with all slots in the "slots" array. Do NOT output multiple individual createAvailableSlot actions — use batchCreateSlots for 3 or more slots at the same outlet. You CAN output multiple separate action blocks in one response if slots span multiple outlets.
 - When clocking in/out, if no time given use current time.
 - Be concise and friendly. Use emojis sparingly.
 - If you need a shift ID and there are multiple matches, list them and ask which one.
@@ -7821,6 +7842,35 @@ async function executeAIAction(actionJson) {
       return `✅ Available slot created at **${outlet.name}** on ${a.date}, ${a.start}–${a.end} (open for booking)`;
     }
 
+    case 'batchCreateSlots': {
+      // a.outlet = exact outlet name, a.slots = [{date, start, end, breakMins, role}, ...]
+      const outlet = allOutlets.find(o => o.name.toLowerCase() === (a.outlet||'').toLowerCase());
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
+      if (!Array.isArray(a.slots) || !a.slots.length) return `❌ No slots provided in batch`;
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
+      const country = normaliseCountry(outlet.country || 'Singapore');
+      const now = new Date().toISOString();
+      const rows = a.slots.map(slot => ({
+        worker_name: 'Available',
+        outlet: outlet.name,
+        shift_date: slot.date,
+        scheduled_start: slot.start.includes(':') ? slot.start + (slot.start.length === 5 ? ':00' : '') : slot.start + ':00',
+        scheduled_end: slot.end.includes(':') ? slot.end + (slot.end.length === 5 ? ':00' : '') : slot.end + ':00',
+        break_mins: parseInt(slot.breakMins || 0),
+        rate: rate,
+        country: country,
+        role: slot.role || a.role || 'F&B Service Crew',
+        created_at: now,
+        updated_at: now
+      }));
+      const { error } = await supabaseClient.from('shifts').insert(rows);
+      if (error) return `❌ Batch insert failed: ${error.message}`;
+      await logActivity('AI: Batch slots created', `${rows.length} available slots at ${outlet.name}`, 'shift', null, {});
+      await loadShifts();
+      return `✅ Created **${rows.length} available slots** at **${outlet.name}** across ${[...new Set(rows.map(r => r.shift_date))].length} day(s)`;
+    }
+
     case 'addStandby': {
       const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
       if (!w) return `❌ Worker "${a.workerName}" not found`;
@@ -7904,10 +7954,10 @@ async function executeAIAction(actionJson) {
   }
 }
 
-// Render Claude's reply — handle markdown + action blocks
+// Render Claude's reply — handle markdown + ALL action blocks (supports batch)
 async function renderAIReply(reply) {
-  // Extract action blocks
-  const actionMatch = reply.match(/```action\s*([\s\S]*?)```/);
+  // Extract ALL action blocks (global match)
+  const actionMatches = [...reply.matchAll(/```action\s*([\s\S]*?)```/g)];
   let displayText = reply.replace(/```action[\s\S]*?```/g, '').trim();
 
   // Convert basic markdown
@@ -7918,16 +7968,39 @@ async function renderAIReply(reply) {
 
   aiAddMsg(displayText, 'bot');
 
-  if (actionMatch) {
+  // Show a progress indicator when multiple actions are being executed
+  let progressEl = null;
+  if (actionMatches.length > 1) {
+    progressEl = aiAddMsg(`⏳ Executing ${actionMatches.length} actions...`, 'bot');
+  }
+
+  let successCount = 0;
+  const errors = [];
+  for (let i = 0; i < actionMatches.length; i++) {
     try {
-      const result = await executeAIAction(actionMatch[1].trim());
+      const result = await executeAIAction(actionMatches[i][1].trim());
       if (result) {
-        const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-        aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
+        if (result.startsWith('✅')) successCount++;
+        else errors.push(result);
+        // Only show individual results for small batches (≤3)
+        if (actionMatches.length <= 3) {
+          const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+          aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
+        }
       }
     } catch(e) {
-      aiAddMsg(`❌ Action failed: ${e.message}`, 'error');
+      errors.push(`❌ Action ${i+1} failed: ${e.message}`);
     }
+  }
+
+  // For large batches, show a summary instead of individual messages
+  if (actionMatches.length > 3) {
+    if (progressEl) progressEl.remove();
+    let summary = `✅ **${successCount} of ${actionMatches.length} actions completed successfully.**`;
+    if (errors.length) summary += `<br>⚠️ ${errors.length} error(s):<br>` + errors.map(e => escapeHtml(e)).join('<br>');
+    aiAddMsg(summary.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'), successCount > 0 ? 'bot' : 'error');
+  } else if (errors.length && actionMatches.length <= 3) {
+    errors.forEach(e => aiAddMsg(e, 'error'));
   }
 }
 
