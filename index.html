@@ -3539,13 +3539,12 @@ function renderTable() {
               ${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
             ${showPaidTick ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','record')" style="color:var(--red);" title="Record overpayment">⚠ Overpay</button>` : ''}
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
-            <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
             ${replacementAction}
             ${pendingOpAction4}
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
