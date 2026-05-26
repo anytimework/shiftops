@@ -1273,6 +1273,7 @@ const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [], allKnowledge = [];
+let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, totalDeducted }
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded }
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
@@ -2881,12 +2882,30 @@ async function loadShifts() {
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
   allShifts = data || [];
+  await loadOverpaymentCache();
   await loadCancellationLogsForCurrentView();
   await loadStandbyList();
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
   checkReminderAlerts();
+}
+
+async function loadOverpaymentCache() {
+  // Load all shifts that have any overpayment data (cross-date) so workerPendingOverpayment works regardless of viewed date
+  const { data } = await supabaseClient
+    .from('shifts')
+    .select('worker_name, overpayment, overpayment_deduction')
+    .or('overpayment.gt.0,overpayment_deduction.gt.0');
+  overpaymentCache = {};
+  if (!data) return;
+  for (const row of data) {
+    const key = String(row.worker_name || '').trim().toLowerCase();
+    if (!key || key === 'available') continue;
+    if (!overpaymentCache[key]) overpaymentCache[key] = { totalOverpaid: 0, totalDeducted: 0 };
+    overpaymentCache[key].totalOverpaid  += parseFloat(row.overpayment || 0);
+    overpaymentCache[key].totalDeducted += parseFloat(row.overpayment_deduction || 0);
+  }
 }
 
 // ── Render table ─────────────────────────────────────────────
@@ -3001,14 +3020,10 @@ function overpaymentDisplay(s) {
 // Returns unrecovered overpayment total for a worker (sum overpaid minus sum deducted across all their shifts)
 function workerPendingOverpayment(workerName) {
   if (!workerName || workerName.toLowerCase() === 'available') return 0;
-  const wn = workerName.toLowerCase();
-  const totalOverpaid = allShifts
-    .filter(s => String(s.worker_name||'').toLowerCase() === wn && parseFloat(s.overpayment||0) > 0)
-    .reduce((a, s) => a + parseFloat(s.overpayment||0), 0);
-  const totalDeducted = allShifts
-    .filter(s => String(s.worker_name||'').toLowerCase() === wn && parseFloat(s.overpayment_deduction||0) > 0)
-    .reduce((a, s) => a + parseFloat(s.overpayment_deduction||0), 0);
-  return Math.max(0, parseFloat((totalOverpaid - totalDeducted).toFixed(2)));
+  const key = workerName.trim().toLowerCase();
+  const entry = overpaymentCache[key];
+  if (!entry) return 0;
+  return Math.max(0, parseFloat((entry.totalOverpaid - entry.totalDeducted).toFixed(2)));
 }
 
 // ── Search autocomplete dropdown ──────────────────────────────────────────────
@@ -4015,11 +4030,11 @@ function openOverpaymentModal(id, mode) {
     if (deductNoteEl) deductNoteEl.value = '';
   }
 
-  document.getElementById('overpayment-modal').classList.add('active');
+  document.getElementById('overpayment-modal').classList.add('open');
 }
 
 function closeOverpaymentModal() {
-  document.getElementById('overpayment-modal').classList.remove('active');
+  document.getElementById('overpayment-modal').classList.remove('open');
   _overpaymentShiftId = null;
   _overpaymentMode = null;
 }
