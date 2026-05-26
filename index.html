@@ -1056,6 +1056,39 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- OVERPAYMENT MODAL -->
+<div class="modal-overlay" id="overpayment-modal">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-header"><h3 id="overpayment-modal-title">⚠ Record Overpayment</h3><button class="modal-close" onclick="closeOverpaymentModal()">✕</button></div>
+    <div id="overpayment-shift-info" style="font-size:12px;color:var(--text2);margin-bottom:14px;padding:10px 14px;background:var(--bg3);border-radius:var(--radius);"></div>
+    <div id="overpayment-record-section">
+      <div class="form-row">
+        <label>Amount overpaid ($)</label>
+        <input type="number" id="op-amount" min="0.01" step="0.50" placeholder="e.g. 15.00">
+      </div>
+      <div class="form-row">
+        <label>Reason <span style="font-weight:400;color:var(--text3);">(e.g. extra break not logged)</span></label>
+        <input type="text" id="op-reason" placeholder="Describe the overpayment reason">
+      </div>
+    </div>
+    <div id="overpayment-deduct-section" style="display:none;">
+      <div id="op-pending-list" style="margin-bottom:12px;"></div>
+      <div class="form-row">
+        <label>Deduction amount ($) <span style="font-weight:400;color:var(--text3);">Leave as-is or adjust</span></label>
+        <input type="number" id="op-deduct-amount" min="0.01" step="0.50" placeholder="0.00">
+      </div>
+      <div class="form-row">
+        <label>Recovery note <span style="font-weight:400;color:var(--text3);">optional</span></label>
+        <input type="text" id="op-deduct-note" placeholder="e.g. Deducted from shift on 26 May">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="closeOverpaymentModal()">Cancel</button>
+      <button id="op-confirm-btn" class="btn btn-primary btn-sm" onclick="confirmOverpayment()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- ASSIGN SPECIAL RATE MODAL -->
 <div class="modal-overlay" id="assign-sr-modal">
   <div class="modal" style="max-width:400px;">
@@ -2296,17 +2329,21 @@ function serviceRecoveryPayment(s) {
 function transportClaim(s) {
   return parseFloat(s.transport_claim || 0);
 }
+function overpaymentDeductionForShift(s) {
+  return parseFloat(s?.overpayment_deduction || 0);
+}
 function netPaymentForShift(s) {
   const tc = transportClaim(s);
-  if (s.sr_worker) return serviceRecoveryPayment(s) + tc;
+  const opDeduct = overpaymentDeductionForShift(s);
+  if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(s) - opDeduct) + tc;
   // Special rate for own member: sr_rate set but sr_worker null
-  // Worker payout = sr_rate × hours; penalty still applied
+  // Worker payout = sr_rate × hours; penalty + overpayment deduction applied
   if (!s.sr_worker && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate || 0)) {
     const hours = parseFloat(calcShiftHours(s) || 0);
     const workerPay = hours * parseFloat(s.sr_rate);
-    return Math.max(0, workerPay - shiftPenaltyAmount(s)) + tc;
+    return Math.max(0, workerPay - shiftPenaltyAmount(s) - opDeduct) + tc;
   }
-  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s)) + tc;
+  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s) - opDeduct) + tc;
 }
 function totalPaymentForShift(s) {
   const thirdPartyFee = s?.sr_worker ? thirdPartyPlatformFeeForShift(s) : 0;
@@ -2484,8 +2521,19 @@ function paymentDisplay(s) {
       <div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`;
   }
   const tc = transportClaim(s);
+  const opDeduct = overpaymentDeductionForShift(s);
   const tcTag = tc > 0 ? `<div class="sub-text" style="color:var(--teal);">🚕 Transport: +${moneyForShift(tc, s)}</div>` : '';
-  return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${penalty>0?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${moneyForShift(net, s)}</div>${penalty>0?`<div class="sub-text">Less deduction: ${moneyForShift(penalty, s)}</div>`:''}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>${tcTag}`;
+  const opDeductTag = opDeduct > 0 ? `<div class="sub-text" style="color:var(--red);">↓ Overpayment recovery: −${moneyForShift(opDeduct, s)}</div>` : '';
+  // Pending overpayment warning on scheduled/future shifts
+  const pendingOp = (!s.clock_out && !s.cancelled) ? workerPendingOverpayment(s.worker_name) : 0;
+  const pendingOpTag = pendingOp > 0 ? `<div style="margin-top:4px;color:var(--red);font-size:11px;font-weight:600;">⚠ Pending overpayment: ${moneyForShift(pendingOp, s)}</div>` : '';
+  if (!s.clock_out && !s.cancelled) {
+    const est = estimatedPaymentForShift(s);
+    const statusLabel = !s.clock_in ? 'Scheduled' : (isPendingClockOut(s) ? 'Pending clock-out' : 'Ongoing');
+    const statusColor = !s.clock_in ? 'var(--text3)' : 'var(--amber)';
+    return `<div>${moneyForShift(est, s)}</div><div class="sub-text">Estimated until ${s.scheduled_end?.slice(0,5) || 'scheduled end'}</div><div style="margin-top:4px;color:${statusColor};font-weight:600;">${statusLabel}</div>${s.sr_worker?`<div class="sub-text">3rd party: ${s.sr_worker}${platformFee?` · Platform fee ${moneyForShift(platformFee, s)}`:''}</div>`:`<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>`}${pendingOpTag}`;
+  }
+  return `<div>${moneyForShift(gross, s)}</div><div class="sub-text">${hours || 0}h × ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}</div>${pnote?`<div class="sub-text">${pnote}</div>`:''}<div style="margin-top:4px;color:${(penalty>0||opDeduct>0)?'var(--amber)':'var(--green)'};font-weight:600;">Net: ${moneyForShift(net, s)}</div>${penalty>0?`<div class="sub-text">Less penalty: ${moneyForShift(penalty, s)}</div>`:''}${opDeductTag}<div class="sub-text">${workerPaymentInfo(s.worker_name)}</div>${tcTag}`;
 }
 
 function calcLatePenalty(sched, clockIn) {
@@ -2932,6 +2980,37 @@ function srDisplay(s) {
   return `${feeLine}<div class="sub-text">${label}</div>${commissionLine}`;
 }
 
+function overpaymentDisplay(s) {
+  const op = parseFloat(s.overpayment || 0);
+  const deduct = parseFloat(s.overpayment_deduction || 0);
+  if (!op && !deduct) return '<span class="penalty-none">—</span>';
+  let html = '';
+  if (op > 0) {
+    html += `<div style="color:var(--red);font-weight:700;">↑ ${moneyForShift(op, s)}</div>`;
+    if (s.overpayment_note) html += `<div class="sub-text">${escapeHtml(s.overpayment_note)}</div>`;
+    else html += `<div class="sub-text">Overpaid</div>`;
+  }
+  if (deduct > 0) {
+    html += `<div style="color:var(--green);font-weight:700;">↓ ${moneyForShift(deduct, s)}</div>`;
+    if (s.overpayment_deduction_note) html += `<div class="sub-text">${escapeHtml(s.overpayment_deduction_note)}</div>`;
+    else html += `<div class="sub-text">Recovery deducted</div>`;
+  }
+  return html;
+}
+
+// Returns unrecovered overpayment total for a worker (sum overpaid minus sum deducted across all their shifts)
+function workerPendingOverpayment(workerName) {
+  if (!workerName || workerName.toLowerCase() === 'available') return 0;
+  const wn = workerName.toLowerCase();
+  const totalOverpaid = allShifts
+    .filter(s => String(s.worker_name||'').toLowerCase() === wn && parseFloat(s.overpayment||0) > 0)
+    .reduce((a, s) => a + parseFloat(s.overpayment||0), 0);
+  const totalDeducted = allShifts
+    .filter(s => String(s.worker_name||'').toLowerCase() === wn && parseFloat(s.overpayment_deduction||0) > 0)
+    .reduce((a, s) => a + parseFloat(s.overpayment_deduction||0), 0);
+  return Math.max(0, parseFloat((totalOverpaid - totalDeducted).toFixed(2)));
+}
+
 // ── Search autocomplete dropdown ──────────────────────────────────────────────
 function handleSearchInput(value) {
   renderTable(); // existing filter behaviour
@@ -3140,7 +3219,7 @@ function renderTable() {
       const adjB = toM2(b) <= toM2(refB?.scheduled_start?.slice(0,5)) ? toM2(b) + 1440 : toM2(b);
       return adjA - adjB;
     });
-    const colCount = 13;
+    const colCount = 14;
     const buildRow = (s) => {
       const hours = calcShiftHours(s);
       const workerName = String(s.worker_name || '').trim() || 'Available';
@@ -3158,14 +3237,16 @@ function renderTable() {
         ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
            <button class="btn btn-ghost btn-sm" onclick="openAssignSRModal('${s.id}')">⭐ SR</button>
            <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
+      const pendingOpAction1 = (!isAvailable && !s.clock_out && !s.cancelled && workerPendingOverpayment(workerName) > 0)
+        ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','recover')" style="color:var(--amber);" title="Apply overpayment recovery">↩ Recover</button>` : '';
       const actions = `<div class="action-stack">
         ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
-        <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
         ${assignAction}
+        ${pendingOpAction1}
         <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
       return `<tr class="${rowClass}" id="row-${s.id}">
-        <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+        <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
         <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
         <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
         <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -3177,6 +3258,7 @@ function renderTable() {
         <td>${statusBadge(s)}</td>
         <td>${penaltyDisplay(s)}</td>
         <td style="font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+        <td style="font-size:12px;min-width:110px;">${overpaymentDisplay(s)}</td>
         <td>${actions}</td>
       </tr>`;
     };
@@ -3206,7 +3288,7 @@ function renderTable() {
       <thead><tr>
         <th>Worker</th><th>Role</th><th>Scheduled</th>
         <th>Clock-in</th><th>Clock-out</th><th>Break</th><th>Hours</th>
-        <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Actions</th>
+        <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Overpayment</th><th>Actions</th>
       </tr></thead>
       <tbody>${bodyRows}</tbody>
     </table>`;
@@ -3230,7 +3312,7 @@ function renderTable() {
         groupMap[t].push(s);
       });
       const groupTimes = Object.keys(groupMap).sort();
-      const colCount = 13;
+      const colCount = 14;
       const buildRow = (s) => {
         const hours = calcShiftHours(s);
         const workerName = String(s.worker_name || '').trim() || 'Available';
@@ -3246,14 +3328,16 @@ function renderTable() {
           ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
              <button class="btn btn-ghost btn-sm" onclick="openAssignSRModal('${s.id}')">⭐ SR</button>
            <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
+        const pendingOpAction2 = (!isAvailable && !s.cancelled && workerPendingOverpayment(workerName) > 0)
+          ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','recover')" style="color:var(--amber);" title="Apply overpayment recovery">↩ Recover</button>` : '';
         const actions = `<div class="action-stack">
           ${showClockIn ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
-          <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
           ${assignAction2}
+          ${pendingOpAction2}
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}</td>
+          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -3265,6 +3349,7 @@ function renderTable() {
           <td>${statusBadge(s)}</td>
           <td>${penaltyDisplay(s)}</td>
           <td style="font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+          <td style="font-size:12px;min-width:110px;">${overpaymentDisplay(s)}</td>
           <td>${actions}</td>
         </tr>`;
       };
@@ -3287,7 +3372,7 @@ function renderTable() {
         <thead><tr>
           <th>Worker</th><th>Role</th><th>Scheduled</th>
           <th>Clock-in</th><th>Clock-out</th><th>Break</th><th>Hours</th>
-          <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Actions</th>
+          <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Overpayment</th><th>Actions</th>
         </tr></thead>
         <tbody>${bodyRows}</tbody>
       </table>`;
@@ -3332,15 +3417,18 @@ function renderTable() {
         const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
         const showPaidTick = !isAvailable && !!s.clock_out && !s.cancelled;
         const isPaid = !!s.is_paid;
+        const pendingOpAction3 = (!isAvailable && !s.clock_out && !s.cancelled && workerPendingOverpayment(workerName) > 0)
+          ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','recover')" style="color:var(--amber);" title="Apply overpayment recovery">↩ Recover</button>` : '';
         actions = `<div class="action-stack">
           ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
           ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
           ${showPaidTick ? `<button onclick="togglePaid('${s.id}',${isPaid})"
             style="font-size:11px;padding:3px 8px;border:1px solid ${isPaid?'var(--green)':'var(--border2)'};background:${isPaid?'rgba(52,199,123,0.15)':'transparent'};color:${isPaid?'var(--green)':'var(--text3)'};border-radius:4px;cursor:pointer;white-space:nowrap;font-weight:600;"
             title="${isPaid?'Mark as unpaid':'Mark as paid'}">${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
+          ${showPaidTick ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','record')" style="color:var(--red);" title="Record overpayment">⚠ Overpay</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
-          <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
           ${replacementAction}
+          ${pendingOpAction3}
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
       }
       return `<tr class="${rowClass}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
@@ -3352,6 +3440,7 @@ function renderTable() {
                 <div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div>
                 <div class="sub-text">${s.outlet}</div>
                 ${srTag}${reminderPanelHtml(s)}
+                <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button>
               </td>
               <td style="padding:8px 14px;vertical-align:middle;">
                 <span class="badge badge-gray" style="font-size:9px;">${s.role}</span>
@@ -3366,6 +3455,7 @@ function renderTable() {
               <td style="padding:8px 14px;vertical-align:middle;">${statusBadge(s)}</td>
               <td style="padding:8px 14px;vertical-align:middle;">${penaltyDisplay(s)}</td>
               <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-size:12px;min-width:110px;">${overpaymentDisplay(s)}</td>
               <td style="padding:8px 14px;vertical-align:middle;">${actions}</td>
             </tr>
           </table>
@@ -3406,7 +3496,7 @@ function renderTable() {
     <thead><tr>
       <th>Worker</th><th>Role</th><th>Scheduled</th>
       <th>Clock-in</th><th>Clock-out</th><th>Break</th><th>Hours</th>
-      <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Actions</th>
+      <th>Payroll summary</th><th>Payment</th><th>Status</th><th>Penalty</th><th>SR</th><th>Overpayment</th><th>Actions</th>
     </tr></thead>
     <tbody>
       ${rows.map(s => {
@@ -3436,6 +3526,8 @@ function renderTable() {
           const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
           const showPaidTick = !isAvailable && !!s.clock_out && !s.cancelled;
           const isPaid = !!s.is_paid;
+          const pendingOpAction4 = (!isAvailable && !s.clock_out && !s.cancelled && workerPendingOverpayment(workerName) > 0)
+            ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','recover')" style="color:var(--amber);" title="Apply overpayment recovery">↩ Recover</button>` : '';
           actions = `<div class="action-stack">
             ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
             ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
@@ -3445,9 +3537,11 @@ function renderTable() {
               color:${isPaid ? 'var(--green)' : 'var(--text3)'};border-radius:4px;cursor:pointer;white-space:nowrap;font-weight:600;"
               title="${isPaid ? 'Mark as unpaid' : 'Mark as paid'}">
               ${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
+            ${showPaidTick ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','record')" style="color:var(--red);" title="Record overpayment">⚠ Overpay</button>` : ''}
             <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
             <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history">⏱ History</button>
             ${replacementAction}
+            ${pendingOpAction4}
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
@@ -3463,6 +3557,7 @@ function renderTable() {
           <td>${statusBadge(s)}</td>
           <td>${penaltyDisplay(s)}</td>
           <td style="font-family:var(--mono);font-size:12px;min-width:110px;">${srDisplay(s)}</td>
+          <td style="font-size:12px;min-width:110px;">${overpaymentDisplay(s)}</td>
           <td>${actions}</td>
         </tr>`;
       }).join('')}
@@ -3874,6 +3969,92 @@ function toggleCommentEditor(id) {
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
   if (el.style.display === 'block') document.getElementById(`edit-notes-${id}`)?.focus();
 }
+
+// ── Overpayment modal ────────────────────────────────────────────────────────
+let _overpaymentShiftId = null;
+let _overpaymentMode = null; // 'record' | 'recover'
+
+function openOverpaymentModal(id, mode) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  _overpaymentShiftId = id;
+  _overpaymentMode = mode || 'record';
+
+  const workerName = String(s.worker_name || '').trim() || 'Available';
+  const dateStr = s.shift_date ? formatDisplayDate(s.shift_date) : '';
+  const infoEl = document.getElementById('overpayment-shift-info');
+  if (infoEl) infoEl.innerHTML = `<strong>${escapeHtml(workerName)}</strong> · ${escapeHtml(s.outlet)} · ${dateStr} · ${scheduledRange(s)}`;
+
+  const recSec = document.getElementById('overpayment-record-section');
+  const dedSec = document.getElementById('overpayment-deduct-section');
+  const titleEl = document.getElementById('overpayment-modal-title');
+
+  if (_overpaymentMode === 'record') {
+    if (recSec) recSec.style.display = '';
+    if (dedSec) dedSec.style.display = 'none';
+    if (titleEl) titleEl.textContent = '⚠ Record Overpayment';
+    const amtEl = document.getElementById('op-amount');
+    const reasonEl = document.getElementById('op-reason');
+    if (amtEl) amtEl.value = s.overpayment > 0 ? s.overpayment : '';
+    if (reasonEl) reasonEl.value = s.overpayment_note || '';
+  } else {
+    // recover mode
+    if (recSec) recSec.style.display = 'none';
+    if (dedSec) dedSec.style.display = '';
+    if (titleEl) titleEl.textContent = '↩ Recover Overpayment';
+    const pendingOp = workerPendingOverpayment(workerName);
+    const pendingListEl = document.getElementById('op-pending-list');
+    if (pendingListEl) {
+      pendingListEl.innerHTML = `<div style="background:var(--bg3);border-radius:var(--radius);padding:10px 14px;font-size:12px;">
+        <div style="color:var(--text2);margin-bottom:4px;">Unrecovered overpayment for <strong>${escapeHtml(workerName)}</strong>:</div>
+        <div style="font-size:16px;font-weight:700;color:var(--red);">${moneyForShift(pendingOp, s)}</div>
+      </div>`;
+    }
+    const deductAmtEl = document.getElementById('op-deduct-amount');
+    const deductNoteEl = document.getElementById('op-deduct-note');
+    if (deductAmtEl) deductAmtEl.value = pendingOp > 0 ? pendingOp.toFixed(2) : '';
+    if (deductNoteEl) deductNoteEl.value = '';
+  }
+
+  document.getElementById('overpayment-modal').classList.add('active');
+}
+
+function closeOverpaymentModal() {
+  document.getElementById('overpayment-modal').classList.remove('active');
+  _overpaymentShiftId = null;
+  _overpaymentMode = null;
+}
+
+async function confirmOverpayment() {
+  const id = _overpaymentShiftId;
+  const mode = _overpaymentMode;
+  if (!id || !mode) return;
+
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+
+  let updates = {};
+  if (mode === 'record') {
+    const amt = parseFloat(document.getElementById('op-amount')?.value || '0');
+    const reason = (document.getElementById('op-reason')?.value || '').trim();
+    if (!amt || amt <= 0) { alert('Please enter a valid overpayment amount.'); return; }
+    updates = { overpayment: amt, overpayment_note: reason || null };
+  } else {
+    const amt = parseFloat(document.getElementById('op-deduct-amount')?.value || '0');
+    const note = (document.getElementById('op-deduct-note')?.value || '').trim();
+    if (!amt || amt <= 0) { alert('Please enter a valid deduction amount.'); return; }
+    updates = { overpayment_deduction: amt, overpayment_deduction_note: note || null };
+  }
+
+  const { error } = await supabaseClient.from('shifts').update({ ...updates, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error) { alert('Save failed: ' + error.message); return; }
+
+  const label = mode === 'record' ? 'Overpayment recorded' : 'Overpayment recovery applied';
+  await logActivity(label, `Shift ${id}`, 'shift', id, updates);
+  closeOverpaymentModal();
+  await loadShifts();
+}
+// ── End overpayment modal ─────────────────────────────────────────────────────
 
 function cancelEditRow(id) {
   // Restore all cells to display mode without saving
