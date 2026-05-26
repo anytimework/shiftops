@@ -1056,6 +1056,27 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- ASSIGN SPECIAL RATE MODAL -->
+<div class="modal-overlay" id="assign-sr-modal">
+  <div class="modal" style="max-width:400px;">
+    <div class="modal-header"><h3>⭐ Assign with Special Rate</h3><button class="modal-close" onclick="closeAssignSRModal()">✕</button></div>
+    <div id="assign-sr-info" style="font-size:12px;color:var(--text2);margin-bottom:14px;padding:10px 14px;background:var(--bg3);border-radius:var(--radius);"></div>
+    <div class="form-row">
+      <label>Worker name</label>
+      <input type="text" id="assign-sr-worker" list="worker-datalist" autocomplete="off" placeholder="Type worker name…">
+    </div>
+    <div class="form-row">
+      <label>Special rate ($/hr) <span style="font-weight:400;color:var(--text3);">Worker receives this instead of base rate</span></label>
+      <input type="number" id="assign-sr-rate" min="1" step="0.50" placeholder="e.g. 17.00" oninput="calcAssignSR()">
+    </div>
+    <div id="assign-sr-preview" style="display:none;margin-bottom:14px;background:var(--bg3);border-radius:var(--radius);padding:10px 14px;font-size:12px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="closeAssignSRModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="confirmAssignSR()">⭐ Assign with SR</button>
+    </div>
+  </div>
+</div>
+
 <!-- ADD WORKER MODAL -->
 <div class="modal-overlay" id="add-worker-modal">
   <div class="modal">
@@ -1225,7 +1246,9 @@ let activeMetricFilter = 'all';
 let collapsedView = false;
 const expandedRows = new Set();
 let importRows = [];
-let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLogs = [], currentInternalUser = null, messagePollTimer = null, pendingIncidentId = null;
+let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLogs = [], messagePollTimer = null, pendingIncidentId = null;
+// Restore user from localStorage immediately so logActivity() always has a name
+let currentInternalUser = localStorage.getItem('current_internal_user') || null;
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 let editingWorkerId = null, editingOutletId = null;
@@ -2003,12 +2026,11 @@ function payrollStartTime(s) {
   let ciM = toMins(ci);
   // If a shift starts late night and clock-in is after midnight, compare as next day.
   if (ciM < schedM - 720) ciM += 1440;
-  // Early arrival: count payroll from actual clock-in (worker is here, they should be paid)
-  if (ciM < schedM) return ci;
-  // On time or within 5-min grace: count from scheduled start
-  if (ciM - schedM <= 5) return sched;
-  // Late arrival: round clock-in up to the next 15-minute block
-  return minsToTime(Math.ceil(ciM / 15) * 15);
+  // Apply the same 15-min block / 5-min grace quantization used for clock-out.
+  // Examples: 4:47 → 4:45 (within 5-min grace of 4:45 block), 4:55 → 5:00 (past grace → next block)
+  //           5:03 → 5:00 (on-time grace), 5:08 → 5:15 (late, next block)
+  const qM = quantizeClockOutMins(ciM);
+  return minsToTime(qM % 1440);
 }
 function calcShiftHours(s) {
   if (!s) return null;
@@ -3134,6 +3156,7 @@ function renderTable() {
       const isPaid = !!s.is_paid;
       const assignAction = (isAvailable && !s.sr_worker)
         ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
+           <button class="btn btn-ghost btn-sm" onclick="openAssignSRModal('${s.id}')">⭐ SR</button>
            <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
       const actions = `<div class="action-stack">
         ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
@@ -3221,7 +3244,8 @@ function renderTable() {
         const showClockIn = !isAvailable && !s.clock_in && !s.cancelled;
         const assignAction2 = (isAvailable && !s.sr_worker)
           ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
-             <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
+             <button class="btn btn-ghost btn-sm" onclick="openAssignSRModal('${s.id}')">⭐ SR</button>
+           <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>` : '';
         const actions = `<div class="action-stack">
           ${showClockIn ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
           <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
@@ -3301,6 +3325,7 @@ function renderTable() {
       } else {
         const replacementAction = (isAvailable && !s.sr_worker)
           ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign worker</button>
+             <button class="btn btn-ghost btn-sm" onclick="openAssignSRModal('${s.id}')">⭐ SR</button>
              <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>`
           : '';
         const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
@@ -3404,7 +3429,8 @@ function renderTable() {
         } else {
           const replacementAction = (isAvailable && !s.sr_worker)
             ? `<button class="btn btn-primary btn-sm" onclick="openAssignWorkerInline('${s.id}')">👤 Assign</button>
-               <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>`
+               <button class="btn btn-ghost btn-sm" onclick="openAssignSRModal('${s.id}')">⭐ SR</button>
+             <button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'Available slot','${escapeAttr(s.outlet)}','${s.scheduled_start}')">↺ 3rd party</button>`
             : '';
           const showClockIn  = !isAvailable && !s.clock_in && !s.cancelled;
           const showClockOut = !isAvailable && s.clock_in && !s.clock_out && !s.cancelled;
@@ -3784,6 +3810,62 @@ async function confirmAssignWorker(id) {
 function cancelAssignWorker(id) {
   const wnCell = document.getElementById(`wn-disp-${id}`);
   if (wnCell) wnCell.innerHTML = `<div class="worker-name"><span class="available-name">Available</span></div>`;
+}
+
+// ── Assign with Special Rate (own member, sr_rate set, sr_worker null) ──────
+let pendingAssignSRId = null;
+function openAssignSRModal(id) {
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  pendingAssignSRId = id;
+  document.getElementById('assign-sr-info').innerHTML =
+    `<strong>${s.outlet}</strong> &middot; ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'} &middot; Base rate: ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr`;
+  document.getElementById('assign-sr-worker').value = '';
+  document.getElementById('assign-sr-rate').value = '';
+  document.getElementById('assign-sr-preview').style.display = 'none';
+  document.getElementById('assign-sr-modal').classList.add('open');
+  setTimeout(() => document.getElementById('assign-sr-worker')?.focus(), 50);
+}
+function closeAssignSRModal() {
+  document.getElementById('assign-sr-modal').classList.remove('open');
+  pendingAssignSRId = null;
+}
+function calcAssignSR() {
+  const s = allShifts.find(x => x.id === pendingAssignSRId);
+  const srRate = parseFloat(document.getElementById('assign-sr-rate')?.value);
+  const prev = document.getElementById('assign-sr-preview');
+  if (!s || isNaN(srRate) || srRate <= 0) { prev.style.display = 'none'; return; }
+  const baseRate = parseFloat(s.rate || 0);
+  const delta = srRate - baseRate;
+  const symbol = currencySymbolForOutlet(s.outlet);
+  prev.style.display = 'block';
+  prev.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Base rate</span><span>${symbol}${baseRate.toFixed(2)}/hr</span></div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Special rate (worker receives)</span><span style="color:var(--teal);font-weight:600;">${symbol}${srRate.toFixed(2)}/hr</span></div>
+    <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border2);padding-top:4px;margin-top:4px;"><span>Extra absorbed by company</span><span style="color:${delta>0?'var(--amber)':'var(--green)'};font-weight:600;">${delta>0?'+':''}${symbol}${Math.abs(delta).toFixed(2)}/hr</span></div>`;
+}
+async function confirmAssignSR() {
+  const s = allShifts.find(x => x.id === pendingAssignSRId);
+  if (!s) return;
+  const typed = document.getElementById('assign-sr-worker')?.value.trim();
+  const srRate = parseFloat(document.getElementById('assign-sr-rate')?.value);
+  if (!typed) { toast('Please enter a worker name', 'error'); return; }
+  if (isNaN(srRate) || srRate <= 0) { toast('Please enter a valid special rate', 'error'); return; }
+  const matched = allWorkers.find(w => w.name.toLowerCase() === typed.toLowerCase());
+  const name = matched ? matched.name : typed;
+  const { error } = await supabaseClient.from('shifts').update({
+    worker_name: name,
+    sr_rate: srRate.toFixed(2),
+    sr_worker: null,
+    updated_at: new Date().toISOString()
+  }).eq('id', s.id);
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  if (!matched) {
+    try { await supabaseClient.from('workers').insert({ name }); await loadWorkers(); } catch(e) {}
+  }
+  await logActivity(`Assigned ${name} with special rate`, `${name} at ${currencySymbolForOutlet(s.outlet)}${srRate.toFixed(2)}/hr (base: ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr) — ${s.outlet} on ${s.shift_date}`, 'shift', s.id, {});
+  toast(`✓ Assigned ${name} @ special rate ${currencySymbolForOutlet(s.outlet)}${srRate.toFixed(2)}/hr`);
+  closeAssignSRModal();
+  await loadShifts();
 }
 
 function toggleCommentEditor(id) {
@@ -4322,14 +4404,18 @@ async function openAuditModal(shiftId) {
   local.forEach(r => { if (!seen.has(r.id)) entries.push(r); });
   entries.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-  // If shift has created_at, prepend a synthetic "Created" entry
+  // If shift has created_at, prepend a synthetic "Created" entry.
+  // Use s.created_by if set; otherwise look for the earliest log entry's user as a best guess.
   const syntheticEntries = [];
   if (s.created_at) {
+    const creatorGuess = s.created_by ||
+      (entries.length ? entries[0].created_by : null) ||
+      currentInternalUser || '—';
     syntheticEntries.push({
       _synthetic: true,
       action: 'Shift created',
       details: `Scheduled ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'} · ${s.role||''}`,
-      created_by: s.created_by || '—',
+      created_by: creatorGuess,
       created_at: s.created_at
     });
   }
@@ -4836,9 +4922,11 @@ function seedInternalUsers() {
   const saved = JSON.parse(localStorage.getItem('internal_users') || '{}');
   INTERNAL_USER_ACCOUNTS.forEach(acc => {
     const existing = saved[acc.username];
-    // Repair missing, blank, or old generic passcodes with each user's dedicated passcode.
-    if (!existing || !existing.passcode || existing.passcode === '123456') {
-      saved[acc.username] = { passcode: acc.passcode, mustChange: false };
+    // Code passcodes are always authoritative UNLESS the user has explicitly set their own
+    // (tracked via userSet: true, set when changeInternalPasscode() is called).
+    const userExplicitlyChanged = existing && existing.userSet === true;
+    if (!userExplicitlyChanged) {
+      saved[acc.username] = { passcode: acc.passcode, mustChange: false, userSet: false };
     }
   });
   Object.keys(saved).forEach(u => { if (!INTERNAL_USERS.includes(u)) delete saved[u]; });
@@ -4934,7 +5022,7 @@ function changeInternalPasscode() {
   if (!p1 || p1.length < 4) { toast('Use at least 4 digits/characters', 'error'); return; }
   if (p1 !== p2) { toast('Passcodes do not match', 'error'); return; }
   const users = JSON.parse(localStorage.getItem('internal_users') || '{}');
-  users[currentInternalUser] = { passcode:p1, mustChange:false };
+  users[currentInternalUser] = { passcode:p1, mustChange:false, userSet:true };
   localStorage.setItem('internal_users', JSON.stringify(users));
   document.getElementById('change-pass-modal').classList.remove('open');
   document.getElementById('new-pass').value = '';
