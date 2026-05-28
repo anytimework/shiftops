@@ -1139,6 +1139,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <label style="margin-bottom:0;flex:1;">Enable clock-out notifications</label>
       <input type="checkbox" id="wa-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
     </div>
+    <div id="wa-origin-status" style="font-size:11px;margin-top:4px;min-height:16px;"></div>
     <div id="wa-test-result" style="font-size:12px;margin-top:6px;min-height:18px;"></div>
     <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;">
       <button class="btn btn-ghost btn-sm" onclick="testWhatsAppNotification()">Send test message</button>
@@ -1314,6 +1315,8 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [], allKnowledge = [];
 let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, totalDeducted }
+// Built-in WA fallback — used when localStorage has no saved config (e.g. different origin / first open)
+const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded }
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
@@ -3918,10 +3921,23 @@ function buildClockOutMessage(s, co) {
 }
 // ── WhatsApp Notifications (CallMeBot) ───────────────────────────────────────
 function openWhatsAppSettings() {
-  const cfg = JSON.parse(localStorage.getItem('wa_config') || '{}');
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem('wa_config') || 'null'); } catch(e) {}
+  const cfg = stored || WA_CONFIG_BUILTIN;
   document.getElementById('wa-phone').value = cfg.phone || '';
   document.getElementById('wa-apikey').value = cfg.apikey || '';
   document.getElementById('wa-enabled').checked = cfg.enabled !== false;
+  // Status indicator
+  const statusEl = document.getElementById('wa-origin-status');
+  if (statusEl) {
+    if (stored && stored.phone) {
+      statusEl.style.color = 'var(--green)';
+      statusEl.textContent = '✓ Settings saved on this device';
+    } else {
+      statusEl.style.color = 'var(--amber, #f59e0b)';
+      statusEl.textContent = '⚠ Using built-in defaults — click Save to lock settings to this device';
+    }
+  }
   document.getElementById('wa-test-result').textContent = '';
   document.getElementById('whatsapp-settings-modal').classList.add('open');
 }
@@ -3937,17 +3953,23 @@ function saveWhatsAppSettings() {
     return;
   }
   localStorage.setItem('wa_config', JSON.stringify({ phone, apikey, enabled }));
+  const statusEl = document.getElementById('wa-origin-status');
+  if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Settings saved on this device'; }
   closeWhatsAppSettings();
   toast('WhatsApp settings saved' + (enabled ? ' — notifications ON ✓' : ' — notifications OFF'));
 }
 async function sendWhatsAppNotification(message) {
-  const cfg = JSON.parse(localStorage.getItem('wa_config') || '{}');
+  // Prefer localStorage (per-device/origin settings) — fall back to built-in credentials
+  let cfg;
+  try { cfg = JSON.parse(localStorage.getItem('wa_config') || 'null'); } catch(e) { cfg = null; }
+  if (!cfg || !cfg.phone || !cfg.apikey) cfg = WA_CONFIG_BUILTIN;
   if (!cfg.enabled || !cfg.phone || !cfg.apikey) return;
   try {
     const encoded = encodeURIComponent(message);
     // no-cors: browser won't allow reading the response cross-origin, but the request is still delivered
     fetch(`https://api.callmebot.com/whatsapp.php?phone=${cfg.phone}&text=${encoded}&apikey=${cfg.apikey}`, { mode: 'no-cors' });
-  } catch(e) { /* silent fail — don't interrupt UI */ }
+    console.log('[WA] notification sent to', cfg.phone, '| source:', cfg === WA_CONFIG_BUILTIN ? 'builtin' : 'localStorage');
+  } catch(e) { console.warn('[WA] notification fetch error:', e); }
 }
 async function testWhatsAppNotification() {
   const phone = document.getElementById('wa-phone').value.trim().replace(/\D/g,'');
