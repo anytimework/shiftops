@@ -1082,9 +1082,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <input type="text" id="op-deduct-note" placeholder="e.g. Deducted from shift on 26 May">
       </div>
     </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-      <button class="btn btn-ghost btn-sm" onclick="closeOverpaymentModal()">Cancel</button>
-      <button id="op-confirm-btn" class="btn btn-primary btn-sm" onclick="confirmOverpayment()">Save</button>
+    <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:8px;">
+      <button id="op-remove-btn" class="btn btn-danger btn-sm" onclick="removeOverpayment()" style="display:none;">✕ Remove overpayment</button>
+      <div style="display:flex;gap:8px;margin-left:auto;">
+        <button class="btn btn-ghost btn-sm" onclick="closeOverpaymentModal()">Cancel</button>
+        <button id="op-confirm-btn" class="btn btn-primary btn-sm" onclick="confirmOverpayment()">Save</button>
+      </div>
     </div>
   </div>
 </div>
@@ -4003,10 +4006,14 @@ function openOverpaymentModal(id, mode) {
   const dedSec = document.getElementById('overpayment-deduct-section');
   const titleEl = document.getElementById('overpayment-modal-title');
 
+  // Show/hide Remove button based on whether an overpayment is already recorded
+  const removeBtn = document.getElementById('op-remove-btn');
+  if (removeBtn) removeBtn.style.display = (_overpaymentMode === 'record' && parseFloat(s.overpayment || 0) > 0) ? '' : 'none';
+
   if (_overpaymentMode === 'record') {
     if (recSec) recSec.style.display = '';
     if (dedSec) dedSec.style.display = 'none';
-    if (titleEl) titleEl.textContent = '⚠ Record Overpayment';
+    if (titleEl) titleEl.textContent = parseFloat(s.overpayment || 0) > 0 ? '⚠ Edit Overpayment' : '⚠ Record Overpayment';
     const amtEl = document.getElementById('op-amount');
     const reasonEl = document.getElementById('op-reason');
     if (amtEl) amtEl.value = s.overpayment > 0 ? s.overpayment : '';
@@ -4065,6 +4072,92 @@ async function confirmOverpayment() {
 
   const label = mode === 'record' ? 'Overpayment recorded' : 'Overpayment recovery applied';
   await logActivity(label, `Shift ${id}`, 'shift', id, updates);
+
+  // ── Auto-apply deduction to next upcoming shift when recording ──────────────
+  if (mode === 'record') {
+    const workerName = String(s.worker_name || '').trim();
+    const overpaidAmt = parseFloat(updates.overpayment || 0);
+    const overpaidDate = s.shift_date;
+    const overpaidStart = s.scheduled_start || '00:00:00';
+
+    // Find worker's next shift after this one that is not cancelled and not yet clocked out
+    const { data: nextShifts } = await supabaseClient
+      .from('shifts')
+      .select('id, shift_date, scheduled_start, outlet, overpayment_deduction')
+      .eq('worker_name', workerName)
+      .eq('cancelled', false)
+      .or(`shift_date.gt.${overpaidDate},and(shift_date.eq.${overpaidDate},scheduled_start.gt.${overpaidStart})`)
+      .is('clock_out', null)
+      .order('shift_date')
+      .order('scheduled_start')
+      .limit(1);
+
+    if (nextShifts && nextShifts.length > 0) {
+      const nextShift = nextShifts[0];
+      const existingDeduct = parseFloat(nextShift.overpayment_deduction || 0);
+      const newDeduct = parseFloat((existingDeduct + overpaidAmt).toFixed(2));
+      const autoNote = `Auto-deducted: overpayment from ${formatDisplayDate(overpaidDate)}${updates.overpayment_note ? ' — ' + updates.overpayment_note : ''}`;
+
+      const { error: deductErr } = await supabaseClient
+        .from('shifts')
+        .update({ overpayment_deduction: newDeduct, overpayment_deduction_note: autoNote, updated_at: new Date().toISOString() })
+        .eq('id', nextShift.id);
+
+      if (!deductErr) {
+        await logActivity('Overpayment auto-deducted', `Applied to shift on ${formatDisplayDate(nextShift.shift_date)} at ${nextShift.outlet}`, 'shift', nextShift.id, { overpayment_deduction: newDeduct });
+      }
+    }
+  }
+  // ── End auto-apply ──────────────────────────────────────────────────────────
+
+  closeOverpaymentModal();
+  await loadShifts();
+}
+async function removeOverpayment() {
+  const id = _overpaymentShiftId;
+  if (!id) return;
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+
+  const workerName = String(s.worker_name || '').trim();
+  const overpaidDate = s.shift_date;
+  const overpaidStart = s.scheduled_start || '00:00:00';
+  const overpaidAmt = parseFloat(s.overpayment || 0);
+
+  if (!confirm(`Remove the $${overpaidAmt.toFixed(2)} overpayment recorded for ${workerName}? This will also reverse any auto-deduction applied to their next shift.`)) return;
+
+  // 1. Clear overpayment on this shift
+  const { error } = await supabaseClient
+    .from('shifts')
+    .update({ overpayment: null, overpayment_note: null, updated_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) { alert('Remove failed: ' + error.message); return; }
+  await logActivity('Overpayment removed', `Cleared from shift ${id}`, 'shift', id, {});
+
+  // 2. Reverse the auto-deduction on the next shift (find by matching auto-deduction note)
+  const autoNotePrefix = `Auto-deducted: overpayment from ${formatDisplayDate(overpaidDate)}`;
+  const { data: deductedShifts } = await supabaseClient
+    .from('shifts')
+    .select('id, overpayment_deduction, overpayment_deduction_note')
+    .eq('worker_name', workerName)
+    .ilike('overpayment_deduction_note', `${autoNotePrefix}%`)
+    .or(`shift_date.gt.${overpaidDate},and(shift_date.eq.${overpaidDate},scheduled_start.gt.${overpaidStart})`);
+
+  if (deductedShifts && deductedShifts.length > 0) {
+    for (const ds of deductedShifts) {
+      const remaining = Math.max(0, parseFloat((parseFloat(ds.overpayment_deduction || 0) - overpaidAmt).toFixed(2)));
+      await supabaseClient
+        .from('shifts')
+        .update({
+          overpayment_deduction: remaining > 0 ? remaining : null,
+          overpayment_deduction_note: remaining > 0 ? ds.overpayment_deduction_note : null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', ds.id);
+      await logActivity('Overpayment deduction reversed', `Cleared auto-deduction from shift ${ds.id}`, 'shift', ds.id, {});
+    }
+  }
+
   closeOverpaymentModal();
   await loadShifts();
 }
