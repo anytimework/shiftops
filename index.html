@@ -3892,7 +3892,8 @@ async function sendWhatsAppNotification(message) {
   if (!cfg.enabled || !cfg.phone || !cfg.apikey) return;
   try {
     const encoded = encodeURIComponent(message);
-    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${cfg.phone}&text=${encoded}&apikey=${cfg.apikey}`);
+    // no-cors: browser won't allow reading the response cross-origin, but the request is still delivered
+    fetch(`https://api.callmebot.com/whatsapp.php?phone=${cfg.phone}&text=${encoded}&apikey=${cfg.apikey}`, { mode: 'no-cors' });
   } catch(e) { /* silent fail — don't interrupt UI */ }
 }
 async function testWhatsAppNotification() {
@@ -3903,13 +3904,14 @@ async function testWhatsAppNotification() {
   resultEl.style.color = 'var(--text3)';
   resultEl.textContent = 'Sending…';
   try {
-    const msg = encodeURIComponent('✅ ShiftOps test message — clock-out alerts are working!');
-    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${msg}&apikey=${apikey}`);
+    const msg = encodeURIComponent('✅ ShiftOps test — clock-out alerts are working!');
+    // no-cors mode: can't read response, but message is delivered if credentials are correct
+    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${msg}&apikey=${apikey}`, { mode: 'no-cors' });
     resultEl.style.color = 'var(--green)';
-    resultEl.textContent = '✓ Test sent — check your WhatsApp';
+    resultEl.textContent = '✓ Request sent — check your WhatsApp in a few seconds';
   } catch(e) {
     resultEl.style.color = 'var(--red)';
-    resultEl.textContent = 'Failed to send. Check your phone/API key.';
+    resultEl.textContent = 'Network error. Are you connected to the internet?';
   }
 }
 // ── End WhatsApp ──────────────────────────────────────────────────────────────
