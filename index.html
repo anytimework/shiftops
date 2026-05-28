@@ -3855,14 +3855,63 @@ async function confirmClockOut(id) {
     'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
   );
   toast(`${s.worker_name} clocked out at ${co}`);
-  // WhatsApp notification
-  const _coHours = calcShiftHours({ ...s, clock_out: co });
-  sendWhatsAppNotification(
-    `⏱ Clock-Out Alert\n${s.worker_name} clocked out at ${co}\nOutlet: ${s.outlet}\nShift: ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'}${_coHours ? `\nHours: ${_coHours}h` : ''}`
-  );
+  try { sendWhatsAppNotification(buildClockOutMessage(s, co)); } catch(e) {}
   await loadShifts();
 }
 
+// ── WhatsApp message builder ─────────────────────────────────────────────────
+function buildClockOutMessage(s, co) {
+  // Build a temp shift with the new clock_out so all calc functions see it
+  const ts = { ...s, clock_out: co };
+  const workerName = String(s.worker_name || '').trim() || 'Unknown';
+  const outlet     = String(s.outlet || '').trim();
+  const ci         = s.clock_in?.slice(0,5) || '—';
+  const hours      = calcShiftHours(ts) || '—';
+  const sym        = currencySymbolForOutlet(outlet);
+  const rate       = parseFloat(s.rate || 0);
+  const isSRWorker = !!s.sr_worker;
+  const isOwnSR    = !isSRWorker && s.sr_rate && parseFloat(s.sr_rate) > rate;
+
+  // Pay figures
+  const grossPay      = parseFloat(payoutForShift(ts) || 0);
+  const penalty       = parseFloat(shiftPenaltyAmount(ts) || 0);
+  const opDeduct      = parseFloat(overpaymentDeductionForShift(ts) || 0);
+  const tc            = parseFloat(transportClaim(ts) || 0);
+  const netPay        = parseFloat(netPaymentForShift(ts) || 0);
+  const srAbsorbed    = parseFloat(srAbsorbedForShift(ts) || 0);
+
+  // Worker payment info
+  const worker = allWorkers.find(w => w.name?.toLowerCase() === workerName.toLowerCase());
+  const payInfo = worker ? `${worker.bank_method || 'PayNow'} ${worker.bank_details || ''}`.trim() : '—';
+
+  const fmt = v => `${sym}${parseFloat(v).toFixed(2)}`;
+  const dateStr = s.shift_date ? new Date(s.shift_date + 'T00:00:00').toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+
+  let lines = [];
+  lines.push('⏱ CLOCK-OUT ALERT');
+  lines.push('─────────────────');
+  lines.push(`👤 ${workerName}`);
+  lines.push(`🏪 ${outlet}`);
+  lines.push(`📅 ${dateStr}`);
+  lines.push(`⏰ ${ci} → ${co}  (${hours}h)`);
+  lines.push(`💵 Rate: ${sym}${rate.toFixed(2)}/hr${isOwnSR ? ` → SR ${sym}${parseFloat(s.sr_rate).toFixed(2)}/hr` : ''}`);
+  lines.push('─────────────────');
+  lines.push(`Gross pay:   ${fmt(grossPay)}`);
+  if (penalty > 0)   lines.push(`Penalty:    −${fmt(penalty)}`);
+  if (opDeduct > 0)  lines.push(`OP recovery:−${fmt(opDeduct)}`);
+  if (tc > 0)        lines.push(`Transport: +${fmt(tc)}`);
+  lines.push(`Net payout:  ${fmt(netPay)}`);
+  if (isSRWorker && srAbsorbed > 0) {
+    lines.push(`SR absorbed: ${fmt(srAbsorbed)} (3rd party)`);
+  }
+  if (isOwnSR) {
+    const srPay = parseFloat(calcShiftHours(ts) || 0) * parseFloat(s.sr_rate || 0);
+    lines.push(`SR payout:   ${fmt(srPay)}`);
+  }
+  lines.push('─────────────────');
+  lines.push(`💳 ${payInfo}`);
+  return lines.join('\n');
+}
 // ── WhatsApp Notifications (CallMeBot) ───────────────────────────────────────
 function openWhatsAppSettings() {
   const cfg = JSON.parse(localStorage.getItem('wa_config') || '{}');
@@ -3901,14 +3950,15 @@ async function testWhatsAppNotification() {
   const apikey = document.getElementById('wa-apikey').value.trim();
   const resultEl = document.getElementById('wa-test-result');
   if (!phone || !apikey) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter phone and API key first.'; return; }
+  // Auto-save settings so clock-outs work immediately after testing
+  localStorage.setItem('wa_config', JSON.stringify({ phone, apikey, enabled: document.getElementById('wa-enabled').checked }));
   resultEl.style.color = 'var(--text3)';
   resultEl.textContent = 'Sending…';
   try {
-    const msg = encodeURIComponent('✅ ShiftOps test — clock-out alerts are working!');
-    // no-cors mode: can't read response, but message is delivered if credentials are correct
+    const msg = encodeURIComponent('✅ ShiftOps test — clock-out alerts are working!\nYour WhatsApp notifications are set up correctly.');
     await fetch(`https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${msg}&apikey=${apikey}`, { mode: 'no-cors' });
     resultEl.style.color = 'var(--green)';
-    resultEl.textContent = '✓ Request sent — check your WhatsApp in a few seconds';
+    resultEl.textContent = '✓ Sent & settings saved — check your WhatsApp';
   } catch(e) {
     resultEl.style.color = 'var(--red)';
     resultEl.textContent = 'Network error. Are you connected to the internet?';
@@ -4361,11 +4411,10 @@ async function saveRow(id) {
   toast('Saved!');
   // WhatsApp notification — only if clock_out was newly added via this edit
   if (co && !s.clock_out) {
-    const _editedWorker = resolvedWorker || s.worker_name || '';
-    const _editHours = calcShiftHours({ ...s, clock_out: co, break_mins: br });
-    sendWhatsAppNotification(
-      `⏱ Clock-Out Alert\n${_editedWorker} clocked out at ${co}\nOutlet: ${s.outlet}\nShift: ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'}${_editHours ? `\nHours: ${_editHours}h` : ''}`
-    );
+    try {
+      const _notifShift = { ...s, clock_out: co, break_mins: br, worker_name: resolvedWorker || s.worker_name };
+      sendWhatsAppNotification(buildClockOutMessage(_notifShift, co));
+    } catch(e) {}
   }
   await loadShifts();
 }
