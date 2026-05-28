@@ -573,6 +573,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="nav-item" onclick="switchPage('knowledge',this)">
         <span class="nav-icon">📚</span> Business Knowledge
       </button>
+      <button class="nav-item" onclick="openWhatsAppSettings()" style="margin-top:6px;border-top:1px solid var(--border);padding-top:10px;">
+        <span class="nav-icon">💬</span> WhatsApp Alerts
+      </button>
     </nav>
     <div class="sidebar-user">
       <div class="sidebar-user-label">Logged in as</div>
@@ -1109,6 +1112,40 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
       <button class="btn btn-ghost btn-sm" onclick="closeAssignSRModal()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="confirmAssignSR()">⭐ Assign with SR</button>
+    </div>
+  </div>
+</div>
+
+<!-- WHATSAPP SETTINGS MODAL -->
+<div class="modal-overlay" id="whatsapp-settings-modal">
+  <div class="modal" style="max-width:440px;">
+    <div class="modal-header">
+      <h3>💬 WhatsApp Clock-Out Alerts</h3>
+      <button class="modal-close" onclick="closeWhatsAppSettings()">✕</button>
+    </div>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.6;">
+      Sends you a WhatsApp message whenever a worker clocks out. Uses <strong>CallMeBot</strong> (free).<br>
+      Setup: save <strong>+34 613 01 49 37</strong> as a contact, then send <em>"I allow callmebot to send me messages"</em> to that number — you'll receive your API key.
+    </p>
+    <div class="form-row">
+      <label>Your WhatsApp number <span style="font-weight:400;color:var(--text3);">(with country code, no +, e.g. 6591234567)</span></label>
+      <input type="text" id="wa-phone" placeholder="6591234567" style="font-family:var(--mono);">
+    </div>
+    <div class="form-row">
+      <label>CallMeBot API key <span style="font-weight:400;color:var(--text3);">(received from CallMeBot on WhatsApp)</span></label>
+      <input type="text" id="wa-apikey" placeholder="e.g. 123456" style="font-family:var(--mono);">
+    </div>
+    <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
+      <label style="margin-bottom:0;flex:1;">Enable clock-out notifications</label>
+      <input type="checkbox" id="wa-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
+    </div>
+    <div id="wa-test-result" style="font-size:12px;margin-top:6px;min-height:18px;"></div>
+    <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;">
+      <button class="btn btn-ghost btn-sm" onclick="testWhatsAppNotification()">Send test message</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="closeWhatsAppSettings()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="saveWhatsAppSettings()">Save</button>
+      </div>
     </div>
   </div>
 </div>
@@ -3818,8 +3855,64 @@ async function confirmClockOut(id) {
     'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
   );
   toast(`${s.worker_name} clocked out at ${co}`);
+  // WhatsApp notification
+  const _coHours = calcShiftHours({ ...s, clock_out: co });
+  sendWhatsAppNotification(
+    `⏱ Clock-Out Alert\n${s.worker_name} clocked out at ${co}\nOutlet: ${s.outlet}\nShift: ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'}${_coHours ? `\nHours: ${_coHours}h` : ''}`
+  );
   await loadShifts();
 }
+
+// ── WhatsApp Notifications (CallMeBot) ───────────────────────────────────────
+function openWhatsAppSettings() {
+  const cfg = JSON.parse(localStorage.getItem('wa_config') || '{}');
+  document.getElementById('wa-phone').value = cfg.phone || '';
+  document.getElementById('wa-apikey').value = cfg.apikey || '';
+  document.getElementById('wa-enabled').checked = cfg.enabled !== false;
+  document.getElementById('wa-test-result').textContent = '';
+  document.getElementById('whatsapp-settings-modal').classList.add('open');
+}
+function closeWhatsAppSettings() {
+  document.getElementById('whatsapp-settings-modal').classList.remove('open');
+}
+function saveWhatsAppSettings() {
+  const phone = document.getElementById('wa-phone').value.trim().replace(/\D/g,'');
+  const apikey = document.getElementById('wa-apikey').value.trim();
+  const enabled = document.getElementById('wa-enabled').checked;
+  if (enabled && (!phone || !apikey)) {
+    alert('Please enter both your phone number and API key to enable notifications.');
+    return;
+  }
+  localStorage.setItem('wa_config', JSON.stringify({ phone, apikey, enabled }));
+  closeWhatsAppSettings();
+  toast('WhatsApp settings saved' + (enabled ? ' — notifications ON ✓' : ' — notifications OFF'));
+}
+async function sendWhatsAppNotification(message) {
+  const cfg = JSON.parse(localStorage.getItem('wa_config') || '{}');
+  if (!cfg.enabled || !cfg.phone || !cfg.apikey) return;
+  try {
+    const encoded = encodeURIComponent(message);
+    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${cfg.phone}&text=${encoded}&apikey=${cfg.apikey}`);
+  } catch(e) { /* silent fail — don't interrupt UI */ }
+}
+async function testWhatsAppNotification() {
+  const phone = document.getElementById('wa-phone').value.trim().replace(/\D/g,'');
+  const apikey = document.getElementById('wa-apikey').value.trim();
+  const resultEl = document.getElementById('wa-test-result');
+  if (!phone || !apikey) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter phone and API key first.'; return; }
+  resultEl.style.color = 'var(--text3)';
+  resultEl.textContent = 'Sending…';
+  try {
+    const msg = encodeURIComponent('✅ ShiftOps test message — clock-out alerts are working!');
+    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${msg}&apikey=${apikey}`);
+    resultEl.style.color = 'var(--green)';
+    resultEl.textContent = '✓ Test sent — check your WhatsApp';
+  } catch(e) {
+    resultEl.style.color = 'var(--red)';
+    resultEl.textContent = 'Failed to send. Check your phone/API key.';
+  }
+}
+// ── End WhatsApp ──────────────────────────────────────────────────────────────
 
 function cancelClockOutInput(id) {
   const s = allShifts.find(x => x.id === id);
@@ -4264,6 +4357,14 @@ async function saveRow(id) {
     'shift', id, { shift_date: s.shift_date, worker_name: workerLabel, outlet: s.outlet }
   );
   toast('Saved!');
+  // WhatsApp notification — only if clock_out was newly added via this edit
+  if (co && !s.clock_out) {
+    const _editedWorker = resolvedWorker || s.worker_name || '';
+    const _editHours = calcShiftHours({ ...s, clock_out: co, break_mins: br });
+    sendWhatsAppNotification(
+      `⏱ Clock-Out Alert\n${_editedWorker} clocked out at ${co}\nOutlet: ${s.outlet}\nShift: ${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'}${_editHours ? `\nHours: ${_editHours}h` : ''}`
+    );
+  }
   await loadShifts();
 }
 
