@@ -1226,36 +1226,118 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <!-- CLOCK-OUT MODAL -->
 <div class="modal-overlay" id="clock-out-modal">
   <div class="modal" style="max-width:440px;overflow-y:auto;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-      <h3 style="margin:0;">🔴 Clock Out</h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-out-modal')">← Back</button>
-    </div>
-    <div id="co-modal-worker" style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;"></div>
 
-    <!-- Shift info -->
-    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
-      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Shift Details</div>
-      <div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:16px;font-weight:700;color:var(--text);margin-bottom:8px;">
-        <span id="co-modal-sched-start">—</span>
-        <span style="color:var(--text3);font-size:13px;">→</span>
-        <span id="co-modal-sched-end">—</span>
-        <span style="margin-left:auto;font-size:11px;color:var(--text2);font-family:var(--font);font-weight:400;" id="co-modal-outlet"></span>
+    <!-- PANEL 1: Clock-out form -->
+    <div id="co-panel-form">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <h3 style="margin:0;">🔴 Clock Out</h3>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-out-modal')">← Back</button>
       </div>
-      <div style="font-size:12px;color:var(--text2);">Clocked in at: <span id="co-modal-clock-in" style="font-family:var(--mono);color:var(--green);font-weight:700;"></span></div>
+      <div id="co-modal-worker" style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;"></div>
+
+      <!-- Shift info -->
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+        <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Shift Details</div>
+        <div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:16px;font-weight:700;color:var(--text);margin-bottom:8px;">
+          <span id="co-modal-sched-start">—</span>
+          <span style="color:var(--text3);font-size:13px;">→</span>
+          <span id="co-modal-sched-end">—</span>
+          <span style="margin-left:auto;font-size:11px;color:var(--text2);font-family:var(--font);font-weight:400;" id="co-modal-outlet"></span>
+        </div>
+        <div style="font-size:12px;color:var(--text2);">Clocked in at: <span id="co-modal-clock-in" style="font-family:var(--mono);color:var(--green);font-weight:700;"></span></div>
+      </div>
+
+      <!-- Clock-out time -->
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Confirm Clock-Out Time</div>
+        <input type="time" id="co-modal-time"
+          style="font-family:var(--mono);font-size:15px;padding:9px 12px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);width:160px;">
+      </div>
+
+      <!-- Unpaid break -->
+      <div style="margin-bottom:20px;">
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Unpaid Break</div>
+        <select id="co-modal-break"
+          style="font-size:13px;padding:9px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);font-family:var(--font);width:160px;">
+          <option value="0">No break</option>
+          <option value="30">30 min</option>
+          <option value="60">1 hour</option>
+          <option value="90">1 hr 30 min</option>
+          <option value="120">2 hours</option>
+          <option value="150">2 hr 30 min</option>
+          <option value="180">3 hours</option>
+        </select>
+      </div>
+
+      <input type="hidden" id="co-modal-shift-id">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;border-top:1px solid var(--border);">
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-out-modal')">← Back</button>
+        <button class="btn btn-primary" onclick="confirmClockOutModal()">✓ Confirm Clock Out</button>
+      </div>
     </div>
 
-    <!-- Clock-out time -->
-    <div style="margin-bottom:20px;">
-      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Confirm Clock-Out Time</div>
-      <input type="time" id="co-modal-time"
-        style="font-family:var(--mono);font-size:15px;padding:9px 12px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);width:160px;">
+    <!-- PANEL 2: Summary confirmation (Design B) -->
+    <div id="co-panel-summary" style="display:none;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <h3 style="margin:0;">Clock-Out Summary</h3>
+      </div>
+      <div id="co-summary-worker" style="font-size:13px;color:var(--text2);margin-bottom:14px;"></div>
+
+      <!-- Timeline bar -->
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:0;margin-bottom:12px;">
+          <div style="text-align:center;min-width:52px;">
+            <div style="width:10px;height:10px;border-radius:50%;background:var(--green);margin:0 auto 4px;"></div>
+            <div style="font-family:var(--mono);font-size:14px;font-weight:700;" id="co-summary-ci"></div>
+            <div style="font-size:10px;color:var(--text3);margin-top:1px;">In</div>
+          </div>
+          <div style="flex:1;height:2px;background:var(--border2);margin:0 8px 14px;"></div>
+          <div style="text-align:center;margin-bottom:14px;">
+            <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent);" id="co-summary-hours"></div>
+            <div style="font-size:10px;color:var(--text3);">worked</div>
+          </div>
+          <div style="flex:1;height:2px;background:var(--border2);margin:0 8px 14px;"></div>
+          <div style="text-align:center;min-width:52px;">
+            <div style="width:10px;height:10px;border-radius:50%;margin:0 auto 4px;"></div>
+            <div style="font-family:var(--mono);font-size:14px;font-weight:700;" id="co-summary-co"></div>
+            <div style="font-size:10px;color:var(--text3);margin-top:1px;">Out</div>
+          </div>
+        </div>
+        <!-- Stat chips row -->
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;" id="co-summary-chips">
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;">
+            <div style="font-size:9px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Break</div>
+            <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text);" id="co-summary-break"></div>
+          </div>
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;">
+            <div style="font-size:9px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Role</div>
+            <div style="font-size:11px;font-weight:600;color:var(--text);line-height:1.3;" id="co-summary-role"></div>
+          </div>
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;">
+            <div style="font-size:9px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:3px;">Rate</div>
+            <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text);" id="co-summary-rate"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Outlet -->
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;font-size:12px;color:var(--text2);">
+        <span style="font-size:11px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;">Outlet</span>
+        <span style="margin-left:auto;font-weight:600;color:var(--text);" id="co-summary-outlet"></span>
+      </div>
+
+      <!-- Conditional deductions (hidden when empty) -->
+      <div id="co-summary-deductions" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px;font-size:12px;">
+        <div style="font-size:10px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Deductions / additions</div>
+        <div id="co-summary-deductions-rows"></div>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;padding-top:10px;border-top:1px solid var(--border);margin-top:4px;">
+        <button class="btn btn-ghost btn-sm" onclick="coSummaryBack()">← Return</button>
+        <button class="btn btn-primary" onclick="proceedClockOut()">Proceed ✓</button>
+      </div>
     </div>
 
-    <input type="hidden" id="co-modal-shift-id">
-    <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;border-top:1px solid var(--border);">
-      <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-out-modal')">← Back</button>
-      <button class="btn btn-primary" onclick="confirmClockOutModal()">✓ Confirm Clock Out</button>
-    </div>
   </div>
 </div>
 
@@ -3946,7 +4028,6 @@ function quickClockOut(id) {
   if (!s) return;
   const now = new Date();
   const nowStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  // Populate modal
   document.getElementById('co-modal-shift-id').value = id;
   document.getElementById('co-modal-worker').textContent = `${s.worker_name || 'Unknown'} · ${s.shift_date || ''}`;
   document.getElementById('co-modal-sched-start').textContent = s.scheduled_start?.slice(0,5) || '—';
@@ -3954,17 +4035,143 @@ function quickClockOut(id) {
   document.getElementById('co-modal-outlet').textContent = s.outlet || '';
   document.getElementById('co-modal-clock-in').textContent = s.clock_in?.slice(0,5) || '—';
   document.getElementById('co-modal-time').value = nowStr;
+  const brSel = document.getElementById('co-modal-break');
+  brSel.value = String(s.break_mins || 0);
+  if (!brSel.value) brSel.value = '0';
+  // Reset to form panel
+  document.getElementById('co-panel-form').style.display = '';
+  document.getElementById('co-panel-summary').style.display = 'none';
   document.getElementById('clock-out-modal').classList.add('open');
 }
 
-async function confirmClockOutModal() {
+function confirmClockOutModal() {
   const id = document.getElementById('co-modal-shift-id').value;
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
   const co = document.getElementById('co-modal-time').value;
   if (!co) { toast('Please enter a clock-out time', 'error'); return; }
+  const breakMins = parseInt(document.getElementById('co-modal-break').value) || 0;
+
+  // Build a temp shift for calculations
+  const ts = { ...s, clock_out: co, break_mins: breakMins };
+
+  // Total hours
+  const ci = s.clock_in?.slice(0,5) || '';
+  let hoursLabel = '—';
+  try {
+    const raw = typeof calcShiftHours === 'function' ? parseFloat(calcShiftHours(ts) || 0) : 0;
+    if (raw > 0) {
+      const totalMins = Math.round(raw * 60);
+      const h = Math.floor(totalMins / 60), m = totalMins % 60;
+      hoursLabel = m > 0 ? `${h}h ${m}m` : `${h}h`;
+    }
+  } catch(e) {
+    // Fallback manual calc
+    try {
+      const toM = t => { const [h,m] = t.split(':').map(Number); return h*60+m; };
+      let diff = toM(co) - toM(ci);
+      if (diff < 0) diff += 24*60;
+      diff -= breakMins;
+      if (diff < 0) diff = 0;
+      const h = Math.floor(diff/60), m = diff%60;
+      hoursLabel = m > 0 ? `${h}h ${m}m` : `${h}h`;
+    } catch(e2) {}
+  }
+
+  const breakLabel = breakMins === 0 ? 'No break' : (breakMins < 60 ? `${breakMins} min` : (breakMins % 60 === 0 ? `${breakMins/60}h` : `${Math.floor(breakMins/60)}h ${breakMins%60}m`));
+  const sym = typeof currencySymbolForOutlet === 'function' ? (currencySymbolForOutlet(s.outlet) || '$') : '$';
+  const fmt = v => `${sym}${parseFloat(v || 0).toFixed(2)}`;
+  const rate = parseFloat(s.rate || 0);
+
+  // Colour logic — clock-in
+  const ciStatus = (typeof calcLatePenalty === 'function' && s.scheduled_start && ci)
+    ? calcLatePenalty(s.scheduled_start.slice(0,5), ci).status
+    : 'on-time';
+  const ciColor = (ciStatus === 'on-time' || ciStatus === 'grace') ? 'var(--green)' : 'var(--red)';
+
+  // Colour logic — clock-out
+  // Orange if: actual CO is 5+ mins PAST scheduled end, OR 15+ mins BEFORE scheduled end
+  let coColor = 'var(--green)';
+  if (s.scheduled_end && co) {
+    const toM = t => { const [h,m] = t.split(':').map(Number); return h*60+m; };
+    let schedEndM = toM(s.scheduled_end.slice(0,5));
+    let coM = toM(co);
+    // Handle overnight: if co looks earlier than scheduled end by a lot, assume next day
+    let diff = coM - schedEndM; // positive = clocked out after sched end, negative = early
+    if (diff < -720) diff += 24*60; // wrapped overnight
+    if (diff > 720) diff -= 24*60;
+    if (diff >= 5 || diff <= -15) coColor = 'var(--amber)';
+  }
+
+  // Populate timeline + chips
+  document.getElementById('co-summary-worker').textContent = `${s.worker_name || 'Unknown'} · ${s.shift_date || ''}`;
+  const ciEl = document.getElementById('co-summary-ci');
+  ciEl.textContent = ci || '—';
+  ciEl.style.color = ciColor;
+  // Also update the dot colour
+  ciEl.previousElementSibling && (ciEl.previousElementSibling.style.background = ciColor);
+  const coEl = document.getElementById('co-summary-co');
+  coEl.textContent = co;
+  coEl.style.color = coColor;
+  coEl.previousElementSibling && (coEl.previousElementSibling.style.background = coColor);
+  document.getElementById('co-summary-hours').textContent = hoursLabel;
+  document.getElementById('co-summary-break').textContent = breakLabel;
+  document.getElementById('co-summary-role').textContent = s.role || '—';
+  document.getElementById('co-summary-rate').textContent = `${sym}${rate.toFixed(2)}/hr`;
+  document.getElementById('co-summary-outlet').textContent = s.outlet || '—';
+
+  // Deductions / additions
+  const deductRows = [];
+  try {
+    const penalty = typeof shiftPenaltyAmount === 'function' ? parseFloat(shiftPenaltyAmount(ts) || 0) : 0;
+    if (penalty > 0) deductRows.push({ label: 'Late penalty', value: `-${fmt(penalty)}`, color: 'var(--red)' });
+  } catch(e) {}
+  try {
+    const opDeduct = typeof overpaymentDeductionForShift === 'function' ? parseFloat(overpaymentDeductionForShift(ts) || 0) : 0;
+    if (opDeduct > 0) deductRows.push({ label: 'Overpayment recovery', value: `-${fmt(opDeduct)}`, color: 'var(--red)' });
+  } catch(e) {}
+  try {
+    const srAbsorbed = typeof srAbsorbedForShift === 'function' ? parseFloat(srAbsorbedForShift(ts) || 0) : 0;
+    if (srAbsorbed > 0) deductRows.push({ label: 'SR absorbed', value: fmt(srAbsorbed), color: 'var(--amber)' });
+    if (s.sr_worker) deductRows.push({ label: 'SR worker', value: s.sr_worker, color: 'var(--amber)' });
+  } catch(e) {}
+  try {
+    const tc = typeof transportClaim === 'function' ? parseFloat(transportClaim(ts) || 0) : 0;
+    if (tc > 0) deductRows.push({ label: 'Transport claim', value: `+${fmt(tc)}`, color: 'var(--green)' });
+  } catch(e) {}
+
+  const deductEl = document.getElementById('co-summary-deductions');
+  const deductRowsEl = document.getElementById('co-summary-deductions-rows');
+  if (deductRows.length > 0) {
+    deductRowsEl.innerHTML = deductRows.map(r =>
+      `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px;">
+        <span style="color:var(--text2);">${r.label}</span>
+        <span style="font-family:var(--mono);font-weight:600;color:${r.color};">${r.value}</span>
+      </div>`
+    ).join('');
+    deductEl.style.display = '';
+  } else {
+    deductEl.style.display = 'none';
+  }
+
+  // Flip panels
+  document.getElementById('co-panel-form').style.display = 'none';
+  document.getElementById('co-panel-summary').style.display = '';
+}
+
+function coSummaryBack() {
+  document.getElementById('co-panel-form').style.display = '';
+  document.getElementById('co-panel-summary').style.display = 'none';
+}
+
+async function proceedClockOut() {
+  const id = document.getElementById('co-modal-shift-id').value;
+  const s = allShifts.find(x => x.id === id);
+  if (!s) return;
+  const co = document.getElementById('co-modal-time').value;
+  const breakMins = parseInt(document.getElementById('co-modal-break').value) || 0;
   const { error } = await supabaseClient.from('shifts').update({
-    clock_out: co, updated_at: new Date().toISOString()
+    clock_out: co, break_mins: breakMins, updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Clock-out failed: ' + error.message, 'error'); return; }
   await logActivity(
@@ -3974,7 +4181,7 @@ async function confirmClockOutModal() {
   );
   closeModal('clock-out-modal');
   toast(`${s.worker_name} clocked out at ${co}`);
-  sendWhatsAppNotification(buildClockOutMessage(s, co));
+  sendWhatsAppNotification(buildClockOutMessage({ ...s, break_mins: breakMins }, co));
   await loadShifts();
 }
 
