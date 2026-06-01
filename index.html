@@ -1151,6 +1151,114 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   </div>
 </div>
 
+<!-- CLOCK-IN MODAL -->
+<div class="modal-overlay" id="clock-in-modal">
+  <div class="modal" style="max-width:440px;overflow-y:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <h3 style="margin:0;">🟢 Clock In</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-in-modal')">← Back</button>
+    </div>
+    <div id="ci-modal-worker" style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;"></div>
+
+    <!-- Scheduled shift info -->
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Scheduled Shift</div>
+      <div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:16px;font-weight:700;color:var(--text);">
+        <span id="ci-modal-sched-start">—</span>
+        <span style="color:var(--text3);font-size:13px;">→</span>
+        <span id="ci-modal-sched-end">—</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--text2);font-family:var(--font);font-weight:400;" id="ci-modal-outlet"></span>
+      </div>
+    </div>
+
+    <!-- Clock-in time -->
+    <div style="margin-bottom:14px;">
+      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Confirm Clock-In Time</div>
+      <input type="time" id="ci-modal-time"
+        style="font-family:var(--mono);font-size:15px;padding:9px 12px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);width:160px;">
+    </div>
+
+    <!-- Break & Role side by side -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Unpaid Break</div>
+        <select id="ci-modal-break"
+          style="width:100%;font-size:13px;padding:9px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);font-family:var(--font);">
+          <option value="0">0 min</option>
+          <option value="30">30 min</option>
+          <option value="60">1 hour</option>
+          <option value="90">1 hr 30 min</option>
+          <option value="120">2 hours</option>
+          <option value="150">2 hr 30 min</option>
+          <option value="180">3 hours</option>
+        </select>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Role</div>
+        <select id="ci-modal-role"
+          style="width:100%;font-size:13px;padding:9px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);font-family:var(--font);">
+          <option>F&amp;B Service Crew</option>
+          <option>Dishwasher</option>
+          <option>Kitchen Assistant</option>
+          <option>Chef De Partie</option>
+          <option>Cashier</option>
+          <option>Runner</option>
+          <option>Barista</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Rate -->
+    <div style="margin-bottom:20px;">
+      <div id="ci-modal-rate-label" style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Rate ($/hr)</div>
+      <input type="number" id="ci-modal-rate" step="0.50" min="1"
+        style="font-family:var(--mono);font-size:13px;padding:9px 12px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);width:140px;">
+    </div>
+
+    <input type="hidden" id="ci-modal-shift-id">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;border-top:1px solid var(--border);">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-in-modal')">← Back</button>
+      <button class="btn btn-primary" onclick="confirmClockInModal()">✓ Confirm Clock In</button>
+    </div>
+  </div>
+</div>
+
+<!-- CLOCK-OUT MODAL -->
+<div class="modal-overlay" id="clock-out-modal">
+  <div class="modal" style="max-width:440px;overflow-y:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <h3 style="margin:0;">🔴 Clock Out</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-out-modal')">← Back</button>
+    </div>
+    <div id="co-modal-worker" style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;"></div>
+
+    <!-- Shift info -->
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Shift Details</div>
+      <div style="display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:16px;font-weight:700;color:var(--text);margin-bottom:8px;">
+        <span id="co-modal-sched-start">—</span>
+        <span style="color:var(--text3);font-size:13px;">→</span>
+        <span id="co-modal-sched-end">—</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--text2);font-family:var(--font);font-weight:400;" id="co-modal-outlet"></span>
+      </div>
+      <div style="font-size:12px;color:var(--text2);">Clocked in at: <span id="co-modal-clock-in" style="font-family:var(--mono);color:var(--green);font-weight:700;"></span></div>
+    </div>
+
+    <!-- Clock-out time -->
+    <div style="margin-bottom:20px;">
+      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:6px;">Confirm Clock-Out Time</div>
+      <input type="time" id="co-modal-time"
+        style="font-family:var(--mono);font-size:15px;padding:9px 12px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);width:160px;">
+    </div>
+
+    <input type="hidden" id="co-modal-shift-id">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;border-top:1px solid var(--border);">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('clock-out-modal')">← Back</button>
+      <button class="btn btn-primary" onclick="confirmClockOutModal()">✓ Confirm Clock Out</button>
+    </div>
+  </div>
+</div>
+
 <!-- ADD WORKER MODAL -->
 <div class="modal-overlay" id="add-worker-modal">
   <div class="modal">
@@ -3775,35 +3883,42 @@ function renderTimeCell(s, field) {
 function quickClockIn(id) {
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
-  // Pre-fill with current time as a convenience
   const now = new Date();
   const nowStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  // Replace the clock-in cell with an inline time input + confirm button
-  const cell = document.getElementById(`ci-disp-${id}`);
-  if (!cell) return;
-  cell.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:4px;">
-      <input type="time" id="qci-${id}" value="${nowStr}"
-        style="font-family:var(--mono);font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--teal);border-radius:4px;width:90px;">
-      <div style="display:flex;gap:4px;">
-        <button class="btn btn-primary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="confirmClockIn('${id}')">✓</button>
-        <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelClockInInput('${id}')">✕</button>
-      </div>
-    </div>`;
-  document.getElementById(`qci-${id}`)?.focus();
+  // Populate modal
+  document.getElementById('ci-modal-shift-id').value = id;
+  document.getElementById('ci-modal-worker').textContent = `${s.worker_name || 'Unknown'} · ${s.shift_date || ''}`;
+  document.getElementById('ci-modal-sched-start').textContent = s.scheduled_start?.slice(0,5) || '—';
+  document.getElementById('ci-modal-sched-end').textContent = s.scheduled_end?.slice(0,5) || '—';
+  document.getElementById('ci-modal-outlet').textContent = s.outlet || '';
+  document.getElementById('ci-modal-time').value = nowStr;
+  const brSel = document.getElementById('ci-modal-break');
+  brSel.value = String(s.break_mins || 0);
+  if (!brSel.value) brSel.value = '0';
+  const roleSel = document.getElementById('ci-modal-role');
+  roleSel.value = s.role || 'F&B Service Crew';
+  if (!roleSel.value) roleSel.options[0].selected = true;
+  document.getElementById('ci-modal-rate').value = parseFloat(s.rate || 0).toFixed(2);
+  // Update rate label currency
+  const sym = typeof currencySymbolForOutlet === 'function' ? (currencySymbolForOutlet(s.outlet) || '$') : '$';
+  document.getElementById('ci-modal-rate-label').textContent = `Rate (${sym}/hr)`;
+  document.getElementById('clock-in-modal').classList.add('open');
 }
 
-async function confirmClockIn(id) {
+async function confirmClockInModal() {
+  const id = document.getElementById('ci-modal-shift-id').value;
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
-  const ci = document.getElementById(`qci-${id}`)?.value;
+  const ci = document.getElementById('ci-modal-time').value;
   if (!ci) { toast('Please enter a clock-in time', 'error'); return; }
+  const breakMins = parseInt(document.getElementById('ci-modal-break').value) || 0;
+  const role = document.getElementById('ci-modal-role').value;
+  const rate = parseFloat(document.getElementById('ci-modal-rate').value) || parseFloat(s.rate) || 0;
   const lp = calcLatePenalty(s.scheduled_start?.slice(0,5), ci).penalty;
   const { error } = await supabaseClient.from('shifts').update({
-    clock_in: ci, late_penalty: lp, updated_at: new Date().toISOString()
+    clock_in: ci, late_penalty: lp, break_mins: breakMins, role, rate, updated_at: new Date().toISOString()
   }).eq('id', id);
   if (error) { toast('Clock-in failed: ' + error.message, 'error'); return; }
-  // Auto-acknowledge all reminders — worker is onsite, reminders are irrelevant
   shiftReminders[id] = { nightSent: true, nightAcked: true, clockinSent: true, clockinResponded: true };
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
   await persistReminder(id);
@@ -3812,12 +3927,14 @@ async function confirmClockIn(id) {
     `${s.worker_name} clocked in at ${ci} for shift at ${s.outlet} (scheduled ${s.scheduled_start?.slice(0,5)||'?'})`,
     'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
   );
+  closeModal('clock-in-modal');
   toast(`${s.worker_name} clocked in at ${ci}`);
   await loadShifts();
 }
 
+// Legacy aliases kept for any remaining inline references
+async function confirmClockIn(id) { return confirmClockInModal(); }
 function cancelClockInInput(id) {
-  // Restore the original cell display without saving
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
   const cell = document.getElementById(`ci-disp-${id}`);
@@ -3829,24 +3946,22 @@ function quickClockOut(id) {
   if (!s) return;
   const now = new Date();
   const nowStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  const cell = document.getElementById(`co-disp-${id}`);
-  if (!cell) return;
-  cell.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:4px;">
-      <input type="time" id="qco-${id}" value="${nowStr}"
-        style="font-family:var(--mono);font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--teal);border-radius:4px;width:90px;">
-      <div style="display:flex;gap:4px;">
-        <button class="btn btn-primary btn-sm" style="padding:2px 8px;font-size:11px;" onclick="confirmClockOut('${id}')">✓</button>
-        <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px;" onclick="cancelClockOutInput('${id}')">✕</button>
-      </div>
-    </div>`;
-  document.getElementById(`qco-${id}`)?.focus();
+  // Populate modal
+  document.getElementById('co-modal-shift-id').value = id;
+  document.getElementById('co-modal-worker').textContent = `${s.worker_name || 'Unknown'} · ${s.shift_date || ''}`;
+  document.getElementById('co-modal-sched-start').textContent = s.scheduled_start?.slice(0,5) || '—';
+  document.getElementById('co-modal-sched-end').textContent = s.scheduled_end?.slice(0,5) || '—';
+  document.getElementById('co-modal-outlet').textContent = s.outlet || '';
+  document.getElementById('co-modal-clock-in').textContent = s.clock_in?.slice(0,5) || '—';
+  document.getElementById('co-modal-time').value = nowStr;
+  document.getElementById('clock-out-modal').classList.add('open');
 }
 
-async function confirmClockOut(id) {
+async function confirmClockOutModal() {
+  const id = document.getElementById('co-modal-shift-id').value;
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
-  const co = document.getElementById(`qco-${id}`)?.value;
+  const co = document.getElementById('co-modal-time').value;
   if (!co) { toast('Please enter a clock-out time', 'error'); return; }
   const { error } = await supabaseClient.from('shifts').update({
     clock_out: co, updated_at: new Date().toISOString()
@@ -3857,10 +3972,14 @@ async function confirmClockOut(id) {
     `${s.worker_name} clocked out at ${co} — shift at ${s.outlet} (${s.scheduled_start?.slice(0,5)||'?'}–${s.scheduled_end?.slice(0,5)||'?'})`,
     'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
   );
+  closeModal('clock-out-modal');
   toast(`${s.worker_name} clocked out at ${co}`);
   sendWhatsAppNotification(buildClockOutMessage(s, co));
   await loadShifts();
 }
+
+// Legacy alias
+async function confirmClockOut(id) { return confirmClockOutModal(); }
 
 // ── WhatsApp message builder ─────────────────────────────────────────────────
 function buildClockOutMessage(s, co) {
@@ -3997,6 +4116,7 @@ function cancelClockOutInput(id) {
   if (!s) return;
   const cell = document.getElementById(`co-disp-${id}`);
   if (cell) cell.innerHTML = renderTimeCell(s, 'clock_out');
+  closeModal('clock-out-modal');
 }
 
 function openEditRow(id) {
