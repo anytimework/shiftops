@@ -1552,7 +1552,11 @@ function saveShiftComments() {
 function commentForShift(sOrId) {
   const id = typeof sOrId === 'object' ? sOrId?.id : sOrId;
   if (!id) return '';
-  return String(shiftComments[String(id)] || '').trim();
+  // localStorage takes priority (most recently typed), then fall back to DB payroll_notes
+  const local = String(shiftComments[String(id)] || '').trim();
+  if (local) return local;
+  const shift = typeof sOrId === 'object' ? sOrId : allShifts.find(x => String(x.id) === String(id));
+  return String(shift?.payroll_notes || '').trim();
 }
 function setShiftComment(id, text) {
   const key = String(id || '');
@@ -1583,10 +1587,15 @@ function toggleInlineComment(id) {
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
   if (el.style.display === 'block') document.getElementById(`inline-comment-text-${id}`)?.focus();
 }
-function saveInlineComment(id) {
+async function saveInlineComment(id) {
   const input = document.getElementById(`inline-comment-text-${id}`);
-  setShiftComment(id, input?.value || '');
-  toast(commentForShift(id) ? 'Comment saved' : 'Comment removed');
+  const text = input?.value?.trim() || '';
+  setShiftComment(id, text);
+  // Also persist to DB so comment survives across devices and all statuses
+  try {
+    await supabaseClient.from('shifts').update({ payroll_notes: text || null, updated_at: new Date().toISOString() }).eq('id', id);
+  } catch(e) {}
+  toast(text ? 'Comment saved' : 'Comment removed');
   renderTable();
 }
 function normProfileKey(name) {
@@ -3115,6 +3124,13 @@ async function loadShifts() {
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
   allShifts = data || [];
+  // Seed localStorage from DB payroll_notes so comments show without needing to re-save
+  (allShifts).forEach(s => {
+    if (s.payroll_notes && !shiftComments[String(s.id)]) {
+      shiftComments[String(s.id)] = s.payroll_notes;
+    }
+  });
+  saveShiftComments();
   await loadOverpaymentCache();
   await loadCancellationLogsForCurrentView();
   await loadStandbyList();
@@ -4740,6 +4756,7 @@ async function saveRow(id) {
     clock_in: ci, clock_out: co, break_mins: br,
     late_penalty: lp,
     transport_claim: tc || null,
+    payroll_notes: notes || null,
     scheduled_start: newSchedStart ? newSchedStart + ':00' : s.scheduled_start,
     scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
     updated_at: new Date().toISOString()
@@ -4752,6 +4769,9 @@ async function saveRow(id) {
     try { await supabaseClient.from('workers').insert({ name: resolvedWorker }); await loadWorkers(); } catch(e) {}
   }
   setShiftComment(id, notes);
+  // Keep localStorage in sync with DB value so it survives re-renders
+  if (notes) shiftComments[String(id)] = notes; else delete shiftComments[String(id)];
+  saveShiftComments();
   const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
   const notesLog = notes ? `, notes: ${notes}` : '';
   const workerLabel = resolvedWorker || s.worker_name || 'Available';
@@ -5969,13 +5989,64 @@ async function loadMessages() {
   if (error) { const b=document.getElementById('messages-body'); if(b) b.innerHTML = `<div class="empty-state"><p>${error.message}</p><p class="sub-text">Run the SQL patch if the announcements table is not created yet.</p></div>`; return; }
   const me = currentInternalUser || 'Jon';
   allMessages = (data || []).filter(m => m.recipient === 'GROUP' || m.recipient === me || m.sender === me);
-  const unread = allMessages.filter(m => !(m.seen_by || []).includes(me) && m.sender !== me).length;
-  updateAnnouncementBadge(unread);
-  const countEl = document.getElementById('message-count'); if (countEl) countEl.textContent = `${allMessages.length} announcement${allMessages.length!==1?'s':''}${unread?` · ${unread} unread`:''}`;
+  // Merge localStorage ack fallbacks (for when acknowledged_by DB column doesn't exist yet)
+  const _ackStore = JSON.parse(localStorage.getItem('msg_acks_v1') || '{}');
+  allMessages.forEach(m => { if (_ackStore[String(m.id)]) m.acknowledged_by = [...new Set([...(m.acknowledged_by||[]),..._ackStore[String(m.id)]])]; });
+  // Badge based on unacknowledged (not just unseen) — sender doesn't need to ack their own messages
+  const unacked = allMessages.filter(m => !(m.acknowledged_by || []).includes(me) && m.sender !== me).length;
+  updateAnnouncementBadge(unacked);
+  const countEl = document.getElementById('message-count'); if (countEl) countEl.textContent = `${allMessages.length} announcement${allMessages.length!==1?'s':''}${unacked?` · ${unacked} unacknowledged`:''}`;
   const body = document.getElementById('messages-body'); if (!body) return;
   if (!allMessages.length) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">📢</div><p>No announcements yet.</p></div>'; return; }
-  body.innerHTML = `<table><thead><tr><th>Time</th><th>From</th><th>To</th><th>Announcement</th></tr></thead><tbody>${allMessages.map(m => { const unreadRow = !(m.seen_by || []).includes(me) && m.sender !== me; return `<tr style="${unreadRow?'background:rgba(79,142,247,0.06);':''}"><td style="font-family:var(--mono);font-size:12px;">${new Date(m.created_at).toLocaleString()}</td><td>${m.sender}</td><td>${m.recipient==='GROUP'?'Group':m.recipient}</td><td style="min-width:320px;">${m.body}${m.incident_id?'<div class="sr-tag">Incident linked</div>':''}</td></tr>`; }).join('')}</tbody></table>`;
+  body.innerHTML = allMessages.map(m => {
+    const ackedBy = (m.acknowledged_by || []);
+    const isMine = m.sender === me;
+    const hasAcked = ackedBy.includes(me);
+    const isUnacked = !isMine && !hasAcked;
+    const ackedList = ackedBy.length ? `<div style="margin-top:8px;font-size:12px;color:var(--green);display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span>✅ Acknowledged by:</span>${ackedBy.map(n=>`<span style="background:rgba(56,199,130,0.12);border-radius:12px;padding:2px 8px;">${n}</span>`).join('')}</div>` : `<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">No acknowledgements yet</div>`;
+    const ackBtn = !isMine && !hasAcked ? `<button onclick="acknowledgeMessage('${m.id}')" style="margin-top:10px;padding:6px 16px;background:var(--green);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">✓ Acknowledge</button>` : (!isMine && hasAcked ? `<div style="margin-top:10px;font-size:12px;color:var(--green);font-weight:600;">✅ You acknowledged this</div>` : '');
+    return `<div style="background:${isUnacked?'rgba(79,142,247,0.07)':'var(--surface)'};border:1px solid ${isUnacked?'var(--accent)':'var(--border)'};border-radius:12px;padding:16px 18px;margin-bottom:12px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+            ${isUnacked?'<span style="background:var(--accent);color:#fff;border-radius:10px;padding:2px 9px;font-size:11px;font-weight:700;letter-spacing:.5px;">NEW</span>':''}
+            <span style="font-weight:600;font-size:14px;">${m.sender}</span>
+            <span style="color:var(--text-muted);font-size:12px;">→</span>
+            <span style="font-size:13px;color:var(--text-muted);">${m.recipient==='GROUP'?'Everyone':m.recipient}</span>
+            <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${new Date(m.created_at).toLocaleString()}</span>
+          </div>
+          <div style="font-size:14px;line-height:1.6;">${m.body}${m.incident_id?'<span class="sr-tag" style="margin-left:8px;">Incident linked</span>':''}</div>
+          ${ackedList}
+          ${ackBtn}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  // Mark as seen (just for read tracking, does NOT affect badge)
   markMessagesSeen();
+}
+async function acknowledgeMessage(id) {
+  const me = currentInternalUser || 'Jon';
+  const m = allMessages.find(x => String(x.id) === String(id));
+  if (!m) return;
+  const ackedBy = [...new Set([...(m.acknowledged_by || []), me])];
+  // Try DB update — acknowledged_by column (add via SQL: ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS acknowledged_by jsonb DEFAULT '[]')
+  const { error } = await supabaseClient.from('internal_messages').update({ acknowledged_by: ackedBy }).eq('id', id);
+  if (error) {
+    // Fallback: persist to localStorage
+    const store = JSON.parse(localStorage.getItem('msg_acks_v1') || '{}');
+    store[String(id)] = ackedBy;
+    localStorage.setItem('msg_acks_v1', JSON.stringify(store));
+    m.acknowledged_by = ackedBy; // update in-memory
+  } else {
+    m.acknowledged_by = ackedBy;
+  }
+  toast('Acknowledged ✅');
+  // Recompute badge
+  const unacked = allMessages.filter(m2 => !(m2.acknowledged_by || []).includes(me) && m2.sender !== me).length;
+  updateAnnouncementBadge(unacked);
+  // Re-render
+  await loadMessages();
 }
 async function markMessagesSeen() {
   const me = currentInternalUser || 'Jon';
@@ -5983,16 +6054,24 @@ async function markMessagesSeen() {
   for (const m of toMark) {
     const seen = [...(m.seen_by || []), me];
     await supabaseClient.from('internal_messages').update({ seen_by: seen }).eq('id', m.id);
+    m.seen_by = seen;
   }
-  if (toMark.length) updateAnnouncementBadge(0);
+  // NOTE: does NOT clear badge — badge is cleared only via acknowledgeMessage()
 }
 async function refreshAnnouncementBadge() {
   if (!currentInternalUser || !supabaseClient) { updateAnnouncementBadge(0); return; }
   const me = currentInternalUser || 'Jon';
-  const { data, error } = await supabaseClient.from('internal_messages').select('sender,recipient,seen_by,created_at').order('created_at', { ascending:false }).limit(100);
+  const { data, error } = await supabaseClient.from('internal_messages').select('sender,recipient,acknowledged_by,created_at').order('created_at', { ascending:false }).limit(100);
   if (error) return;
-  const unread = (data || []).filter(m => (m.recipient === 'GROUP' || m.recipient === me || m.sender === me) && !(m.seen_by || []).includes(me) && m.sender !== me).length;
-  updateAnnouncementBadge(unread);
+  // Merge localStorage ack fallbacks
+  const store = JSON.parse(localStorage.getItem('msg_acks_v1') || '{}');
+  const unacked = (data || []).filter(m => {
+    if (!(m.recipient === 'GROUP' || m.recipient === me || m.sender === me)) return false;
+    if (m.sender === me) return false;
+    const ackedBy = [...(m.acknowledged_by || []), ...(store[String(m.id)] || [])];
+    return !ackedBy.includes(me);
+  }).length;
+  updateAnnouncementBadge(unacked);
 }
 function startMessagePolling() {
   if (messagePollTimer) clearInterval(messagePollTimer);
@@ -9213,6 +9292,8 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 // ── Start ─────────────────────────────────────────────────────
 // Note: run this SQL in Supabase if is_paid column doesn't exist:
 // ALTER TABLE shifts ADD COLUMN IF NOT EXISTS is_paid boolean DEFAULT false;
+// Note: run this SQL in Supabase to enable announcement acknowledgements:
+// ALTER TABLE internal_messages ADD COLUMN IF NOT EXISTS acknowledged_by jsonb DEFAULT '[]';
 initSupabase();
 
 // Auto-refresh activity banner every 30 seconds
