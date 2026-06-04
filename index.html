@@ -1118,34 +1118,84 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 <!-- WHATSAPP SETTINGS MODAL -->
 <div class="modal-overlay" id="whatsapp-settings-modal">
-  <div class="modal" style="max-width:440px;">
+  <div class="modal" style="max-width:500px;overflow-y:auto;max-height:90vh;">
     <div class="modal-header">
-      <h3>💬 WhatsApp Clock-Out Alerts</h3>
+      <h3>💬 WhatsApp & Periskope Settings</h3>
       <button class="modal-close" onclick="closeWhatsAppSettings()">✕</button>
     </div>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.6;">
-      Sends you a WhatsApp message whenever a worker clocks out. Uses <strong>CallMeBot</strong> (free).<br>
-      Setup: save <strong>+34 613 01 49 37</strong> as a contact, then send <em>"I allow callmebot to send me messages"</em> to that number — you'll receive your API key.
-    </p>
-    <div class="form-row">
-      <label>Your WhatsApp number <span style="font-weight:400;color:var(--text3);">(with country code, no +, e.g. 6591234567)</span></label>
-      <input type="text" id="wa-phone" placeholder="6591234567" style="font-family:var(--mono);">
+
+    <!-- Tab bar -->
+    <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px;">
+      <button id="wa-tab-periskope" onclick="switchWaTab('periskope')" style="flex:1;padding:8px;font-size:13px;font-weight:600;border:none;background:none;border-bottom:2px solid var(--accent);color:var(--accent);cursor:pointer;">🔗 Periskope</button>
+      <button id="wa-tab-callmebot" onclick="switchWaTab('callmebot')" style="flex:1;padding:8px;font-size:13px;font-weight:400;border:none;background:none;border-bottom:2px solid transparent;color:var(--text-muted);cursor:pointer;">📟 CallMeBot</button>
     </div>
-    <div class="form-row">
-      <label>CallMeBot API key <span style="font-weight:400;color:var(--text3);">(received from CallMeBot on WhatsApp)</span></label>
-      <input type="text" id="wa-apikey" placeholder="e.g. 123456" style="font-family:var(--mono);">
+
+    <!-- Periskope panel -->
+    <div id="wa-panel-periskope">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.6;">
+        Connect <strong>Periskope</strong> to send shift reminders directly to workers and track their replies.<br>
+        Get your API key at <a href="https://console.periskope.app/settings/integrations/api" target="_blank" style="color:var(--accent);">console.periskope.app → Settings → API</a>.
+      </p>
+      <div class="form-row">
+        <label>Periskope API Key</label>
+        <input type="password" id="pk-apikey" placeholder="Bearer token from Periskope" style="font-family:var(--mono);">
+      </div>
+      <div class="form-row">
+        <label>Org Phone Number <span style="font-weight:400;color:var(--text3);">(your WhatsApp number on Periskope, no +, e.g. 6591234567)</span></label>
+        <input type="text" id="pk-phone" placeholder="6591234567" style="font-family:var(--mono);">
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.7;color:var(--text2);">
+        <strong>🌙 Night reminders</strong> — auto-sent to workers between 7 PM–10 PM for tomorrow's shifts<br>
+        <strong>⏰ Clock-in reminders</strong> — auto-sent ~60 min before shift starts<br>
+        <strong>✅ Response tracking</strong> — when a worker replies, their reminder status updates automatically via webhook
+      </div>
+      <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
+        <label style="margin-bottom:0;flex:1;">Enable Periskope auto-reminders</label>
+        <input type="checkbox" id="pk-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
+      </div>
+      <div style="background:rgba(79,142,247,0.06);border:1px solid rgba(79,142,247,0.2);border-radius:10px;padding:12px;margin:12px 0;font-size:11px;color:var(--text2);line-height:1.7;">
+        <strong>Webhook URL</strong> (paste this into Periskope → Settings → Webhooks → message.created):<br>
+        <code id="pk-webhook-url" style="display:block;margin-top:4px;font-size:11px;word-break:break-all;color:var(--accent);">https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/periskope-webhook</code>
+        <br>
+        <strong>ShiftOps API URL</strong> (add as Periskope Custom Tool):<br>
+        <code style="display:block;margin-top:4px;font-size:11px;word-break:break-all;color:var(--accent);">https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/shiftops-api</code>
+      </div>
+      <div id="pk-test-result" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
+      <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;">
+        <button class="btn btn-ghost btn-sm" onclick="testPeriskopeConnection()">Test connection</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-ghost btn-sm" onclick="closeWhatsAppSettings()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="saveWhatsAppSettings()">Save</button>
+        </div>
+      </div>
     </div>
-    <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
-      <label style="margin-bottom:0;flex:1;">Enable clock-out notifications</label>
-      <input type="checkbox" id="wa-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
-    </div>
-    <div id="wa-origin-status" style="font-size:11px;margin-top:4px;min-height:16px;"></div>
-    <div id="wa-test-result" style="font-size:12px;margin-top:6px;min-height:18px;"></div>
-    <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;">
-      <button class="btn btn-ghost btn-sm" onclick="testWhatsAppNotification()">Send test message</button>
-      <div style="display:flex;gap:8px;">
-        <button class="btn btn-ghost btn-sm" onclick="closeWhatsAppSettings()">Cancel</button>
-        <button class="btn btn-primary btn-sm" onclick="saveWhatsAppSettings()">Save</button>
+
+    <!-- CallMeBot panel (hidden by default) -->
+    <div id="wa-panel-callmebot" style="display:none;">
+      <p style="font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.6;">
+        Sends <em>you</em> a WhatsApp message whenever a worker clocks out. Uses <strong>CallMeBot</strong> (free).<br>
+        Setup: save <strong>+34 613 01 49 37</strong> as a contact, then send <em>"I allow callmebot to send me messages"</em> to that number.
+      </p>
+      <div class="form-row">
+        <label>Your WhatsApp number <span style="font-weight:400;color:var(--text3);">(with country code, no +)</span></label>
+        <input type="text" id="wa-phone" placeholder="6591234567" style="font-family:var(--mono);">
+      </div>
+      <div class="form-row">
+        <label>CallMeBot API key</label>
+        <input type="text" id="wa-apikey" placeholder="e.g. 123456" style="font-family:var(--mono);">
+      </div>
+      <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
+        <label style="margin-bottom:0;flex:1;">Enable clock-out notifications</label>
+        <input type="checkbox" id="wa-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
+      </div>
+      <div id="wa-origin-status" style="font-size:11px;margin-top:4px;min-height:16px;"></div>
+      <div id="wa-test-result" style="font-size:12px;margin-top:6px;min-height:18px;"></div>
+      <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;">
+        <button class="btn btn-ghost btn-sm" onclick="testWhatsAppNotification()">Send test message</button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-ghost btn-sm" onclick="closeWhatsAppSettings()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="saveWhatsAppSettings()">Save</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1898,15 +1948,22 @@ function reminderPanelHtml(s) {
     ].join(' ');
     return `<div class="reminder-panel" style="font-size:10px;color:var(--text3);">Reminders: ${badges} <button class="btn-undo-ack" style="margin-left:4px;" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Reset</button></div>`;
   }
+  const pkEnabled = getPeriskopeConfig()?.enabled === true;
+  const workerHasPhone = !!workerPhone(s.worker_name);
+  const canSendPk = pkEnabled && workerHasPhone;
   let html = '<div class="reminder-panel">';
   // Night reminder section — shown on tomorrow + today
   html += `<div class="reminder-section-label">🌙 Night reminder</div>`;
-  html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label></div>`;
+  html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label>`;
+  if (canSendPk && !r.nightSent) html += `<button class="btn-undo-ack" style="margin-left:6px;" onclick="manualSendReminder('${sid}','night')">📲 Send</button>`;
+  html += `</div>`;
   html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rna-${sid}" ${r.nightAcked?'checked':''} onchange="toggleReminder('${sid}','nightAcked',this.checked)"><label for="rna-${sid}">Worker acknowledged</label></div>`;
   // Clock-in section — only on today's view
   if (isToday) {
     html += `<div class="reminder-section-label" style="margin-top:6px;">⏰ Clock-in reminder</div>`;
-    html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcs-${sid}" ${r.clockinSent?'checked':''} onchange="toggleReminder('${sid}','clockinSent',this.checked)"><label for="rcs-${sid}">Reminder sent</label></div>`;
+    html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcs-${sid}" ${r.clockinSent?'checked':''} onchange="toggleReminder('${sid}','clockinSent',this.checked)"><label for="rcs-${sid}">Reminder sent</label>`;
+    if (canSendPk && !r.clockinSent) html += `<button class="btn-undo-ack" style="margin-left:6px;" onclick="manualSendReminder('${sid}','clockin')">📲 Send</button>`;
+    html += `</div>`;
     html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcr-${sid}" ${r.clockinResponded?'checked':''} onchange="toggleReminder('${sid}','clockinResponded',this.checked)"><label for="rcr-${sid}">Worker responded</label></div>`;
   }
   html += '</div>';
@@ -4261,56 +4318,204 @@ function buildClockOutMessage(s, co) {
     return `CLOCK-OUT: ${String(s.worker_name||'').trim()} at ${String(s.outlet||'').trim()} — clocked out ${co}`;
   }
 }
-// ── WhatsApp Notifications (CallMeBot) ───────────────────────────────────────
+// ── WhatsApp / Periskope Settings ────────────────────────────────────────────
+function switchWaTab(tab) {
+  document.getElementById('wa-panel-periskope').style.display = tab === 'periskope' ? '' : 'none';
+  document.getElementById('wa-panel-callmebot').style.display  = tab === 'callmebot' ? '' : 'none';
+  document.getElementById('wa-tab-periskope').style.fontWeight = tab === 'periskope' ? '600' : '400';
+  document.getElementById('wa-tab-callmebot').style.fontWeight  = tab === 'callmebot' ? '600' : '400';
+  document.getElementById('wa-tab-periskope').style.borderBottomColor = tab === 'periskope' ? 'var(--accent)' : 'transparent';
+  document.getElementById('wa-tab-callmebot').style.borderBottomColor  = tab === 'callmebot' ? 'var(--accent)' : 'transparent';
+  document.getElementById('wa-tab-periskope').style.color = tab === 'periskope' ? 'var(--accent)' : 'var(--text-muted)';
+  document.getElementById('wa-tab-callmebot').style.color  = tab === 'callmebot' ? 'var(--accent)' : 'var(--text-muted)';
+}
+function getPeriskopeConfig() {
+  try { return JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) { return null; }
+}
 function openWhatsAppSettings() {
+  // Populate CallMeBot fields
   let stored = null;
   try { stored = JSON.parse(localStorage.getItem('wa_config') || 'null'); } catch(e) {}
   const cfg = stored || WA_CONFIG_BUILTIN;
   document.getElementById('wa-phone').value = cfg.phone || '';
   document.getElementById('wa-apikey').value = cfg.apikey || '';
   document.getElementById('wa-enabled').checked = cfg.enabled !== false;
-  // Status indicator
   const statusEl = document.getElementById('wa-origin-status');
   if (statusEl) {
-    if (stored && stored.phone) {
-      statusEl.style.color = 'var(--green)';
-      statusEl.textContent = '✓ Settings saved on this device';
-    } else {
-      statusEl.style.color = 'var(--amber, #f59e0b)';
-      statusEl.textContent = '⚠ Using built-in defaults — click Save to lock settings to this device';
-    }
+    if (stored && stored.phone) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Settings saved on this device'; }
+    else { statusEl.style.color = 'var(--amber, #f59e0b)'; statusEl.textContent = '⚠ Using built-in defaults'; }
   }
   document.getElementById('wa-test-result').textContent = '';
+  // Populate Periskope fields
+  const pk = getPeriskopeConfig();
+  document.getElementById('pk-apikey').value = pk?.apikey || '';
+  document.getElementById('pk-phone').value  = pk?.phone  || '';
+  document.getElementById('pk-enabled').checked = pk?.enabled === true;
+  document.getElementById('pk-test-result').textContent = '';
+  // Default to Periskope tab if configured
+  switchWaTab(pk?.apikey ? 'periskope' : 'periskope');
   document.getElementById('whatsapp-settings-modal').classList.add('open');
 }
 function closeWhatsAppSettings() {
   document.getElementById('whatsapp-settings-modal').classList.remove('open');
 }
 function saveWhatsAppSettings() {
-  const phone = document.getElementById('wa-phone').value.trim().replace(/\D/g,'');
+  // Save CallMeBot
+  const phone  = document.getElementById('wa-phone').value.trim().replace(/\D/g,'');
   const apikey = document.getElementById('wa-apikey').value.trim();
   const enabled = document.getElementById('wa-enabled').checked;
-  if (enabled && (!phone || !apikey)) {
-    alert('Please enter both your phone number and API key to enable notifications.');
-    return;
-  }
   localStorage.setItem('wa_config', JSON.stringify({ phone, apikey, enabled }));
+  // Save Periskope
+  const pkKey     = document.getElementById('pk-apikey').value.trim();
+  const pkPhone   = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
+  const pkEnabled = document.getElementById('pk-enabled').checked;
+  localStorage.setItem('pk_config', JSON.stringify({ apikey: pkKey, phone: pkPhone, enabled: pkEnabled }));
   const statusEl = document.getElementById('wa-origin-status');
-  if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Settings saved on this device'; }
+  if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Settings saved'; }
   closeWhatsAppSettings();
-  toast('WhatsApp settings saved' + (enabled ? ' — notifications ON ✓' : ' — notifications OFF'));
+  toast('Settings saved' + (pkEnabled ? ' — Periskope reminders ON ✓' : ''));
 }
+
+// ── Periskope: send a 1-1 WA message to a worker ─────────────────────────────
+async function sendPeriskopeMessage(workerPhone, message) {
+  const pk = getPeriskopeConfig();
+  if (!pk?.apikey || !pk?.phone) return false;
+  const phone = String(workerPhone || '').replace(/\D/g,'');
+  if (!phone) return false;
+  const chatId = phone.includes('@') ? phone : `${phone}@c.us`;
+  try {
+    const res = await fetch('https://api.periskope.app/v1/message/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${pk.apikey}`,
+        'x-phone': pk.phone,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ chat_id: chatId, message })
+    });
+    const json = await res.json().catch(() => ({}));
+    console.log('[Periskope] sent to', phone, json.status || res.status);
+    return res.ok;
+  } catch(e) { console.warn('[Periskope] send error:', e); return false; }
+}
+
+// ── Night reminder message builder ───────────────────────────────────────────
+function buildNightReminderMessage(s) {
+  const d = new Date(s.shift_date + 'T00:00:00');
+  const dateStr = d.toLocaleDateString('en-SG', { weekday:'long', day:'numeric', month:'short' });
+  const start = (s.scheduled_start || '').slice(0,5);
+  const end   = (s.scheduled_end   || '').slice(0,5);
+  const role  = s.role || s.worker_role || '';
+  const outlet = s.outlet || '';
+  return `🌙 *Shift Reminder — Tomorrow*\n\nHi ${s.worker_name}! You have a shift tomorrow:\n\n📅 *${dateStr}*\n🏠 *${outlet}*\n⏰ ${start} – ${end}${role ? `\n👔 ${role}` : ''}\n\nPlease reply *OK* or *✓* to confirm you've seen this. See you tomorrow! 🙌`;
+}
+
+// ── Clock-in reminder message builder ────────────────────────────────────────
+function buildClockinReminderMessage(s) {
+  const start = (s.scheduled_start || '').slice(0,5);
+  const outlet = s.outlet || '';
+  return `⏰ *Clock-in Reminder*\n\nHi ${s.worker_name}! Your shift starts at *${start}* today at *${outlet}*.\n\nPlease make sure to clock in via ShiftOps when you arrive. 👍`;
+}
+
+// ── Auto-send reminders (runs on polling tick) ───────────────────────────────
+let _lastReminderCheck = 0;
+async function autoSendShiftReminders() {
+  const pk = getPeriskopeConfig();
+  if (!pk?.enabled || !pk?.apikey) return;
+  const now = Date.now();
+  if (now - _lastReminderCheck < 60000) return; // throttle to once per minute
+  _lastReminderCheck = now;
+
+  const nowDate  = new Date(); nowDate.setHours(0,0,0,0);
+  const tomorrowDate = new Date(nowDate); tomorrowDate.setDate(nowDate.getDate() + 1);
+  const todayStr    = nowDate.toISOString().slice(0,10);
+  const tomorrowStr = tomorrowDate.toISOString().slice(0,10);
+  const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
+
+  for (const s of (allShifts || [])) {
+    const workerName = String(s.worker_name || '').trim();
+    if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) continue;
+    const phone = workerPhone(workerName);
+    if (!phone) continue;
+    const r = shiftReminders[s.id] || {};
+
+    // 🌙 Night reminder: send to tomorrow's workers between 7 PM (1140) and 10 PM (1320)
+    if (s.shift_date === tomorrowStr && !r.nightSent && nowMins >= 1140 && nowMins < 1320) {
+      const ok = await sendPeriskopeMessage(phone, buildNightReminderMessage(s));
+      if (ok) {
+        if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
+        shiftReminders[s.id].nightSent = true;
+        await persistReminder(s.id);
+        toast(`🌙 Night reminder sent to ${workerName}`);
+      }
+    }
+
+    // ⏰ Clock-in reminder: send 60-90 min before shift start on the day
+    if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
+      const [sh, sm] = s.scheduled_start.split(':').map(Number);
+      const shiftMins = sh * 60 + sm;
+      if (nowMins >= shiftMins - 90 && nowMins < shiftMins - 15) {
+        const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
+        if (ok) {
+          if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
+          shiftReminders[s.id].clockinSent = true;
+          await persistReminder(s.id);
+          toast(`⏰ Clock-in reminder sent to ${workerName}`);
+        }
+      }
+    }
+  }
+}
+
+// ── Manual send from reminder panel ──────────────────────────────────────────
+async function manualSendReminder(shiftId, type) {
+  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  if (!s) return;
+  const phone = workerPhone(s.worker_name);
+  if (!phone) { toast('No phone number for this worker', 'error'); return; }
+  const msg = type === 'night' ? buildNightReminderMessage(s) : buildClockinReminderMessage(s);
+  const ok = await sendPeriskopeMessage(phone, msg);
+  if (ok) {
+    if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+    shiftReminders[shiftId][type === 'night' ? 'nightSent' : 'clockinSent'] = true;
+    await persistReminder(shiftId);
+    updateReminderPanelInPlace(shiftId);
+    toast(`✓ Reminder sent to ${s.worker_name}`);
+  } else {
+    toast('Failed to send — check Periskope settings', 'error');
+  }
+}
+
+async function testPeriskopeConnection() {
+  const apikey = document.getElementById('pk-apikey').value.trim();
+  const phone  = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
+  const resultEl = document.getElementById('pk-test-result');
+  if (!apikey || !phone) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter API key and org phone first.'; return; }
+  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Testing…';
+  try {
+    const res = await fetch('https://api.periskope.app/v1/phones', {
+      headers: { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone }
+    });
+    if (res.ok) {
+      resultEl.style.color = 'var(--green)';
+      resultEl.textContent = '✓ Connected! Periskope is ready.';
+      localStorage.setItem('pk_config', JSON.stringify({ apikey, phone, enabled: document.getElementById('pk-enabled').checked }));
+    } else {
+      const j = await res.json().catch(() => ({}));
+      resultEl.style.color = 'var(--red)';
+      resultEl.textContent = `Error ${res.status}: ${j.message || 'Check your API key and phone number.'}`;
+    }
+  } catch(e) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Network error — check internet connection.'; }
+}
+
 async function sendWhatsAppNotification(message) {
-  // Prefer localStorage (per-device/origin settings) — fall back to built-in credentials
   let cfg;
   try { cfg = JSON.parse(localStorage.getItem('wa_config') || 'null'); } catch(e) { cfg = null; }
   if (!cfg || !cfg.phone || !cfg.apikey) cfg = WA_CONFIG_BUILTIN;
   if (!cfg.enabled || !cfg.phone || !cfg.apikey) return;
   try {
     const encoded = encodeURIComponent(message);
-    // no-cors: browser won't allow reading the response cross-origin, but the request is still delivered
     fetch(`https://api.callmebot.com/whatsapp.php?phone=${cfg.phone}&text=${encoded}&apikey=${cfg.apikey}`, { mode: 'no-cors' });
-    console.log('[WA] notification sent to', cfg.phone, '| source:', cfg === WA_CONFIG_BUILTIN ? 'builtin' : 'localStorage');
   } catch(e) { console.warn('[WA] notification fetch error:', e); }
 }
 async function testWhatsAppNotification() {
@@ -4318,21 +4523,14 @@ async function testWhatsAppNotification() {
   const apikey = document.getElementById('wa-apikey').value.trim();
   const resultEl = document.getElementById('wa-test-result');
   if (!phone || !apikey) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter phone and API key first.'; return; }
-  // Auto-save settings so clock-outs work immediately after testing
   localStorage.setItem('wa_config', JSON.stringify({ phone, apikey, enabled: document.getElementById('wa-enabled').checked }));
-  resultEl.style.color = 'var(--text3)';
-  resultEl.textContent = 'Sending…';
+  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Sending…';
   try {
-    const msg = encodeURIComponent('✅ ShiftOps test — clock-out alerts are working!\nYour WhatsApp notifications are set up correctly.');
-    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${msg}&apikey=${apikey}`, { mode: 'no-cors' });
-    resultEl.style.color = 'var(--green)';
-    resultEl.textContent = '✓ Sent & settings saved — check your WhatsApp';
-  } catch(e) {
-    resultEl.style.color = 'var(--red)';
-    resultEl.textContent = 'Network error. Are you connected to the internet?';
-  }
+    await fetch(`https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${encodeURIComponent('✅ ShiftOps test — working!')}&apikey=${apikey}`, { mode: 'no-cors' });
+    resultEl.style.color = 'var(--green)'; resultEl.textContent = '✓ Sent — check your WhatsApp';
+  } catch(e) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Network error.'; }
 }
-// ── End WhatsApp ──────────────────────────────────────────────────────────────
+// ── End WhatsApp / Periskope ──────────────────────────────────────────────────
 
 function cancelClockOutInput(id) {
   const s = allShifts.find(x => x.id === id);
@@ -6081,6 +6279,8 @@ function startMessagePolling() {
     const active = document.getElementById('page-messages')?.style.display !== 'none';
     if (active) await loadMessages();
     else await refreshAnnouncementBadge();
+    // Auto-send Periskope reminders on every poll tick (internally throttled to 1/min)
+    autoSendShiftReminders().catch(e => console.warn('[Periskope auto-remind]', e));
   }, 15000);
 }
 
