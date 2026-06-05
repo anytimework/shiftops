@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v28 — Periskope acknowledgement auto-tick + shift dispute/cancellation detection (disputed/dispute_kind/dispute_reason/dispute_at) -->
 <!-- Build patch: v27 — local expandable attendance comments without DB schema changes -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -139,6 +140,32 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .reminder-alert-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 18px; font-size: 12px; font-weight: 500; border-bottom: 1px solid transparent; }
 .reminder-alert-urgent { background: rgba(255,59,48,0.08); border-bottom-color: rgba(255,59,48,0.2); color: var(--red); }
 .reminder-alert-warn { background: rgba(255,149,0,0.09); border-bottom-color: rgba(255,149,0,0.2); color: var(--amber); }
+/* Dispute / cancellation-request alert (dashboard) */
+.reminder-alert-dispute { background: rgba(232,64,64,0.16); border-bottom-color: rgba(232,64,64,0.35); border-left: 3px solid var(--red); color: #ff9a9a; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.reminder-alert-dispute strong { color: #fff; }
+.ra-dispute-actions { display: inline-flex; gap: 6px; flex-shrink: 0; }
+.ra-dispute-btn { font-size: 11px; padding: 3px 9px; border-radius: 4px; cursor: pointer; font-family: var(--font); font-weight: 600; border: 1px solid; white-space: nowrap; }
+.ra-dispute-btn.cancel { background: var(--red); color: #fff; border-color: var(--red); }
+.ra-dispute-btn.cancel:hover { opacity: 0.88; }
+.ra-dispute-btn.clear { background: none; color: var(--text2); border-color: var(--border2); }
+.ra-dispute-btn.clear:hover { color: var(--text); border-color: var(--text2); }
+/* Dispute banner inside the attendance row reminder panel */
+.dispute-banner { margin-top: 6px; padding: 7px 9px; background: rgba(232,64,64,0.13); border: 1px solid rgba(232,64,64,0.4); border-left: 3px solid var(--red); border-radius: 5px; }
+.dispute-head { font-size: 11px; color: #ff9a9a; line-height: 1.4; }
+.dispute-head strong { color: #fff; }
+.dispute-when { color: var(--text3); font-weight: 400; font-size: 10px; }
+.dispute-reason { font-size: 10.5px; color: var(--text2); font-style: italic; margin-top: 3px; line-height: 1.4; }
+.dispute-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.btn-dispute-act { font-size: 10.5px; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-family: var(--font); font-weight: 600; border: 1px solid; }
+.btn-dispute-act.cancel { background: var(--red); color: #fff; border-color: var(--red); }
+.btn-dispute-act.cancel:hover { opacity: 0.88; }
+.btn-dispute-act.clear { background: none; color: var(--text2); border-color: var(--border2); }
+.btn-dispute-act.clear:hover { color: var(--text); border-color: var(--text2); }
+/* Manual flag-issue row in active reminder panel */
+.reminder-flag-row { display: flex; align-items: center; gap: 6px; margin-top: 7px; padding-top: 6px; border-top: 1px dashed var(--border2); flex-wrap: wrap; }
+.reminder-flag-label { font-size: 9.5px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.4px; font-weight: 700; }
+.btn-flag-issue { font-size: 10px; padding: 2px 7px; border-radius: 4px; cursor: pointer; font-family: var(--font); font-weight: 500; border: 1px solid rgba(232,64,64,0.35); background: none; color: #e88; }
+.btn-flag-issue:hover { background: rgba(232,64,64,0.12); color: #ff9a9a; }
 /* Grouped collapsible night-reminder alert */
 .ra-grouped { flex-direction: column; cursor: pointer; user-select: none; }
 .ra-summary { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -1147,7 +1174,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.7;color:var(--text2);">
         <strong>🌙 Night reminders</strong> — auto-sent to workers between 7 PM–10 PM for tomorrow's shifts<br>
         <strong>⏰ Clock-in reminders</strong> — auto-sent ~60 min before shift starts<br>
-        <strong>✅ Response tracking</strong> — when a worker replies, their reminder status updates automatically via webhook
+        <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
+        <strong>🚨 Dispute &amp; cancellation detection</strong> — when a worker replies that they <em>can't make it</em> or <em>want to cancel</em> (e.g. “cancel”, “can't make it”, “sick”, “MC”), ShiftOps flags the shift as <strong>disputed</strong> and surfaces a red alert + Process-cancellation button
       </div>
       <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
         <label style="margin-bottom:0;flex:1;">Enable Periskope auto-reminders</label>
@@ -1159,6 +1187,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <br>
         <strong>ShiftOps API URL</strong> (add as Periskope Custom Tool):<br>
         <code style="display:block;margin-top:4px;font-size:11px;word-break:break-all;color:var(--accent);">https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/shiftops-api</code>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border2);">
+          <strong>The webhook classifies each inbound reply</strong> and updates the worker's most recent pending reminder shift:
+          <div style="margin-top:6px;">• <span style="color:var(--green);">ACK</span> → sets <code>night_acked</code> / <code>clockin_responded = true</code><br>
+          &nbsp;&nbsp;<span style="color:var(--text3);">keywords: ok, okay, yes, y, confirm, confirmed, noted, sure, 👍, ✓, ✅, can, will be there</span><br>
+          • <span style="color:var(--red);">DISPUTE</span> → sets <code>disputed = true</code>, <code>dispute_kind</code>, <code>dispute_reason</code> (the raw message)<br>
+          &nbsp;&nbsp;<span style="color:var(--text3);">keywords: cancel, can't make it, cannot make, not coming, won't come, sick, mc, emergency, reschedule, can't come, drop</span></div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:8px;font-size:11px;" onclick="showReminderSchemaSQL()">📋 Show required Supabase SQL</button>
+        </div>
       </div>
       <div id="pk-test-result" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
       <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;">
@@ -1557,7 +1593,7 @@ let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby
 let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, totalDeducted }
 // Built-in WA fallback — used when localStorage has no saved config (e.g. different origin / first open)
 const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
-let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded }
+let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt }
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
 let collapsedView = false;
@@ -1792,7 +1828,11 @@ async function loadReminders() {
           nightSent: !!r.night_sent,
           nightAcked: !!r.night_acked,
           clockinSent: !!r.clockin_sent,
-          clockinResponded: !!r.clockin_responded
+          clockinResponded: !!r.clockin_responded,
+          disputed: !!r.disputed,
+          disputeKind: r.dispute_kind || '',
+          disputeReason: r.dispute_reason || '',
+          disputeAt: r.dispute_at || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1812,6 +1852,10 @@ async function persistReminder(shiftId) {
       night_acked: !!r.nightAcked,
       clockin_sent: !!r.clockinSent,
       clockin_responded: !!r.clockinResponded,
+      disputed: !!r.disputed,
+      dispute_kind: r.disputeKind || null,
+      dispute_reason: r.disputeReason || null,
+      dispute_at: r.disputeAt || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -1839,7 +1883,11 @@ function subscribeToReminderChanges() {
             nightSent: !!row.night_sent,
             nightAcked: !!row.night_acked,
             clockinSent: !!row.clockin_sent,
-            clockinResponded: !!row.clockin_responded
+            clockinResponded: !!row.clockin_responded,
+            disputed: !!row.disputed,
+            disputeKind: row.dispute_kind || '',
+            disputeReason: row.dispute_reason || '',
+            disputeAt: row.dispute_at || ''
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1865,7 +1913,11 @@ async function silentSyncReminders() {
         nightSent: !!r.night_sent,
         nightAcked: !!r.night_acked,
         clockinSent: !!r.clockin_sent,
-        clockinResponded: !!r.clockin_responded
+        clockinResponded: !!r.clockin_responded,
+        disputed: !!r.disputed,
+        disputeKind: r.dispute_kind || '',
+        disputeReason: r.dispute_reason || '',
+        disputeAt: r.dispute_at || ''
       };
     });
     // Find shift IDs where something changed
@@ -1875,7 +1927,8 @@ async function silentSyncReminders() {
       const a = shiftReminders[id] || {};
       const b = incoming[id] || {};
       if (a.nightSent !== b.nightSent || a.nightAcked !== b.nightAcked ||
-          a.clockinSent !== b.clockinSent || a.clockinResponded !== b.clockinResponded) {
+          a.clockinSent !== b.clockinSent || a.clockinResponded !== b.clockinResponded ||
+          a.disputed !== b.disputed || (a.disputeReason||'') !== (b.disputeReason||'')) {
         changed.push(id);
       }
     });
@@ -1895,19 +1948,41 @@ async function toggleReminder(shiftId, field, checked) {
   await persistReminder(shiftId);      // sync to Supabase for all other users
 }
 async function undoFullAck(shiftId) {
-  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false };
+  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '' };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
+}
+// Manually clear a dispute flag (ops resolved it) without wiping reminder progress
+async function clearDispute(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].disputed = false;
+  shiftReminders[shiftId].disputeKind = '';
+  shiftReminders[shiftId].disputeReason = '';
+  shiftReminders[shiftId].disputeAt = '';
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  await persistReminder(shiftId);
+  toast('✓ Dispute cleared');
+}
+// Manually flag a dispute from the panel (when ops hears verbally / outside Periskope)
+async function flagDispute(shiftId, kind) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].disputed = true;
+  shiftReminders[shiftId].disputeKind = kind || 'cancel';
+  shiftReminders[shiftId].disputeAt = new Date().toISOString();
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  await persistReminder(shiftId);
+  toast('⚠ Shift flagged as disputed');
 }
 function updateReminderPanelInPlace(shiftId) {
   const row = document.getElementById('row-' + shiftId);
   if (!row) return; // row not in DOM (e.g. different day view), nothing to update
   const firstTd = row.querySelector('td:first-child');
   if (!firstTd) return;
-  // Remove old reminder element (either .reminder-panel or .reminder-all-ack)
-  const existing = firstTd.querySelector('.reminder-panel, .reminder-all-ack');
-  if (existing) existing.remove();
+  // Remove old reminder element(s): panel, all-ack summary, and any dispute banner
+  firstTd.querySelectorAll('.reminder-panel, .reminder-all-ack, .dispute-banner').forEach(el => el.remove());
   // Re-inject updated reminder panel
   const s = allShifts.find(x => String(x.id) === String(shiftId));
   if (!s) return;
@@ -1930,11 +2005,29 @@ function reminderPanelHtml(s) {
   const isTomorrow = shiftDay.getTime() === tomorrow.getTime();
   const isPast     = shiftDay.getTime() < today.getTime();
   const r = shiftReminders[s.id] || {};
-  const hasAnyData = r.nightSent || r.nightAcked || r.clockinSent || r.clockinResponded;
+  const hasAnyData = r.nightSent || r.nightAcked || r.clockinSent || r.clockinResponded || r.disputed;
   // Show panel for today, tomorrow, OR any past shift that already has reminder data recorded
   if (!isToday && !isTomorrow && !hasAnyData) return '';
+  const sidEarly = escapeAttr(String(s.id));
+  // ── Dispute banner — always shown first if a worker flagged they can't make / want to cancel ──
+  function disputeBanner() {
+    if (!r.disputed) return '';
+    const kindLabel = r.disputeKind === 'cancel'
+      ? 'wants to CANCEL this shift'
+      : (r.disputeKind === 'cantmake' ? "says they CAN'T MAKE this shift" : 'flagged an issue with this shift');
+    const when = r.disputeAt ? new Date(r.disputeAt).toLocaleString('en-SG', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+    const reason = r.disputeReason ? `<div class="dispute-reason">“${escapeHtml(r.disputeReason)}”</div>` : '';
+    return `<div class="dispute-banner">
+      <div class="dispute-head">⚠️ <strong>Worker ${kindLabel}</strong>${when ? ` <span class="dispute-when">· ${when}</span>` : ''}</div>
+      ${reason}
+      <div class="dispute-actions">
+        <button class="btn-dispute-act cancel" onclick="openCancelFromDispute('${sidEarly}')">🚫 Process cancellation</button>
+        <button class="btn-dispute-act clear" onclick="clearDispute('${sidEarly}')">✓ Resolved / clear</button>
+      </div>
+    </div>`;
+  }
   const isFullyAck = r.nightSent && r.nightAcked && r.clockinSent && r.clockinResponded;
-  if (isFullyAck) {
+  if (isFullyAck && !r.disputed) {
     return `<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
   }
   const sid = escapeAttr(String(s.id));
@@ -1945,13 +2038,14 @@ function reminderPanelHtml(s) {
       r.nightAcked     ? '<span style="color:var(--green);">👤✓</span>' : '<span style="color:var(--text3);">👤✗</span>',
       r.clockinSent    ? '<span style="color:var(--green);">⏰✓</span>' : '<span style="color:var(--text3);">⏰✗</span>',
       r.clockinResponded ? '<span style="color:var(--green);">✅✓</span>' : '<span style="color:var(--text3);">✅✗</span>',
-    ].join(' ');
-    return `<div class="reminder-panel" style="font-size:10px;color:var(--text3);">Reminders: ${badges} <button class="btn-undo-ack" style="margin-left:4px;" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Reset</button></div>`;
+      r.disputed       ? '<span style="color:var(--red);">⚠ disputed</span>' : '',
+    ].filter(Boolean).join(' ');
+    return `${disputeBanner()}<div class="reminder-panel" style="font-size:10px;color:var(--text3);">Reminders: ${badges} <button class="btn-undo-ack" style="margin-left:4px;" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Reset</button></div>`;
   }
   const pkEnabled = getPeriskopeConfig()?.enabled === true;
   const workerHasPhone = !!workerPhone(s.worker_name);
   const canSendPk = pkEnabled && workerHasPhone;
-  let html = '<div class="reminder-panel">';
+  let html = disputeBanner() + '<div class="reminder-panel">';
   // Night reminder section — shown on tomorrow + today
   html += `<div class="reminder-section-label">🌙 Night reminder</div>`;
   html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label>`;
@@ -1966,6 +2060,14 @@ function reminderPanelHtml(s) {
     html += `</div>`;
     html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcr-${sid}" ${r.clockinResponded?'checked':''} onchange="toggleReminder('${sid}','clockinResponded',this.checked)"><label for="rcr-${sid}">Worker responded</label></div>`;
   }
+  // Manual dispute flag — for issues heard verbally / outside Periskope
+  if (!r.disputed) {
+    html += `<div class="reminder-flag-row">
+      <span class="reminder-flag-label">Issue after reminder?</span>
+      <button class="btn-flag-issue" onclick="flagDispute('${sid}','cantmake')" title="Worker says they can't make it">⚠ Can't make it</button>
+      <button class="btn-flag-issue" onclick="flagDispute('${sid}','cancel')" title="Worker wants to cancel">🚫 Wants to cancel</button>
+    </div>`;
+  }
   html += '</div>';
   return html;
 }
@@ -1979,12 +2081,20 @@ function checkReminderAlerts() {
 
   const nightUnacked = [];   // grouped into one collapsible alert
   const clockinAlerts = [];  // shown individually — urgent, time-sensitive
+  const disputeAlerts = [];  // shown individually — most urgent
 
   (allShifts || []).forEach(s => {
     const r = shiftReminders[s.id] || {};
     const workerName = String(s.worker_name || '').trim();
     if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) return;
     if (s.shift_date !== todayStr) return;
+
+    // Dispute / cancellation request after reminder — top priority
+    if (r.disputed) {
+      const kindTxt = r.disputeKind === 'cancel' ? 'wants to cancel'
+        : (r.disputeKind === 'cantmake' ? "can't make it" : 'flagged an issue');
+      disputeAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', kindTxt, reason: r.disputeReason || '', start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
+    }
 
     // Night reminder: collect all who haven't acked (past 8am)
     if (r.nightSent && !r.nightAcked && nowMins >= 480) {
@@ -2003,6 +2113,18 @@ function checkReminderAlerts() {
   });
 
   let html = '';
+
+  // ── Dispute / cancellation requests — most urgent, shown first ──
+  disputeAlerts.forEach(a => {
+    const reason = a.reason ? ` — “${escapeHtml(a.reason)}”` : '';
+    html += `<div class="reminder-alert-item reminder-alert-dispute">
+      <span>🚨 <strong>${escapeHtml(a.name)}</strong> (${escapeHtml(a.outlet)}${a.start ? ' · ' + a.start : ''}) ${a.kindTxt} for today's shift${reason}</span>
+      <span class="ra-dispute-actions">
+        <button class="ra-dispute-btn cancel" onclick="openCancelFromDispute('${escapeAttr(String(a.id))}')">Process cancellation</button>
+        <button class="ra-dispute-btn clear" onclick="clearDispute('${escapeAttr(String(a.id))}')">Clear</button>
+      </span>
+    </div>`;
+  });
 
   // ── Night reminder: one grouped collapsible alert ──
   if (nightUnacked.length > 0) {
@@ -4407,14 +4529,14 @@ function buildNightReminderMessage(s) {
   const end   = (s.scheduled_end   || '').slice(0,5);
   const role  = s.role || s.worker_role || '';
   const outlet = s.outlet || '';
-  return `🌙 *Shift Reminder — Tomorrow*\n\nHi ${s.worker_name}! You have a shift tomorrow:\n\n📅 *${dateStr}*\n🏠 *${outlet}*\n⏰ ${start} – ${end}${role ? `\n👔 ${role}` : ''}\n\nPlease reply *OK* or *✓* to confirm you've seen this. See you tomorrow! 🙌`;
+  return `🌙 *Shift Reminder — Tomorrow*\n\nHi ${s.worker_name}! You have a shift tomorrow:\n\n📅 *${dateStr}*\n🏠 *${outlet}*\n⏰ ${start} – ${end}${role ? `\n👔 ${role}` : ''}\n\nPlease reply *OK* or *✓* to confirm.\nIf you *can't make it* or need to *cancel*, reply here and let us know. See you tomorrow! 🙌`;
 }
 
 // ── Clock-in reminder message builder ────────────────────────────────────────
 function buildClockinReminderMessage(s) {
   const start = (s.scheduled_start || '').slice(0,5);
   const outlet = s.outlet || '';
-  return `⏰ *Clock-in Reminder*\n\nHi ${s.worker_name}! Your shift starts at *${start}* today at *${outlet}*.\n\nPlease make sure to clock in via ShiftOps when you arrive. 👍`;
+  return `⏰ *Clock-in Reminder*\n\nHi ${s.worker_name}! Your shift starts at *${start}* today at *${outlet}*.\n\nPlease clock in via ShiftOps when you arrive. 👍\nRunning late or *can't make it*? Reply here right away so we can help.`;
 }
 
 // ── Auto-send reminders (runs on polling tick) ───────────────────────────────
@@ -4486,9 +4608,41 @@ async function manualSendReminder(shiftId, type) {
   }
 }
 
+function showReminderSchemaSQL() {
+  const sql = `-- 1) Add dispute-tracking columns to the existing shift_reminders table
+alter table public.shift_reminders
+  add column if not exists disputed       boolean default false,
+  add column if not exists dispute_kind   text,     -- 'cancel' | 'cantmake'
+  add column if not exists dispute_reason text,      -- raw worker message
+  add column if not exists dispute_at      timestamptz;
+
+-- 2) Periskope webhook Edge Function logic (deploy as periskope-webhook).
+--    For each inbound message.created event, find the worker's most recent
+--    pending reminder shift, then classify the message body:
+--
+--    const body = msg.body.toLowerCase().trim();
+--    const ACK = /\\b(ok|okay|yes|y|confirm|confirmed|noted|sure|can|coming|will be there)\\b|👍|✓|✅/;
+--    const DISPUTE = /\\b(cancel|can.?t make|cannot make|not coming|won.?t come|sick|mc|emergency|reschedule|can.?t come|drop)\\b/;
+--
+--    if (DISPUTE.test(body)) {
+--      update shift_reminders set disputed = true,
+--        dispute_kind = /cancel|drop/.test(body) ? 'cancel' : 'cantmake',
+--        dispute_reason = msg.body,
+--        dispute_at = now()
+--      where shift_id = <matched shift>;
+--    } else if (ACK.test(body)) {
+--      // tick acknowledgement on the matched shift
+--      update shift_reminders set night_acked = true, clockin_responded = true
+--      where shift_id = <matched shift>;
+--    }`;
+  const w = window.open('', '_blank', 'width=640,height=640');
+  if (!w) { alert(sql); return; }
+  w.document.write('<title>ShiftOps — Reminder/Dispute SQL</title><pre style="white-space:pre-wrap;font:12px/1.5 monospace;padding:18px;color:#222;">' + sql.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>');
+  w.document.close();
+}
+
 async function testPeriskopeConnection() {
   const apikey = document.getElementById('pk-apikey').value.trim();
-  const phone  = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
   const resultEl = document.getElementById('pk-test-result');
   if (!apikey || !phone) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter API key and org phone first.'; return; }
   resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Testing…';
@@ -5513,6 +5667,12 @@ function openCancelModal(id, workerName, outlet, sched) {
   document.getElementById('cancel-modal').classList.add('open');
 }
 function closeCancelModal() { document.getElementById('cancel-modal').classList.remove('open'); pendingCancelId = null; mcDataUrl = null; }
+// Open the cancellation modal directly from a dispute banner using only the shift id
+function openCancelFromDispute(shiftId) {
+  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  if (!s) { toast('Shift not found', 'error'); return; }
+  openCancelModal(s.id, s.worker_name, s.outlet, s.scheduled_start);
+}
 
 function updateCancelTypeUI() {
   const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
