@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v31 — Tasks panel: new/incomplete tasks pinned to top (newest first); completed late tasks collapse into a compact card under a "Completed" divider and auto-disappear from the panel 18h after completion. New sidebar "Completed Tasks" page logs every finished task (late/dispute/replacement) with outcome + timestamp, kept 60 days then auto-pruned (local + Supabase completed_tasks table). Replacement-needed card now opens a dedicated cross-date panel grouping today + all upcoming open slots by date, regardless of viewed dashboard date. New columns: shift_reminders.completed_at; new table completed_tasks. -->
 <!-- Build patch: v30 — Tasks & Replacement-needed now span ALL dates (cross-date task cache), not just the viewed day. Tasks panel shows shift date (Today/Tomorrow/date) + timings. Always-visible sidebar Tasks badge on every page. Processed worker cancellations set a persistent needs_replacement flag so the open slot stays in Replacement-needed across dates until re-filled or dismissed; outlet cancellations excluded. Re-filling a slot auto-clears the flag. Webhook guidance extended with LATE detection + correct upcoming-shift matching. New shift_reminders columns: needs_replacement, replacement_at. -->
 <!-- Build patch: v29 — Tasks dashboard card + Tasks panel (disputes + late notices), late-arrival capture (acknowledge + inform outlet), good-will cancellation option, MC made optional/deferrable, Cancelled card renamed to Replacement Needed -->
 <!-- Build patch: v28 — Periskope acknowledgement auto-tick + shift dispute/cancellation detection (disputed/dispute_kind/dispute_reason/dispute_at) -->
@@ -176,12 +177,19 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .btn-amber:hover { background: rgba(245,166,35,0.25); }
 .metric-card-tasks { border-color: rgba(245,166,35,0.3); }
 .metric-card-tasks.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
+.metric-card-replacement { border-color: rgba(43,179,163,0.3); }
+.metric-card-replacement.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .modal-wide { max-width: 640px; width: 92%; }
 .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--bg2); }
 .task-card.task-dispute { border-left: 3px solid var(--red); }
 .task-card.task-late { border-left: 3px solid var(--amber); }
 .task-card.task-replacement { border-left: 3px solid var(--teal, #2bb3a3); }
 .task-card.task-done { opacity: 0.62; }
+.task-card.task-collapsed { padding: 8px 12px; margin-bottom: 7px; opacity: 0.7; }
+.task-card.task-collapsed .task-head { margin-bottom: 4px; }
+.task-collapsed-line { font-size: 12.5px; color: var(--text2); line-height: 1.45; }
+.task-completed-divider { font-size: 10.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text3); font-family: var(--mono); margin: 16px 0 8px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.nav-badge.done-badge { background: rgba(60,200,120,0.85); color: #06351c; }
 .task-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 7px; }
 .task-tag { font-size: 10px; font-weight: 700; letter-spacing: 0.3px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; font-family: var(--mono); }
 .tag-dispute { background: rgba(232,64,64,0.15); color: #ff9a9a; }
@@ -599,6 +607,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <span class="nav-icon">⚡</span><span class="nav-label">Tasks</span>
         <span class="nav-badge tasks" id="tasks-nav-badge" title="Open tasks (all dates)">0</span>
       </button>
+      <button class="nav-item" onclick="switchPage('completed',this)" title="Tasks you've completed (kept 60 days)">
+        <span class="nav-icon">✅</span><span class="nav-label">Completed Tasks</span>
+        <span class="nav-badge done-badge" id="completed-nav-badge" title="Completed tasks on record">0</span>
+      </button>
       <button class="nav-item" onclick="switchPage('workers',this)">
         <span class="nav-icon">👥</span> Workers
       </button>
@@ -933,6 +945,27 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
     </div>
 
+    <div id="page-completed" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>✅ Completed Tasks</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Late arrivals handled, disputes resolved, and replacement slots filled. Kept for 60 days, then removed automatically.</p></div>
+        <div class="topbar-right" style="gap:8px;">
+          <select id="completed-filter" onchange="renderCompletedTasksPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;">
+            <option value="all">All types</option>
+            <option value="late">⏰ Late arrivals</option>
+            <option value="dispute">🚫 Disputes</option>
+            <option value="replacement">🔁 Replacements</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" onclick="refreshCompletedTasks()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="content">
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">Completed in the last 60 days</span><span class="table-count" id="completed-count"></span></div>
+          <div id="completed-body"><div class="empty-state"><div class="empty-icon">✅</div><p>No completed tasks yet.</p></div></div>
+        </div>
+      </div>
+    </div>
+
     <div id="page-knowledge" style="display:none;">
       <div class="topbar">
         <div class="topbar-left"><h2>📚 Business Knowledge</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Store SOPs, attire rules, outlet info — the AI learns from this too</p></div>
@@ -1102,6 +1135,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     </div>
     <div class="sub-text" style="margin-bottom:12px;">Cancellation requests and late-arrival notices that need an agent to act now. Disputes need a cancellation decision; late notices need acknowledgement and the outlet informed.</div>
     <div id="tasks-list"></div>
+  </div>
+</div>
+
+<!-- REPLACEMENT NEEDED MODAL (cross-date: today + all upcoming) -->
+<div class="modal-overlay" id="replacement-modal">
+  <div class="modal modal-wide">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+      <h3 style="margin:0;">🔁 Replacement needed</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeReplacementPanel()">Close</button>
+    </div>
+    <div class="sub-text" style="margin-bottom:12px;">Open slots where a worker dropped out and the booking still stands. Shows <strong>today and all upcoming dates</strong>, grouped by day — regardless of which date the dashboard is showing. Outlet/client cancellations are removed entirely and never appear here.</div>
+    <div id="replacement-list"></div>
   </div>
 </div>
 
@@ -1644,6 +1689,14 @@ let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, tota
 // This is what powers the Tasks panel and the Replacement-needed list so they show
 // EVERY open item regardless of which day the attendance grid is showing.
 let taskShiftCache = {};
+// Log of completed tasks (late arrivals handled, disputes processed/dismissed,
+// replacement slots filled/dismissed). Used by the "Completed Tasks" page.
+// Each entry: { key, type, worker, outlet, role, date, start, end, reason, completedAt }
+// Persisted to Supabase table completed_tasks (with localStorage fallback).
+// Auto-pruned: entries older than 60 days are deleted.
+let completedTasks = [];
+const COMPLETED_TASK_RETENTION_DAYS = 60;   // delete completed-task log entries after this many days
+const TASK_CARD_DONE_HIDE_HOURS = 18;        // hide a completed late task from the panel after this many hours
 // Built-in WA fallback — used when localStorage has no saved config (e.g. different origin / first open)
 const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt, lateNotified, lateReason, lateAt, lateAck, outletInformed }
@@ -1850,6 +1903,8 @@ async function init() {
   updateDateLabel();
   await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
   await loadShifts();
+  await loadCompletedTasks();
+  updateCompletedNavBadge();
   updateSidebarDate();
   requireInternalLogin();
   subscribeToReminderChanges(); // live sync + 30s polling fallback
@@ -1858,13 +1913,21 @@ async function init() {
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
   // Periodically refresh the cross-date task cache + sidebar badge so the global
   // Tasks indicator stays accurate on every page, even without remote changes.
+  // Also re-render the open Tasks panel so completed cards collapse/disappear at the
+  // 18h mark, and prune the Completed Tasks log past 60 days.
   setInterval(() => {
     if (typeof loadTaskShiftCache === 'function') {
       loadTaskShiftCache().then(() => {
         updateTasksNavBadge();
         if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+        if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
       }).catch(()=>{});
     }
+    try {
+      const pruned = pruneCompletedTasks();
+      if (pruned > 0) { saveCompletedTasksLocal(); updateCompletedNavBadge(); }
+      if (document.getElementById('page-completed')?.style.display !== 'none') renderCompletedTasksPage();
+    } catch(e){}
   }, 60000);
 }
 
@@ -1903,7 +1966,8 @@ async function loadReminders() {
           lateAck: !!r.late_ack,
           outletInformed: !!r.outlet_informed,
           needsReplacement: !!r.needs_replacement,
-          replacementAt: r.replacement_at || ''
+          replacementAt: r.replacement_at || '',
+          completedAt: r.completed_at || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1934,6 +1998,7 @@ async function persistReminder(shiftId) {
       outlet_informed: !!r.outletInformed,
       needs_replacement: !!r.needsReplacement,
       replacement_at: r.replacementAt || null,
+      completed_at: r.completedAt || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -1972,7 +2037,8 @@ function subscribeToReminderChanges() {
             lateAck: !!row.late_ack,
             outletInformed: !!row.outlet_informed,
             needsReplacement: !!row.needs_replacement,
-            replacementAt: row.replacement_at || ''
+            replacementAt: row.replacement_at || '',
+            completedAt: row.completed_at || ''
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1985,6 +2051,7 @@ function subscribeToReminderChanges() {
           loadTaskShiftCache().then(() => {
             if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
             if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+            if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
           }).catch(()=>{});
         }
       })
@@ -2018,7 +2085,8 @@ async function silentSyncReminders() {
         lateAck: !!r.late_ack,
         outletInformed: !!r.outlet_informed,
         needsReplacement: !!r.needs_replacement,
-        replacementAt: r.replacement_at || ''
+        replacementAt: r.replacement_at || '',
+        completedAt: r.completed_at || ''
       };
     });
     // Find shift IDs where something changed
@@ -2047,6 +2115,7 @@ async function silentSyncReminders() {
         loadTaskShiftCache().then(() => {
           if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
           if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+          if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
           if (typeof renderMetrics === 'function' && document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') {
             try { renderMetrics(); } catch(e){}
           }
@@ -2071,6 +2140,20 @@ async function undoFullAck(shiftId) {
 // Manually clear a dispute flag (ops resolved it) without wiping reminder progress
 async function clearDispute(shiftId) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  const s = (taskShiftCache[String(shiftId)]) || allShifts.find(x => String(x.id) === String(shiftId));
+  if (r.disputed && s) {
+    await logCompletedTask({
+      id: shiftId, type: 'dispute',
+      worker: s.worker_name || '', outlet: s.outlet || '', role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      reason: r.disputeReason || '',
+      outcome: 'Dispute dismissed (no cancellation)',
+      completedAt: new Date().toISOString()
+    });
+  }
   shiftReminders[shiftId].disputed = false;
   shiftReminders[shiftId].disputeKind = '';
   shiftReminders[shiftId].disputeReason = '';
@@ -2102,6 +2185,7 @@ async function flagLate(shiftId, reason) {
   shiftReminders[shiftId].lateAt = new Date().toISOString();
   shiftReminders[shiftId].lateAck = false;
   shiftReminders[shiftId].outletInformed = false;
+  shiftReminders[shiftId].completedAt = '';
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   renderTasksPanel();
@@ -2128,24 +2212,55 @@ async function markOutletInformed(shiftId) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
   shiftReminders[shiftId].outletInformed = true;
   shiftReminders[shiftId].lateAck = true; // informing implies acknowledged
+  // Late task is now fully handled → stamp completion time (drives the 18h collapse
+  // window + Completed Tasks log). Only set once.
+  if (!shiftReminders[shiftId].completedAt) shiftReminders[shiftId].completedAt = new Date().toISOString();
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   renderTasksPanel();
   await persistReminder(shiftId);
-  const s = allShifts.find(x => String(x.id) === String(shiftId));
-  if (s) await logActivity('Outlet informed of late arrival',
-    `Outlet ${s.outlet || '—'} was informed that ${s.worker_name || 'the worker'} will arrive late.`,
-    'shift', shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
-  toast('✓ Outlet informed');
+  const s = (taskShiftCache[String(shiftId)]) || allShifts.find(x => String(x.id) === String(shiftId));
+  if (s) {
+    await logActivity('Outlet informed of late arrival',
+      `Outlet ${s.outlet || '—'} was informed that ${s.worker_name || 'the worker'} will arrive late.`,
+      'shift', shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+    await logCompletedTask({
+      id: shiftId, type: 'late',
+      worker: s.worker_name || '', outlet: s.outlet || '', role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      reason: shiftReminders[shiftId].lateReason || '',
+      outcome: 'Acknowledged + outlet informed',
+      completedAt: shiftReminders[shiftId].completedAt
+    });
+  }
+  toast('✓ Outlet informed — task completed');
 }
-// Fully clear a late notice (resolved)
+// Fully clear a late notice (resolved manually)
 async function clearLate(shiftId) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  // Record it in the Completed Tasks log before wiping the live flag
+  const r = shiftReminders[shiftId];
+  const s = (taskShiftCache[String(shiftId)]) || allShifts.find(x => String(x.id) === String(shiftId));
+  if (r.lateNotified && s) {
+    await logCompletedTask({
+      id: shiftId, type: 'late',
+      worker: s.worker_name || '', outlet: s.outlet || '', role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      reason: r.lateReason || '',
+      outcome: (r.lateAck && r.outletInformed) ? 'Acknowledged + outlet informed' : 'Cleared by ops',
+      completedAt: r.completedAt || new Date().toISOString()
+    });
+  }
   shiftReminders[shiftId].lateNotified = false;
   shiftReminders[shiftId].lateReason = '';
   shiftReminders[shiftId].lateAt = '';
   shiftReminders[shiftId].lateAck = false;
   shiftReminders[shiftId].outletInformed = false;
+  shiftReminders[shiftId].completedAt = '';
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   renderTasksPanel();
@@ -2156,13 +2271,23 @@ async function clearLate(shiftId) {
 // leaves the Tasks panel and the Replacement-needed list across all dates).
 async function dismissReplacement(shiftId) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  const s = (taskShiftCache[String(shiftId)]) || allShifts.find(x => String(x.id) === String(shiftId));
+  if (r.needsReplacement && s) {
+    await logCompletedTask({
+      id: shiftId, type: 'replacement',
+      worker: r.replacedWorker || '', outlet: s.outlet || '', role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      reason: r.replacedWorker ? `${r.replacedWorker} dropped out` : 'Worker dropped out',
+      outcome: 'Slot re-filled / dismissed',
+      completedAt: new Date().toISOString()
+    });
+  }
   shiftReminders[shiftId].needsReplacement = false;
   shiftReminders[shiftId].replacementAt = '';
   shiftReminders[shiftId].replacedWorker = '';
-  // Clean up the cross-date cache so counts update immediately
-  if (taskShiftCache[String(shiftId)] && !needsReplacement(taskShiftCache[String(shiftId)])) {
-    // keep in cache only if still referenced by another flag; harmless either way
-  }
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   renderTasksPanel();
@@ -2454,6 +2579,7 @@ function switchPage(name, btn) {
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
   if (name === 'activity') { loadActivityLog(); }
+  if (name === 'completed') { loadCompletedTasks().then(() => renderCompletedTasksPage()); }
   if (name === 'knowledge') { renderKnowledgePage(); }
   if (name === 'analytics') { loadAnalytics(); }
 }
@@ -3595,6 +3721,7 @@ function replacementNeededCountForLoadedShifts() {
 function getOpenTasks() {
   const tasks = [];
   const todayStr = formatDate(new Date());
+  const hideBeforeMs = Date.now() - TASK_CARD_DONE_HIDE_HOURS * 3600000;
   taskShiftPool().forEach(s => {
     const r = shiftReminders[s.id] || {};
     const wn = String(s.worker_name || '').trim();
@@ -3613,11 +3740,26 @@ function getOpenTasks() {
         isToday,
         kind: r.disputeKind || 'cancel',
         reason: r.disputeReason || '',
-        at: r.disputeAt || ''
+        at: r.disputeAt || '',
+        done: false
       });
     }
     // Late-arrival notice — needs acknowledge + inform outlet
     if (r.lateNotified && !s.cancelled) {
+      const done = !!r.lateAck && !!r.outletInformed;
+      // A completed late task collapses to the bottom, then disappears from the
+      // panel TASK_CARD_DONE_HIDE_HOURS (18h) after it was completed. It remains
+      // permanently visible on the Completed Tasks page (until 60-day prune).
+      // If a done task somehow lacks a completedAt stamp (e.g. set on another device
+      // before this version), fall back to lateAt so it still ages out of the panel.
+      let completedAt = r.completedAt || '';
+      if (done && !completedAt) completedAt = r.lateAt || '';
+      if (done && completedAt) {
+        const cMs = new Date(completedAt).getTime();
+        if (!isNaN(cMs) && cMs < hideBeforeMs) {
+          return; // older than 18h → hide from the open Tasks panel
+        }
+      }
       tasks.push({
         type: 'late',
         id: s.id,
@@ -3630,7 +3772,8 @@ function getOpenTasks() {
         at: r.lateAt || '',
         acked: !!r.lateAck,
         outletInformed: !!r.outletInformed,
-        done: !!r.lateAck && !!r.outletInformed
+        done,
+        completedAt
       });
     }
     // Replacement-needed open slot — cancellation processed, slot still to fill
@@ -3644,23 +3787,34 @@ function getOpenTasks() {
         date: s.shift_date,
         start, end,
         isToday,
-        at: r.replacementAt || ''
+        at: r.replacementAt || '',
+        done: false
       });
     }
   });
-  // Sort: today first; disputes, then late, then replacements; not-done before done; earliest start first
-  const typeRank = t => t.type === 'dispute' ? 0 : (t.type === 'late' ? 10 : 20);
-  const rank = t => (t.isToday ? 0 : 1) * 100 + typeRank(t) + (t.done ? 5 : 0);
-  tasks.sort((a,b) => {
-    const ra = rank(a), rb = rank(b);
-    if (ra !== rb) return ra - rb;
+  // Sort:
+  //  1) incomplete tasks always on top; completed (collapsed) tasks at the bottom.
+  //  2) within incomplete: NEWEST first (most recently raised at the very top).
+  //  3) within completed: most recently completed first.
+  tasks.sort((a, b) => {
+    if (!!a.done !== !!b.done) return a.done ? 1 : -1;   // incomplete before done
+    if (a.done && b.done) {
+      // newest completion on top of the completed group
+      return new Date(b.completedAt || 0) - new Date(a.completedAt || 0);
+    }
+    // both incomplete → newest raised first (by the timestamp the task appeared)
+    const at = new Date(a.at || 0).getTime() || 0;
+    const bt = new Date(b.at || 0).getTime() || 0;
+    if (at !== bt) return bt - at;                        // newer 'at' first
+    // tie-break: today first, then by shift date/time
+    if (a.isToday !== b.isToday) return a.isToday ? -1 : 1;
     return (a.date || '').localeCompare(b.date || '') || (a.start || '').localeCompare(b.start || '');
   });
   return tasks;
 }
-// Count of tasks still requiring action (excludes fully-completed late notices)
+// Count of tasks still requiring action (excludes completed/collapsed tasks)
 function openTaskCount() {
-  return getOpenTasks().filter(t => t.type !== 'late' || !t.done).length;
+  return getOpenTasks().filter(t => !t.done).length;
 }
 // Keep the always-visible sidebar Tasks badge in sync (works on every page)
 function updateTasksNavBadge() {
@@ -3681,6 +3835,67 @@ function openTasksPanel() {
 function closeTasksPanel() {
   const m = document.getElementById('tasks-modal');
   if (m) m.classList.remove('open');
+}
+// ── Replacement-needed panel (cross-date: today + all upcoming) ──
+async function openReplacementPanel() {
+  // Make sure the cross-date cache is fresh so future-dated slots show up
+  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); } catch(e){} }
+  renderReplacementPanel();
+  const m = document.getElementById('replacement-modal');
+  if (m) m.classList.add('open');
+}
+function closeReplacementPanel() {
+  const m = document.getElementById('replacement-modal');
+  if (m) m.classList.remove('open');
+}
+function renderReplacementPanel() {
+  const el = document.getElementById('replacement-list');
+  if (!el) return;
+  const todayStr = formatDate(new Date());
+  // Today + future only (past unfilled slots can't be re-filled). Sorted by date/time.
+  const all = getReplacementNeeded().filter(r => (r.date || '') >= todayStr);
+  if (!all.length) {
+    el.innerHTML = `<div style="text-align:center;padding:30px 12px;color:var(--text3);">
+      <div style="font-size:28px;margin-bottom:8px;">✓</div>
+      <div style="font-weight:600;color:var(--green);">No slots awaiting replacement</div>
+      <div class="sub-text" style="margin-top:4px;">When a worker cancels and the booking still stands, the open slot appears here for today and all upcoming dates.</div>
+    </div>`;
+    return;
+  }
+  // Group by date so today and each future day get a clear header
+  const groups = {};
+  all.forEach(r => { (groups[r.date] = groups[r.date] || []).push(r); });
+  const dates = Object.keys(groups).sort((a,b) => a.localeCompare(b));
+  el.innerHTML = dates.map(d => {
+    const isToday = d === todayStr;
+    const header = `<div class="task-completed-divider" style="color:${isToday?'var(--red)':'var(--text3)'};border-top-style:solid;">${shiftDateLabel(d)}${isToday?' · TODAY':''} · ${groups[d].length} slot${groups[d].length!==1?'s':''}</div>`;
+    const cards = groups[d].map(r => {
+      const tRange = shiftTimeRange(r.start, r.end);
+      const whoTxt = r.worker ? `${escapeHtml(r.worker)} dropped out` : 'Worker dropped out';
+      const when = r.at ? `<span class="task-when">${relTime(r.at)}</span>` : '';
+      return `<div class="task-card task-replacement">
+        <div class="task-head">
+          <span class="task-tag tag-replacement">🔁 Replacement needed</span>
+          ${isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+          ${when}
+        </div>
+        <div class="task-body">
+          <div class="task-title">${whoTxt} — slot open${r.role ? ' · '+escapeHtml(r.role) : ''}</div>
+          <div class="task-shift">📅 <strong>${shiftDateLabel(r.date)}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>
+          <div class="task-meta">${escapeHtml(r.outlet)} · slot returned to Available</div>
+        </div>
+        <div class="task-actions">
+          <button class="btn btn-primary btn-sm" onclick="jumpToShiftFromReplacement('${escapeAttr(String(r.id))}','${escapeAttr(String(r.date||''))}')">Assign / re-fill</button>
+          <button class="btn btn-ghost btn-sm" onclick="dismissReplacement('${escapeAttr(String(r.id))}').then(()=>renderReplacementPanel())">Mark filled / dismiss</button>
+        </div>
+      </div>`;
+    }).join('');
+    return header + cards;
+  }).join('');
+}
+function jumpToShiftFromReplacement(shiftId, dateStr) {
+  closeReplacementPanel();
+  if (typeof jumpToShift === 'function' && dateStr) jumpToShift(dateStr, shiftId);
 }
 function relTime(iso) {
   if (!iso) return '';
@@ -3727,12 +3942,21 @@ function renderTasksPanel() {
     </div>`;
     return;
   }
+  let lastDone = false;
   el.innerHTML = tasks.map(t => {
     const dLabel = shiftDateLabel(t.date);
     const tRange = shiftTimeRange(t.start, t.end);
     // Prominent shift line shown on every card: date + timing
     const shiftLine = `<div class="task-shift">📅 <strong>${dLabel}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>`;
     const when = t.at ? `<span class="task-when">${relTime(t.at)}</span>` : '';
+    // Separator before the first completed (collapsed) task
+    let sep = '';
+    if (t.done && !lastDone) { sep = '<div class="task-completed-divider">Completed</div>'; lastDone = true; }
+    const card = renderOneTaskCard(t, dLabel, tRange, shiftLine, when);
+    return sep + card;
+  }).join('');
+}
+function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
     if (t.type === 'dispute') {
       const kindTxt = t.kind === 'cancel' ? 'wants to cancel'
         : (t.kind === 'cantmake' ? "can't make this shift" : 'flagged an issue');
@@ -3779,7 +4003,21 @@ function renderTasksPanel() {
     const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
     const ackBadge = t.acked ? '<span class="task-tag tag-done">✓ Acknowledged</span>' : '';
     const informedBadge = t.outletInformed ? '<span class="task-tag tag-done">✓ Outlet informed</span>' : '';
-    return `<div class="task-card task-late ${t.done?'task-done':''}">
+    // COMPLETED late task → collapsed, compact card pinned to the bottom of the panel.
+    if (t.done) {
+      const compWhen = t.completedAt ? `<span class="task-when">done ${relTime(t.completedAt)}</span>` : when;
+      return `<div class="task-card task-late task-done task-collapsed">
+        <div class="task-head">
+          <span class="task-tag tag-late">⏰ Late arrival</span>
+          <span class="task-tag tag-done">✓ Done</span>
+          ${compWhen}
+        </div>
+        <div class="task-body">
+          <div class="task-collapsed-line"><strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)} · ${shiftDateLabel(t.date)}${tRange ? ' · '+tRange : ''}</div>
+        </div>
+      </div>`;
+    }
+    return `<div class="task-card task-late">
       <div class="task-head">
         <span class="task-tag tag-late">⏰ Late arrival</span>
         ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
@@ -3799,7 +4037,6 @@ function renderTasksPanel() {
         <button class="btn btn-ghost btn-sm" onclick="clearLate('${escapeAttr(String(t.id))}'); renderTasksPanel();">Clear</button>
       </div>
     </div>`;
-  }).join('');
 }
 // Jump to the shift's day in attendance from a task, closing the panel first
 function jumpToShiftFromTask(shiftId, dateStr) {
@@ -3889,6 +4126,157 @@ function taskShiftPool() {
   const pool = Object.assign({}, taskShiftCache);
   (allShifts || []).forEach(s => { if (s && s.id != null) pool[String(s.id)] = s; });
   return Object.values(pool);
+}
+
+// ── Completed Tasks log ───────────────────────────────────────
+// A durable record of every task an agent finished, shown on the Completed Tasks
+// page. Entries older than COMPLETED_TASK_RETENTION_DAYS (60) are auto-pruned.
+function saveCompletedTasksLocal() {
+  try { localStorage.setItem('completed_tasks', JSON.stringify(completedTasks)); } catch(e) {}
+}
+function pruneCompletedTasks() {
+  const cutoff = Date.now() - COMPLETED_TASK_RETENTION_DAYS * 86400000;
+  const before = completedTasks.length;
+  completedTasks = (completedTasks || []).filter(t => {
+    const ts = new Date(t.completedAt || 0).getTime();
+    return !isNaN(ts) && ts >= cutoff;
+  });
+  return before - completedTasks.length; // number pruned
+}
+async function loadCompletedTasks() {
+  // localStorage first for instant paint
+  try { completedTasks = JSON.parse(localStorage.getItem('completed_tasks') || '[]'); } catch(e) { completedTasks = []; }
+  if (!Array.isArray(completedTasks)) completedTasks = [];
+  // Then Supabase (source of truth for the whole team), if the table exists
+  try {
+    const cutoffIso = new Date(Date.now() - COMPLETED_TASK_RETENTION_DAYS * 86400000).toISOString();
+    const { data, error } = await supabaseClient
+      .from('completed_tasks')
+      .select('*')
+      .gte('completed_at', cutoffIso)
+      .order('completed_at', { ascending: false })
+      .limit(1000);
+    if (!error && Array.isArray(data)) {
+      completedTasks = data.map(r => ({
+        key: r.id != null ? String(r.id) : (r.task_key || ''),
+        type: r.task_type || '',
+        worker: r.worker_name || '',
+        outlet: r.outlet || '',
+        role: r.role || '',
+        date: r.shift_date || '',
+        start: r.scheduled_start ? String(r.scheduled_start).slice(0,5) : '',
+        end: r.scheduled_end ? String(r.scheduled_end).slice(0,5) : '',
+        reason: r.reason || '',
+        outcome: r.outcome || '',
+        completedAt: r.completed_at || ''
+      }));
+    }
+  } catch(e) { /* table may not exist yet — keep localStorage copy */ }
+  pruneCompletedTasks();
+  saveCompletedTasksLocal();
+}
+// Record a finished task. De-dupes on shift_id+type so re-finishing the same item
+// doesn't create duplicate rows. Also fire-and-forget prunes old rows in Supabase.
+async function logCompletedTask(entry) {
+  if (!entry || !entry.type) return;
+  const completedAt = entry.completedAt || new Date().toISOString();
+  const rec = {
+    key: `${entry.id}-${entry.type}`,
+    type: entry.type,
+    worker: entry.worker || '',
+    outlet: entry.outlet || '',
+    role: entry.role || '',
+    date: entry.date || '',
+    start: entry.start || '',
+    end: entry.end || '',
+    reason: entry.reason || '',
+    outcome: entry.outcome || '',
+    completedAt
+  };
+  // De-dupe in local array
+  completedTasks = (completedTasks || []).filter(t => t.key !== rec.key);
+  completedTasks.unshift(rec);
+  pruneCompletedTasks();
+  saveCompletedTasksLocal();
+  // Persist to Supabase (best-effort)
+  try {
+    await supabaseClient.from('completed_tasks').upsert({
+      task_key: rec.key,
+      task_type: rec.type,
+      worker_name: rec.worker || null,
+      outlet: rec.outlet || null,
+      role: rec.role || null,
+      shift_date: rec.date || null,
+      scheduled_start: rec.start || null,
+      scheduled_end: rec.end || null,
+      reason: rec.reason || null,
+      outcome: rec.outcome || null,
+      completed_at: rec.completedAt
+    }, { onConflict: 'task_key' });
+    // Opportunistic server-side prune of rows past retention
+    const cutoffIso = new Date(Date.now() - COMPLETED_TASK_RETENTION_DAYS * 86400000).toISOString();
+    await supabaseClient.from('completed_tasks').delete().lt('completed_at', cutoffIso);
+  } catch(e) { /* keep local copy; team sync requires the completed_tasks table */ }
+  if (typeof renderCompletedTasksPage === 'function' && document.getElementById('page-completed')?.style.display !== 'none') {
+    try { renderCompletedTasksPage(); } catch(e){}
+  }
+  if (typeof updateCompletedNavBadge === 'function') { try { updateCompletedNavBadge(); } catch(e){} }
+}
+
+// ── Completed Tasks page UI ───────────────────────────────────
+function updateCompletedNavBadge() {
+  const badge = document.getElementById('completed-nav-badge');
+  if (!badge) return;
+  const n = (completedTasks || []).length;
+  badge.textContent = n > 99 ? '99+' : String(n);
+  badge.classList.toggle('show', n > 0);
+}
+async function refreshCompletedTasks() {
+  await loadCompletedTasks();
+  renderCompletedTasksPage();
+  toast('✓ Refreshed');
+}
+function completedTaskTypeMeta(type) {
+  if (type === 'late') return { tag: 'tag-late', icon: '⏰', label: 'Late arrival' };
+  if (type === 'dispute') return { tag: 'tag-dispute', icon: '🚫', label: 'Cancellation / dispute' };
+  if (type === 'replacement') return { tag: 'tag-replacement', icon: '🔁', label: 'Replacement' };
+  return { tag: '', icon: '•', label: type || 'Task' };
+}
+function renderCompletedTasksPage() {
+  const body = document.getElementById('completed-body');
+  const countEl = document.getElementById('completed-count');
+  if (!body) return;
+  pruneCompletedTasks();
+  const filter = document.getElementById('completed-filter')?.value || 'all';
+  let rows = (completedTasks || []).slice().sort((a,b) => new Date(b.completedAt||0) - new Date(a.completedAt||0));
+  if (filter !== 'all') rows = rows.filter(r => r.type === filter);
+  if (countEl) countEl.textContent = `${rows.length} task${rows.length !== 1 ? 's' : ''}`;
+  if (!rows.length) {
+    body.innerHTML = '<div class="empty-state"><div class="empty-icon">✅</div><p>No completed tasks' + (filter !== 'all' ? ' of this type' : '') + ' yet.</p><p class="sub-text" style="margin-top:4px;">Completed tasks appear here and are kept for 60 days.</p></div>';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const meta = completedTaskTypeMeta(r.type);
+    const dLabel = shiftDateLabel(r.date);
+    const tRange = shiftTimeRange(r.start, r.end);
+    const reason = r.reason ? `<div class="task-reason" style="margin-top:6px;">“${escapeHtml(r.reason)}”</div>` : '';
+    const outcome = r.outcome ? `<div class="task-meta" style="margin-top:4px;color:var(--green);">✓ ${escapeHtml(r.outcome)}</div>` : '';
+    const completedWhen = r.completedAt ? relTime(r.completedAt) : '';
+    const completedFull = r.completedAt ? new Date(r.completedAt).toLocaleString('en-SG', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+    return `<div class="task-card task-done" style="opacity:0.95;">
+      <div class="task-head">
+        <span class="task-tag ${meta.tag}">${meta.icon} ${meta.label}</span>
+        <span class="task-when" title="${escapeAttr(completedFull)}">done ${completedWhen}</span>
+      </div>
+      <div class="task-body">
+        <div class="task-title">${escapeHtml(r.worker || 'Worker')}${r.role ? ' · '+escapeHtml(r.role) : ''}</div>
+        <div class="task-shift">📅 <strong>${dLabel}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>
+        <div class="task-meta">${escapeHtml(r.outlet || '')}</div>
+        ${reason}
+        ${outcome}
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // ── Render table ─────────────────────────────────────────────
@@ -5177,7 +5565,29 @@ alter table public.shift_reminders
   add column if not exists late_ack         boolean default false,
   add column if not exists outlet_informed  boolean default false,
   add column if not exists needs_replacement boolean default false,  -- slot awaiting re-fill after a processed worker cancellation
-  add column if not exists replacement_at    timestamptz;            -- when the slot became replacement-needed
+  add column if not exists replacement_at    timestamptz,            -- when the slot became replacement-needed
+  add column if not exists completed_at       timestamptz;           -- when a late task was fully handled (drives 18h collapse)
+
+-- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
+--     Entries older than 60 days are auto-deleted by the app, but you can also
+--     schedule a periodic cleanup in Supabase if you like.
+create table if not exists public.completed_tasks (
+  id              bigint generated always as identity primary key,
+  task_key        text unique not null,        -- '<shift_id>-<type>' (de-dupe key)
+  task_type       text not null,               -- 'late' | 'dispute' | 'replacement'
+  worker_name     text,
+  outlet          text,
+  role            text,
+  shift_date      date,
+  scheduled_start text,
+  scheduled_end   text,
+  reason          text,
+  outcome         text,
+  completed_at    timestamptz not null default now()
+);
+create index if not exists completed_tasks_completed_at_idx on public.completed_tasks (completed_at desc);
+-- Optional: keep the table tidy server-side (the app also prunes locally)
+-- delete from public.completed_tasks where completed_at < now() - interval '60 days';
 
 -- 2) Periskope webhook Edge Function logic (deploy as periskope-webhook).
 --    For each inbound message.created event, find the worker's most recent
@@ -5365,8 +5775,18 @@ async function confirmAssignWorker(id) {
     try { await supabaseClient.from('workers').insert({ name }); await loadWorkers(); } catch(e) {}
   }
   await logActivity('Assigned worker to slot', `${name} assigned to slot at ${s.outlet} on ${s.shift_date}`, 'shift', id, { worker_name: name, outlet: s.outlet });
-  // Re-filling a slot clears any replacement-needed flag on it
+  // Re-filling a slot clears any replacement-needed flag on it (and logs completion)
   if (shiftReminders[id] && shiftReminders[id].needsReplacement) {
+    await logCompletedTask({
+      id, type: 'replacement',
+      worker: shiftReminders[id].replacedWorker || '', outlet: s.outlet || '', role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      reason: shiftReminders[id].replacedWorker ? `${shiftReminders[id].replacedWorker} dropped out` : 'Worker dropped out',
+      outcome: `Re-filled with ${name}`,
+      completedAt: new Date().toISOString()
+    });
     shiftReminders[id].needsReplacement = false;
     shiftReminders[id].replacementAt = '';
     shiftReminders[id].replacedWorker = '';
@@ -5432,6 +5852,16 @@ async function confirmAssignSR() {
   }
   await logActivity(`Assigned ${name} with special rate`, `${name} at ${currencySymbolForOutlet(s.outlet)}${srRate.toFixed(2)}/hr (base: ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr) — ${s.outlet} on ${s.shift_date}`, 'shift', s.id, {});
   if (shiftReminders[s.id] && shiftReminders[s.id].needsReplacement) {
+    await logCompletedTask({
+      id: s.id, type: 'replacement',
+      worker: shiftReminders[s.id].replacedWorker || '', outlet: s.outlet || '', role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      reason: shiftReminders[s.id].replacedWorker ? `${shiftReminders[s.id].replacedWorker} dropped out` : 'Worker dropped out',
+      outcome: `Re-filled with ${name} (special rate)`,
+      completedAt: new Date().toISOString()
+    });
     shiftReminders[s.id].needsReplacement = false;
     shiftReminders[s.id].replacementAt = '';
     shiftReminders[s.id].replacedWorker = '';
@@ -5822,7 +6252,7 @@ function renderMetrics() {
     ${card('clocked_in','Clocked in', present, 'blue')}
     ${card('pending_clock_in','Pending clock-in', pendingClockIn, pendingClockIn>0?'amber':'green', pendingClockInLabel, pendingClockIn)}
     ${card('pending_clock_out','Pending clock-out', pendingClockOut, pendingClockOut>0?'amber':'green', pendingClockOutLabel, pendingClockOut)}
-    ${card('replacement_needed','🔁 Replacement needed', replacementNeeded, replacementNeeded>0?'red':'green', replacementNeeded>0?'Re-fill these slots':'', replacementNeeded)}
+    ${`<div class="metric-card clickable metric-card-replacement ${replacementNeeded>0?'tasks-hot':''}" onclick="openReplacementPanel()">${notificationBubble(replacementNeeded)}<div class="metric-label">🔁 Replacement needed</div><div class="metric-val ${replacementNeeded>0?'red':'green'}">${replacementNeeded}</div><div class="metric-sub">${replacementNeeded>0?'Today + upcoming':'All filled'}</div></div>`}
     ${card('paid_out','Total payment', countrySplitMetric(totalPaidOutByCountry, 'green'), '', '', unpaidPaidOut)}
     ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
     ${card('late','Late', late, late>0?'red':'green')}
