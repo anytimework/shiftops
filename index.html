@@ -4616,7 +4616,7 @@ function renderTaskThread(kind, id) {
     // Combine and sort by timestamp
     const allMsgs = [...supabaseThread, ...localReplies].sort((a, b) => new Date(a.at||0).getTime() - new Date(b.at||0).getTime());
     // Deduplicate (same text + direction within 5s)
-    const seen = new Set<string>();
+    const seen = new Set();
     allMsgs.forEach(m => {
       const key = m.direction + '|' + (m.text||'').slice(0,30) + '|' + Math.floor(new Date(m.at||0).getTime()/5000);
       if (seen.has(key)) return;
