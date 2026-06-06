@@ -6455,7 +6455,7 @@ function buildNightReminderMessage(s) {
 function buildClockinReminderMessage(s) {
   const start = (s.scheduled_start || '').slice(0,5);
   const outlet = s.outlet || '';
-  return `⏰ *Clock-in Reminder*\n\nHi ${s.worker_name}! Your shift starts at *${start}* today at *${outlet}*.\n\nPlease clock in via ShiftOps when you arrive. 👍\nRunning late or *can't make it*? Reply here right away so we can help.`;
+  return `⏰ *Clock-in Reminder*\n\nHi ${s.worker_name}! Your shift starts at *${start}* today at *${outlet}*.\n\nPlease clock in via Anytime Work App when you arrive. 👍\nRunning late or *can't make it*? Reply here right away so we can help.`;
 }
 
 // ── Auto-send reminders (runs on polling tick) ───────────────────────────────
