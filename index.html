@@ -2239,17 +2239,30 @@ async function acknowledgeDispute(shiftId) {
       `${droppedWorker || 'Worker'}'s drop-out at ${s.outlet || '—'} on ${_d} was acknowledged. Slot returned to Available and flagged for replacement (no penalty applied).`,
       'shift', shiftId, { shift_date: s.shift_date, worker_name: droppedWorker, outlet: s.outlet });
   }
-  await loadWorkers();
-  updateReminderPanelInPlace(shiftId);
-  checkReminderAlerts();
-  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); } catch(e){} }
-  renderTasksPanel();
-  if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
-  if (typeof renderMetrics === 'function' && document.getElementById('metrics')) { try { renderMetrics(); } catch(e){} }
-  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-  // If the acknowledged shift is on the currently-viewed day, refresh the grid too
-  if (s && s.shift_date === formatDate(currentDate)) { try { await loadShifts(); } catch(e){} }
-  toast('✓ Acknowledged — moved to Replacement needed');
+ await loadWorkers();
+    // Update local cache immediately WITHOUT re-fetching from DB (re-fetch causes race
+    // condition where the slot disappears from Replacement Needed before it re-appears)
+    if (taskShiftCache[String(shiftId)]) {
+      taskShiftCache[String(shiftId)] = Object.assign(
+        {}, taskShiftCache[String(shiftId)],
+        { worker_name: 'Available', cancelled: false }
+      );
+    } else if (s) {
+      taskShiftCache[String(shiftId)] = Object.assign({}, s, { worker_name: 'Available', cancelled: false });
+    }
+    updateReminderPanelInPlace(shiftId);
+    checkReminderAlerts();
+    if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+    renderTasksPanel();
+    if (document.getElementById('replacement-modal')?.classList.contains('open')) {
+      try { renderReplacementPanel(); } catch(e){}
+    }
+    if (typeof renderMetrics === 'function' && document.getElementById('metrics')) {
+      try { renderMetrics(); } catch(e){}
+    }
+    // Reload the grid only if viewing this shift's date — safe to do after cache is updated
+    if (s && s.shift_date === formatDate(currentDate)) { try { await loadShifts(); } catch(e){} }
+    toast('✓ Acknowledged — moved to Replacement needed');
 }
 // Manually flag a dispute from the panel (when ops hears verbally / outside Periskope)
 async function flagDispute(shiftId, kind) {
