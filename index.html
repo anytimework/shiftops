@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
 <!-- Build patch: v31 — Tasks panel: new/incomplete tasks pinned to top (newest first); completed late tasks collapse into a compact card under a "Completed" divider and auto-disappear from the panel 18h after completion. New sidebar "Completed Tasks" page logs every finished task (late/dispute/replacement) with outcome + timestamp, kept 60 days then auto-pruned (local + Supabase completed_tasks table). Replacement-needed card now opens a dedicated cross-date panel grouping today + all upcoming open slots by date, regardless of viewed dashboard date. New columns: shift_reminders.completed_at; new table completed_tasks. -->
@@ -1970,7 +1971,8 @@ async function loadReminders() {
           needsReplacement: !!r.needs_replacement,
           replacementAt: r.replacement_at || '',
           completedAt: r.completed_at || '',
-          lastReminderAt: r.last_reminder_at || ''
+          lastReminderAt: r.last_reminder_at || '',
+        replacedWorker: r.replaced_worker || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2001,6 +2003,7 @@ async function persistReminder(shiftId) {
       outlet_informed: !!r.outletInformed,
       needs_replacement: !!r.needsReplacement,
       replacement_at: r.replacementAt || null,
+      replaced_worker: r.replacedWorker || null,
       completed_at: r.completedAt || null,
       last_reminder_at: r.lastReminderAt || null,
       updated_at: new Date().toISOString()
@@ -2043,7 +2046,8 @@ function subscribeToReminderChanges() {
             needsReplacement: !!row.needs_replacement,
             replacementAt: row.replacement_at || '',
             completedAt: row.completed_at || '',
-            lastReminderAt: row.last_reminder_at || ''
+            lastReminderAt: row.last_reminder_at || '',
+            replacedWorker: row.replaced_worker || ''
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2092,7 +2096,8 @@ async function silentSyncReminders() {
         needsReplacement: !!r.needs_replacement,
         replacementAt: r.replacement_at || '',
         completedAt: r.completed_at || '',
-        lastReminderAt: r.last_reminder_at || ''
+        lastReminderAt: r.last_reminder_at || '',
+      replacedWorker: r.replaced_worker || ''
       };
     });
     // Find shift IDs where something changed
@@ -2136,6 +2141,21 @@ async function toggleReminder(shiftId, field, checked) {
   updateReminderPanelInPlace(shiftId); // instant local update, no scroll jump
   checkReminderAlerts();
   await persistReminder(shiftId);      // sync to Supabase for all other users
+}
+// Quick "worker acknowledged" from a reminder alert banner. Ticks the relevant
+// acknowledgement: if a clock-in reminder was sent, mark clock-in responded;
+// otherwise (or in addition) mark the night reminder acknowledged. This clears
+// the alert from the top banner without needing to scroll to the worker's row.
+async function markWorkerAcknowledged(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  if (r.clockinSent) r.clockinResponded = true;
+  if (r.nightSent || !r.clockinSent) r.nightAcked = true;
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  await persistReminder(shiftId);
+  const s = (taskShiftCache[String(shiftId)]) || (allShifts || []).find(x => String(x.id) === String(shiftId));
+  toast(`✓ ${s ? (String(s.worker_name||'Worker').split(' ')[0]) : 'Worker'} marked acknowledged`);
 }
 async function undoFullAck(shiftId) {
   shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '' };
@@ -2404,10 +2424,12 @@ function reminderPanelHtml(s) {
       : (r.disputeKind === 'cantmake' ? "says they CAN'T MAKE this shift" : 'flagged an issue with this shift');
     const when = r.disputeAt ? new Date(r.disputeAt).toLocaleString('en-SG', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
     const reason = r.disputeReason ? `<div class="dispute-reason">“${escapeHtml(r.disputeReason)}”</div>` : '';
+    const who = workerName ? `<span style="opacity:0.95;">👤 ${escapeHtml(workerName)}</span> ` : '';
     return `<div class="dispute-banner">
-      <div class="dispute-head">⚠️ <strong>Worker ${kindLabel}</strong>${when ? ` <span class="dispute-when">· ${when}</span>` : ''}</div>
+      <div class="dispute-head">⚠️ ${who}<strong>${kindLabel}</strong>${when ? ` <span class="dispute-when">· ${when}</span>` : ''}</div>
       ${reason}
       <div class="dispute-actions">
+        <button class="btn-dispute-act" style="background:var(--accent);color:#fff;border:none;" onclick="acknowledgeDispute('${sidEarly}')" title="Confirm the worker is out and move this to Replacement needed (no penalty applied)">Acknowledge → Replacement</button>
         <button class="btn-dispute-act cancel" onclick="openCancelFromDispute('${sidEarly}')">🚫 Process cancellation</button>
         <button class="btn-dispute-act clear" onclick="clearDispute('${sidEarly}')">✓ Resolved / clear</button>
       </div>
@@ -2521,7 +2543,7 @@ function checkReminderAlerts() {
 
     // Night reminder: collect all who haven't acked (past 8am)
     if (r.nightSent && !r.nightAcked && nowMins >= 480) {
-      nightUnacked.push({ name: workerName, outlet: s.outlet || '', time: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
+      nightUnacked.push({ id: s.id, name: workerName, outlet: s.outlet || '', time: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
     }
     // Clock-in: individual alert, within 2hrs of shift start
     if (r.clockinSent && !r.clockinResponded && s.scheduled_start) {
@@ -2530,7 +2552,7 @@ function checkReminderAlerts() {
       if (nowMins >= shiftMins - 120) {
         const remaining = shiftMins - nowMins;
         const label = remaining > 0 ? `in ${remaining} min` : 'starting NOW';
-        clockinAlerts.push({ name: workerName, outlet: s.outlet || '', label });
+        clockinAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', label });
       }
     }
   });
@@ -2572,7 +2594,7 @@ function checkReminderAlerts() {
       summary = firstNames.slice(0, 4).join(', ') + ` +${firstNames.length - 4} more`;
     }
     const detailRows = nightUnacked.map(w =>
-      `<div class="ra-detail-row"><span style="font-weight:600;">${w.name}</span><span style="color:rgba(255,59,48,0.7);margin-left:6px;">${w.outlet}${w.time ? ' · ' + w.time : ''}</span></div>`
+      `<div class="ra-detail-row" style="display:flex;align-items:center;gap:8px;"><span style="font-weight:600;">${escapeHtml(w.name)}</span><span style="color:rgba(255,59,48,0.7);">${escapeHtml(w.outlet)}${w.time ? ' · ' + w.time : ''}</span><button class="ra-dispute-btn" style="background:var(--accent);color:#fff;border:none;margin-left:auto;white-space:nowrap;" onclick="event.stopPropagation();markWorkerAcknowledged('${escapeAttr(String(w.id))}')">✓ Acknowledged</button></div>`
     ).join('');
     html += `<div class="reminder-alert-item reminder-alert-urgent ra-grouped" onclick="this.classList.toggle('ra-open')">
       <div class="ra-summary">⚠️ <strong>${summary}</strong> haven't acknowledged last night's shift reminder <span class="ra-toggle-hint">▾ see all</span></div>
@@ -2580,9 +2602,14 @@ function checkReminderAlerts() {
     </div>`;
   }
 
-  // ── Clock-in: individual lines ──
+  // ── Clock-in: individual lines, with a quick "Mark acknowledged" on the right ──
   clockinAlerts.forEach(a => {
-    html += `<div class="reminder-alert-item reminder-alert-warn">🔔 <strong>${firstName(a.name)}</strong> (${a.outlet}) hasn't responded to clock-in reminder — shift ${a.label}</div>`;
+    html += `<div class="reminder-alert-item reminder-alert-warn" style="display:flex;align-items:center;gap:10px;">
+      <span style="flex:1;">🔔 <strong>${firstName(a.name)}</strong> (${escapeHtml(a.outlet)}) hasn't responded to clock-in reminder — shift ${a.label}</span>
+      <span class="ra-dispute-actions" style="margin-left:auto;">
+        <button class="ra-dispute-btn" style="background:var(--accent);color:#fff;border:none;white-space:nowrap;" onclick="markWorkerAcknowledged('${escapeAttr(String(a.id))}')">✓ Worker acknowledged</button>
+      </span>
+    </div>`;
   });
 
   container.innerHTML = html;
@@ -5648,6 +5675,7 @@ alter table public.shift_reminders
   add column if not exists needs_replacement boolean default false,  -- slot awaiting re-fill after a processed worker cancellation
   add column if not exists replacement_at    timestamptz,            -- when the slot became replacement-needed
   add column if not exists completed_at       timestamptz,           -- when a late task was fully handled (drives 18h collapse)
+  add column if not exists replaced_worker     text,                  -- name of the worker who dropped out (shown on the Replacement-needed slot, synced team-wide)
   add column if not exists last_reminder_at    timestamptz;           -- when the most recent reminder was SENT for this shift (used by the webhook to route a bare reply to the most recently-reminded shift)
 
 -- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
