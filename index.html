@@ -3833,7 +3833,7 @@ function replacementNeededCountForLoadedShifts() {
 // Aggregates the urgent items an agent must act on right now, ACROSS ALL DATES:
 //  • Cancellation / dispute requests (worker wants to cancel / can't make it)
 //  • Late-arrival notices (acknowledge + inform outlet)
-//  • Replacement-needed open slots (cancellation processed, slot still to fill)
+// NOTE: Replacement-needed slots live exclusively in the Replacement Needed panel.
 // Returns an array of task objects sorted by urgency.
 function getOpenTasks() {
   const tasks = [];
@@ -3893,22 +3893,7 @@ function getOpenTasks() {
         completedAt
       });
     }
-    // Replacement-needed open slot — cancellation processed, slot still to fill
-    if (!s.cancelled && String(wn).toLowerCase() === 'available' && r.needsReplacement) {
-      tasks.push({
-        type: 'replacement',
-        id: s.id,
-        worker: r.replacedWorker || '',
-        outlet: s.outlet || '',
-        role: s.role || '',
-        date: s.shift_date,
-        start, end,
-        isToday,
-        at: r.replacementAt || '',
-        done: false
       });
-    }
-  });
   // Sort:
   //  1) incomplete tasks always on top; completed (collapsed) tasks at the bottom.
   //  2) within incomplete: NEWEST first (most recently raised at the very top).
