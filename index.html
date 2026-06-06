@@ -4603,7 +4603,7 @@ function renderTaskThread(kind, id) {
     // Build message thread from Supabase thread_messages (set by webhook)
     // plus any locally stored outbound replies
     let msgsHtml = '';
-    const supabaseThread: any[] = [];
+    const supabaseThread = [];
     try {
       const parsed = JSON.parse(inq.thread_messages || '[]');
       supabaseThread.push(...parsed);
@@ -4817,7 +4817,7 @@ async function sendThreadReply() {
       const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
       if (inq) {
         // Append to Supabase thread_messages
-        let thread: any[] = [];
+        let thread = [];
         try { thread = JSON.parse(inq.thread_messages || '[]'); } catch(e) {}
         thread.push(sentMsg);
         inq.thread_messages = JSON.stringify(thread);
