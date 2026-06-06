@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v37 — Tasks converted from modal to full-page grid layout (420px left card list + right conversation thread panel). AI draft now routes through claude-proxy Edge Function (fixes blank draft bug). Conversation thread shows worker messages + sent replies per worker. New inquiry messages from webhook appear in realtime and auto-update open threads. setTaskFilter syncs both page filter bar and legacy modal bar. -->
+<!-- Build patch: v38 — Worker reply threading fixed: webhook now appends subsequent inbound messages to existing open inquiry's thread_messages column instead of creating new rows. ShiftOps reads thread_messages from Supabase (merge with local outbound replies, deduped by timestamp). Sent replies also persist to Supabase thread_messages so thread is consistent across devices. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -4250,7 +4250,7 @@ async function loadWorkerInquiries() {
   try {
     const { data, error } = await supabaseClient
       .from('worker_inquiries')
-      .select('*')
+      .select('id, worker_name, worker_phone, message, category, ai_summary, shift_id, shift_date, status, reply_draft, created_at, updated_at, thread_messages')
       .eq('status', 'open')
       .order('created_at', { ascending: false })
       .limit(200);
@@ -4267,6 +4267,7 @@ async function loadWorkerInquiries() {
         status: r.status || 'open',
         draft: r.reply_draft || '',
         at: r.created_at || '',
+        thread_messages: r.thread_messages || '[]',
       }));
       try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(workerInquiriesCache)); } catch(e){}
     }
@@ -4599,14 +4600,28 @@ function renderTaskThread(kind, id) {
       </span>
     </div>`;
 
-    // Build message thread from worker_messages cache + the original inquiry
-    const threadMsgs = getWorkerThreadMessages(inq.phone || inq.worker);
+    // Build message thread from Supabase thread_messages (set by webhook)
+    // plus any locally stored outbound replies
     let msgsHtml = '';
-    // Show original inquiry as first inbound message
-    msgsHtml += renderThreadMsg(inq.message, 'inbound', inq.at, 'Worker');
-    // Then any subsequent exchanges
-    threadMsgs.forEach(m => {
-      msgsHtml += renderThreadMsg(m.text, m.direction, m.at, m.direction === 'inbound' ? 'Worker' : 'Anytime Work');
+    const supabaseThread: any[] = [];
+    try {
+      const parsed = JSON.parse(inq.thread_messages || '[]');
+      supabaseThread.push(...parsed);
+    } catch(e) {
+      // Fallback: show the original message as first entry
+      supabaseThread.push({ text: inq.message, direction: 'inbound', at: inq.at });
+    }
+    // Merge with locally stored outbound replies (sent from ShiftOps)
+    const localReplies = getWorkerThreadMessages(inq.phone || inq.worker);
+    // Combine and sort by timestamp
+    const allMsgs = [...supabaseThread, ...localReplies].sort((a, b) => new Date(a.at||0).getTime() - new Date(b.at||0).getTime());
+    // Deduplicate (same text + direction within 5s)
+    const seen = new Set<string>();
+    allMsgs.forEach(m => {
+      const key = m.direction + '|' + (m.text||'').slice(0,30) + '|' + Math.floor(new Date(m.at||0).getTime()/5000);
+      if (seen.has(key)) return;
+      seen.add(key);
+      msgsHtml += renderThreadMsg(m.text, m.direction, m.at, m.direction === 'inbound' ? escapeHtml(inq.worker||'Worker') : 'Anytime Work');
     });
     messagesEl.innerHTML = msgsHtml || `<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px;">No messages yet</div>`;
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -4794,22 +4809,36 @@ async function sendThreadReply() {
   const ok = await sendPeriskopeMessage(phone, draft);
 
   if (ok) {
-    // Add to thread
-    const msg = { text: draft, direction: 'outbound', at: new Date().toISOString() };
-    saveWorkerThreadMessage(workerKey, msg);
-    // Re-render thread
+    const sentMsg = { text: draft, direction: 'outbound', at: new Date().toISOString() };
+    // Save locally
+    saveWorkerThreadMessage(workerKey, sentMsg);
+
+    if (kind === 'inq') {
+      const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
+      if (inq) {
+        // Append to Supabase thread_messages
+        let thread: any[] = [];
+        try { thread = JSON.parse(inq.thread_messages || '[]'); } catch(e) {}
+        thread.push(sentMsg);
+        inq.thread_messages = JSON.stringify(thread);
+        inq.status = 'replied';
+        try {
+          supabaseClient.from('worker_inquiries').update({
+            thread_messages: inq.thread_messages,
+            reply_draft: draft,
+            status: 'replied',
+            replied_at: sentMsg.at,
+            updated_at: sentMsg.at,
+          }).eq('id', parseInt(id));
+        } catch(e) {}
+      }
+    }
+
+    // Re-render thread to show the sent message
     renderTaskThread(kind, id);
     draftEl.value = '';
     if (statusEl) statusEl.textContent = '';
     toast('Sent ✓');
-    // If inquiry, mark as replied
-    if (kind === 'inq') {
-      const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
-      if (inq) {
-        inq.status = 'replied';
-        try { supabaseClient.from('worker_inquiries').update({ status:'replied', replied_at: new Date().toISOString() }).eq('id', parseInt(id)); } catch(e){}
-      }
-    }
   } else {
     if (statusEl) statusEl.textContent = '';
     toast('Send failed — check Periskope settings', 'error');
