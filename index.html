@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v38 — Worker reply threading fixed: webhook now appends subsequent inbound messages to existing open inquiry's thread_messages column instead of creating new rows. ShiftOps reads thread_messages from Supabase (merge with local outbound replies, deduped by timestamp). Sent replies also persist to Supabase thread_messages so thread is consistent across devices. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -184,52 +183,6 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .metric-card-replacement { border-color: rgba(43,179,163,0.3); }
 .metric-card-replacement.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .modal-wide { max-width: 640px; width: 92%; }
-.modal-tasks { max-width: 860px; width: 96%; max-height: 92vh; }
-.task-filter-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
-.task-filter-btn { font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text2); cursor: pointer; font-family: var(--mono); letter-spacing: 0.3px; transition: all 0.13s; }
-.task-filter-btn:hover { border-color: var(--accent); color: var(--text); }
-.task-filter-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
-.task-card.task-shift-inquiry { border-left: 3px solid var(--purple); }
-.task-card.task-payment-inquiry { border-left: 3px solid var(--green); }
-.task-card.task-other-inquiry { border-left: 3px solid var(--text3); }
-.tag-shift-inquiry { background: rgba(167,139,250,0.15); color: var(--purple); }
-.tag-payment-inquiry { background: rgba(52,199,123,0.15); color: var(--green); }
-.tag-other-inquiry { background: rgba(139,144,160,0.15); color: var(--text2); }
-.task-draft-box { margin-top: 10px; background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px; padding: 10px 12px; }
-.task-draft-label { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent); font-family: var(--mono); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
-.task-draft-text { font-size: 12.5px; color: var(--text); line-height: 1.6; white-space: pre-wrap; min-height: 48px; }
-.task-draft-textarea { width: 100%; background: var(--bg); border: 1px solid var(--border2); border-radius: 6px; color: var(--text); font-family: var(--font); font-size: 12.5px; padding: 8px 10px; resize: vertical; min-height: 80px; margin-top: 6px; line-height: 1.6; }
-.task-draft-textarea:focus { outline: none; border-color: var(--accent); }
-.task-draft-actions { display: flex; gap: 7px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
-.task-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-@media (max-width: 640px) { .task-two-col { grid-template-columns: 1fr; } }
-.task-col-label { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text3); font-family: var(--mono); margin-bottom: 8px; }
-.task-inquiry-form { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 10px; }
-.task-inquiry-form label { font-size: 11px; color: var(--text2); display: block; margin-bottom: 4px; font-weight: 500; }
-.task-inquiry-form input, .task-inquiry-form select, .task-inquiry-form textarea { width: 100%; background: var(--bg); border: 1px solid var(--border2); border-radius: 6px; color: var(--text); font-family: var(--font); font-size: 12.5px; padding: 7px 10px; margin-bottom: 10px; }
-.task-inquiry-form textarea { resize: vertical; min-height: 64px; }
-.task-inquiry-form input:focus, .task-inquiry-form select:focus, .task-inquiry-form textarea:focus { outline: none; border-color: var(--accent); }
-.new-inquiry-btn { display: flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--radius); border: 1px dashed var(--border2); background: none; color: var(--text2); cursor: pointer; font-size: 12.5px; font-weight: 500; width: 100%; margin-bottom: 14px; transition: all 0.13s; }
-.new-inquiry-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
-.spinner-inline { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(79,142,247,0.3); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 5px; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.task-thread-msg { max-width: 75%; padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.5; word-break: break-word; }
-.task-thread-msg.inbound { background: var(--bg3); border: 1px solid var(--border); color: var(--text); align-self: flex-start; border-bottom-left-radius: 3px; }
-.task-thread-msg.outbound { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 3px; }
-.task-thread-msg-meta { font-size: 10px; opacity: 0.6; margin-top: 3px; }
-.task-list-card { border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; margin-bottom: 8px; background: var(--bg3); cursor: pointer; transition: all 0.13s; border-left: 3px solid transparent; }
-.task-list-card:hover { border-color: var(--border2); background: var(--bg2); }
-.task-list-card.selected { border-color: var(--accent) !important; background: var(--accent-dim); }
-.task-list-card.tl-late { border-left-color: var(--amber); }
-.task-list-card.tl-dispute { border-left-color: var(--red); }
-.task-list-card.tl-shift_inquiry { border-left-color: var(--purple); }
-.task-list-card.tl-payment_inquiry { border-left-color: var(--green); }
-.task-list-card.tl-other_inquiry { border-left-color: var(--text3); }
-.task-list-card.tl-replacement { border-left-color: #2bb3a3; }
-.tl-worker { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 3px; display:flex;align-items:center;gap:7px; }
-.tl-preview { font-size: 12px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
-.tl-meta { font-size: 11px; color: var(--text3); margin-top: 4px; display:flex;gap:8px;align-items:center; }
-.tl-unread { width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0; }
 .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--bg2); }
 .task-card.task-dispute { border-left: 3px solid var(--red); }
 .task-card.task-late { border-left: 3px solid var(--amber); }
@@ -653,7 +606,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <span class="nav-badge" id="pending-clockin-nav-badge" title="Pending clock-in">0</span>
         <span class="nav-badge clockout" id="pending-clockout-nav-badge" title="Pending clock-out">0</span>
       </button>
-      <button class="nav-item nav-item-tasks" onclick="switchPage('tasks',this)" title="Tasks & worker inquiries">
+      <button class="nav-item nav-item-tasks" onclick="openTasksPanel()" title="Urgent tasks across all dates">
         <span class="nav-icon">⚡</span><span class="nav-label">Tasks</span>
         <span class="nav-badge tasks" id="tasks-nav-badge" title="Open tasks (all dates)">0</span>
       </button>
@@ -995,92 +948,6 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
     </div>
 
-    <!-- TASKS PAGE (full-page grid) -->
-    <div id="page-tasks" style="display:none;">
-      <div class="topbar">
-        <div class="topbar-left">
-          <h2>⚡ Tasks &amp; Inquiries</h2>
-          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Worker messages, late notices, cancellations and inquiries — across all dates</p>
-        </div>
-        <div class="topbar-right">
-          <div class="task-filter-bar" id="task-page-filter-bar" style="margin-bottom:0;">
-            <button class="task-filter-btn active" data-filter="all" onclick="setTaskFilter('all',this)">All</button>
-            <button class="task-filter-btn" data-filter="late" onclick="setTaskFilter('late',this)">⏰ Late</button>
-            <button class="task-filter-btn" data-filter="dispute" onclick="setTaskFilter('dispute',this)">🚫 Cancellation</button>
-            <button class="task-filter-btn" data-filter="shift_inquiry" onclick="setTaskFilter('shift_inquiry',this)">📋 Shift</button>
-            <button class="task-filter-btn" data-filter="payment_inquiry" onclick="setTaskFilter('payment_inquiry',this)">💰 Payment</button>
-            <button class="task-filter-btn" data-filter="other_inquiry" onclick="setTaskFilter('other_inquiry',this)">💬 Other</button>
-          </div>
-          <button class="btn btn-primary btn-sm" onclick="openNewInquiryForm()" style="margin-left:8px;">+ New Inquiry</button>
-        </div>
-      </div>
-      <div class="content" style="padding:0;">
-        <!-- New inquiry form -->
-        <div id="new-inquiry-panel" style="display:none;padding:16px 24px;border-bottom:1px solid var(--border);background:var(--bg2);">
-          <div style="max-width:700px;">
-            <div style="font-size:13px;font-weight:600;margin-bottom:10px;">Log new worker inquiry</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px;">
-              <div>
-                <label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px;">Worker name</label>
-                <input type="text" id="inq-worker" placeholder="e.g. Ahmad Faris" list="inq-worker-opts" style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius);color:var(--text);padding:7px 10px;font-size:13px;">
-                <datalist id="inq-worker-opts"></datalist>
-              </div>
-              <div>
-                <label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px;">Category</label>
-                <select id="inq-type" style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius);color:var(--text);padding:7px 10px;font-size:13px;">
-                  <option value="shift_inquiry">📋 Shift inquiry</option>
-                  <option value="payment_inquiry">💰 Payment inquiry</option>
-                  <option value="other_inquiry">💬 Other inquiry</option>
-                </select>
-              </div>
-              <div style="display:flex;align-items:flex-end;gap:8px;">
-                <button class="btn btn-primary btn-sm" onclick="submitNewInquiry()" style="height:34px;">Log inquiry</button>
-                <button class="btn btn-ghost btn-sm" onclick="document.getElementById('new-inquiry-panel').style.display='none'" style="height:34px;">Cancel</button>
-              </div>
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text2);display:block;margin-bottom:4px;">Worker message</label>
-              <textarea id="inq-message" placeholder="Paste or type the worker's message…" style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius);color:var(--text);padding:8px 10px;font-size:13px;resize:vertical;min-height:60px;font-family:var(--font);"></textarea>
-            </div>
-          </div>
-        </div>
-        <!-- Two-column grid: task list (left) + conversation thread (right) -->
-        <div style="display:grid;grid-template-columns:420px 1fr;height:calc(100vh - 65px);">
-          <!-- LEFT: task cards list -->
-          <div style="border-right:1px solid var(--border);overflow-y:auto;background:var(--bg2);">
-            <div id="tasks-page-list" style="padding:12px;"></div>
-          </div>
-          <!-- RIGHT: conversation thread -->
-          <div style="display:flex;flex-direction:column;background:var(--bg);">
-            <div id="task-thread-empty" style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text3);flex-direction:column;gap:8px;">
-              <div style="font-size:32px;">💬</div>
-              <div style="font-size:14px;font-weight:500;">Select a task to view conversation</div>
-              <div style="font-size:12px;color:var(--text3);">Worker messages and your replies thread here</div>
-            </div>
-            <div id="task-thread-panel" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
-              <!-- Thread header -->
-              <div id="task-thread-header" style="padding:16px 20px;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0;"></div>
-              <!-- Messages -->
-              <div id="task-thread-messages" style="flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:10px;"></div>
-              <!-- Draft + actions -->
-              <div style="border-top:1px solid var(--border);padding:14px 20px;background:var(--bg2);flex-shrink:0;">
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                  <div id="task-thread-draft-label" style="font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;color:var(--accent);font-family:var(--mono);">✦ Reply</div>
-                  <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 9px;" onclick="generateThreadDraft()">✦ AI Draft</button>
-                </div>
-                <textarea id="task-thread-draft" placeholder="Type reply or click AI Draft…" style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius);color:var(--text);font-family:var(--font);font-size:13px;padding:9px 12px;resize:none;height:80px;line-height:1.5;"></textarea>
-                <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center;">
-                  <button class="btn btn-primary btn-sm" onclick="sendThreadReply()">📤 Send via Periskope</button>
-                  <button class="btn btn-ghost btn-sm" id="task-thread-close-btn" onclick="closeTaskThread()">✓ Close task</button>
-                  <span id="task-thread-send-status" style="font-size:12px;color:var(--text3);"></span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <div id="page-completed" style="display:none;">
       <div class="topbar">
         <div class="topbar-left"><h2>✅ Completed Tasks</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Late arrivals handled, disputes resolved, and replacement slots filled. Kept for 60 days, then removed automatically.</p></div>
@@ -1264,50 +1131,12 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 <!-- TASKS PANEL MODAL -->
 <div class="modal-overlay" id="tasks-modal">
-  <div class="modal modal-tasks">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
-      <h3 style="margin:0;">⚡ Tasks &amp; Inquiries</h3>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button class="btn btn-ghost btn-sm" onclick="openNewInquiryForm()" title="Log a new worker inquiry">+ New Inquiry</button>
-        <button class="btn btn-ghost btn-sm" onclick="closeTasksPanel()">Close ✕</button>
-      </div>
+  <div class="modal modal-wide">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+      <h3 style="margin:0;">⚡ Urgent tasks</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeTasksPanel()">Close</button>
     </div>
-    <!-- Category filter bar -->
-    <div class="task-filter-bar" id="task-filter-bar">
-      <button class="task-filter-btn active" data-filter="all" onclick="setTaskFilter('all',this)">All</button>
-      <button class="task-filter-btn" data-filter="late" onclick="setTaskFilter('late',this)">⏰ Late arrival</button>
-      <button class="task-filter-btn" data-filter="dispute" onclick="setTaskFilter('dispute',this)">🚫 Cancellation</button>
-      <button class="task-filter-btn" data-filter="shift_inquiry" onclick="setTaskFilter('shift_inquiry',this)">📋 Shift inquiry</button>
-      <button class="task-filter-btn" data-filter="payment_inquiry" onclick="setTaskFilter('payment_inquiry',this)">💰 Payment</button>
-      <button class="task-filter-btn" data-filter="other_inquiry" onclick="setTaskFilter('other_inquiry',this)">💬 Other</button>
-    </div>
-    <!-- New inquiry form (hidden by default) -->
-    <div id="new-inquiry-panel" style="display:none;margin-bottom:14px;">
-      <div class="task-inquiry-form">
-        <div style="font-size:13px;font-weight:600;margin-bottom:10px;color:var(--text);">Log new worker inquiry</div>
-        <div class="task-two-col">
-          <div>
-            <label>Worker name</label>
-            <input type="text" id="inq-worker" placeholder="e.g. Ahmad Faris" list="inq-worker-opts">
-            <datalist id="inq-worker-opts"></datalist>
-          </div>
-          <div>
-            <label>Category</label>
-            <select id="inq-type">
-              <option value="shift_inquiry">📋 Shift inquiry</option>
-              <option value="payment_inquiry">💰 Payment inquiry</option>
-              <option value="other_inquiry">💬 Other inquiry</option>
-            </select>
-          </div>
-        </div>
-        <label>Message / inquiry details</label>
-        <textarea id="inq-message" placeholder="Paste or type the worker's message here…"></textarea>
-        <div style="display:flex;gap:8px;">
-          <button class="btn btn-primary btn-sm" onclick="submitNewInquiry()">Log inquiry</button>
-          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('new-inquiry-panel').style.display='none'">Cancel</button>
-        </div>
-      </div>
-    </div>
+    <div class="sub-text" style="margin-bottom:12px;">Cancellation requests and late-arrival notices that need an agent to act now. For a drop-out you can <strong>Acknowledge</strong> (confirm the worker is out and move the open slot to Replacement needed, no penalty) or <strong>Process cancellation</strong> (apply penalty / MC / suspension rules). Late notices need acknowledgement and the outlet informed.</div>
     <div id="tasks-list"></div>
   </div>
 </div>
@@ -2082,8 +1911,6 @@ async function init() {
   updateSidebarDate();
   requireInternalLogin();
   subscribeToReminderChanges(); // live sync + 30s polling fallback
-  loadWorkerInquiries();        // load open inquiries from Supabase
-  subscribeWorkerInquiries();   // realtime push for new webhook-created inquiries
   checkReminderAlerts();
   updateTasksNavBadge();
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
@@ -2095,7 +1922,7 @@ async function init() {
     if (typeof loadTaskShiftCache === 'function') {
       loadTaskShiftCache().then(() => {
         updateTasksNavBadge();
-        if (document.getElementById('page-tasks')?.style.display !== 'none') { try { renderTasksPanel(); } catch(e){} }
+        if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
         if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
       }).catch(()=>{});
     }
@@ -2158,16 +1985,11 @@ async function persistReminder(shiftId) {
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
   // Save to Supabase so all other users can see it
   const r = shiftReminders[shiftId] || {};
-  // Look up the shift to get worker phone for webhook matching
-  const shift = (allShifts || []).find(s => String(s.id) === String(shiftId))
-             || taskShiftCache?.[String(shiftId)];
-  const wPhone = shift ? (workerPhone(shift.worker_name) || '').replace(/\D/g,'') : '';
-  const wName  = shift?.worker_name || '';
   try {
     const { error } = await supabaseClient.from('shift_reminders').upsert({
       shift_id: String(shiftId),
-      worker_phone: wPhone || null,
-      worker_name: wName || null,
+      worker_phone: (function(){ const s = (allShifts||[]).find(x=>String(x.id)===String(shiftId))||taskShiftCache?.[String(shiftId)]; return s ? (workerPhone(s.worker_name)||'').replace(/\D/g,'') : ''; })() || null,
+      worker_name: ((allShifts||[]).find(x=>String(x.id)===String(shiftId))||taskShiftCache?.[String(shiftId)])?.worker_name || null,
       night_sent: !!r.nightSent,
       night_acked: !!r.nightAcked,
       clockin_sent: !!r.clockinSent,
@@ -2239,7 +2061,7 @@ function subscribeToReminderChanges() {
         if (typeof loadTaskShiftCache === 'function') {
           loadTaskShiftCache().then(() => {
             if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-            if (document.getElementById('page-tasks')?.style.display !== 'none') { try { renderTasksPanel(); } catch(e){} }
+            if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
             if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
           }).catch(()=>{});
         }
@@ -2305,7 +2127,7 @@ async function silentSyncReminders() {
       if (typeof loadTaskShiftCache === 'function') {
         loadTaskShiftCache().then(() => {
           if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-          if (document.getElementById('page-tasks')?.style.display !== 'none') { try { renderTasksPanel(); } catch(e){} }
+          if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
           if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
           if (typeof renderMetrics === 'function' && document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') {
             try { renderMetrics(); } catch(e){}
@@ -2453,7 +2275,7 @@ async function flagDispute(shiftId, kind) {
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
-  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); if (document.getElementById('page-tasks')?.style.display !== 'none') renderTasksPanel(); } catch(e){} }
+  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); if (document.getElementById('tasks-modal')?.classList.contains('open')) renderTasksPanel(); } catch(e){} }
   toast('⚠ Shift flagged as disputed');
 }
 // ── Late-arrival notice handling ──────────────────────────────
@@ -2811,7 +2633,7 @@ function checkReminderAlerts() {
     try { renderMetrics(); } catch(e) {}
   }
   if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-  if (document.getElementById('page-tasks')?.style.display !== 'none') {
+  if (document.getElementById('tasks-modal')?.classList.contains('open')) {
     renderTasksPanel();
   }
 }
@@ -2868,7 +2690,6 @@ function switchPage(name, btn) {
   if (name === 'messages') loadMessagesPage();
   if (name === 'activity') { loadActivityLog(); }
   if (name === 'completed') { loadCompletedTasks().then(() => renderCompletedTasksPage()); }
-  if (name === 'tasks') { renderTasksPage(); }
   if (name === 'knowledge') { renderKnowledgePage(); }
   if (name === 'analytics') { loadAnalytics(); }
 }
@@ -4097,9 +3918,7 @@ function getOpenTasks() {
 }
 // Count of tasks still requiring action (excludes completed/collapsed tasks)
 function openTaskCount() {
-  const urgentCount = getOpenTasks().filter(t => !t.done).length;
-  const inquiryCount = (workerInquiriesCache || []).filter(i => i.status === 'open').length;
-  return urgentCount + inquiryCount;
+  return getOpenTasks().filter(t => !t.done).length;
 }
 // Keep the always-visible sidebar Tasks badge in sync (works on every page)
 function updateTasksNavBadge() {
@@ -4113,12 +3932,13 @@ function updateTasksNavBadge() {
 }
 // ── Tasks panel UI ────────────────────────────────────────────
 function openTasksPanel() {
-  // Switch to the full Tasks page
-  const btn = document.querySelector('.nav-item-tasks');
-  switchPage('tasks', btn || document.createElement('button'));
+  renderTasksPanel();
+  const m = document.getElementById('tasks-modal');
+  if (m) m.classList.add('open');
 }
 function closeTasksPanel() {
-  // no-op — kept for compatibility with existing callers
+  const m = document.getElementById('tasks-modal');
+  if (m) m.classList.remove('open');
 }
 // ── Replacement-needed panel (cross-date: today + all upcoming) ──
 async function openReplacementPanel() {
@@ -4213,694 +4033,70 @@ function shiftTimeRange(start, end) {
   if (!start) return '';
   return end ? `${start}–${end}` : start;
 }
-// ── Task filter state ────────────────────────────────────────────
-let currentTaskFilter = 'all';
-function setTaskFilter(f, btn) {
-  currentTaskFilter = f;
-  document.querySelectorAll('.task-filter-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  renderTasksPanel();
-}
-function openNewInquiryForm() {
-  const p = document.getElementById('new-inquiry-panel');
-  if (!p) return;
-  // Populate worker datalist
-  const dl = document.getElementById('inq-worker-opts');
-  if (dl) {
-    const names = [...new Set((allShifts||[]).map(s=>s.worker_name).filter(n=>n&&n!=='Available'))].sort();
-    dl.innerHTML = names.map(n=>`<option value="${escapeHtml(n)}">`).join('');
-  }
-  p.style.display = p.style.display === 'none' ? '' : 'none';
-}
-async function submitNewInquiry() {
-  const worker = document.getElementById('inq-worker')?.value.trim();
-  const type   = document.getElementById('inq-type')?.value || 'other_inquiry';
-  const msg    = document.getElementById('inq-message')?.value.trim();
-  if (!worker || !msg) { toast('Please fill in worker name and message', 'error'); return; }
-  // Save as a local inquiry task (stored in localStorage, not shift_reminders)
-  const inquiries = getStoredInquiries();
-  const id = 'inq_' + Date.now();
-  inquiries.push({ id, worker, type, message: msg, at: new Date().toISOString(), status: 'open', draft: '' });
-  saveStoredInquiries(inquiries);
-  document.getElementById('inq-worker').value = '';
-  document.getElementById('inq-message').value = '';
-  document.getElementById('new-inquiry-panel').style.display = 'none';
-  toast('Inquiry logged ✓');
-  renderTasksPanel();
-}
-// ── Worker Inquiries — Supabase-backed ──────────────────────────────
-// Cached locally for instant render; Supabase is source of truth.
-let workerInquiriesCache = [];
-async function loadWorkerInquiries() {
-  // Seed from localStorage for instant paint
-  try { workerInquiriesCache = JSON.parse(localStorage.getItem('worker_inquiries_cache') || '[]'); } catch(e) { workerInquiriesCache = []; }
-  try {
-    const { data, error } = await supabaseClient
-      .from('worker_inquiries')
-      .select('id, worker_name, worker_phone, message, category, ai_summary, shift_id, shift_date, status, reply_draft, created_at, updated_at, thread_messages')
-      .eq('status', 'open')
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (!error && Array.isArray(data)) {
-      workerInquiriesCache = data.map(r => ({
-        id: String(r.id),
-        worker: r.worker_name || '',
-        phone: r.worker_phone || '',
-        type: r.category || 'other_inquiry',
-        message: r.message || '',
-        ai_summary: r.ai_summary || '',
-        shift_id: r.shift_id || null,
-        shift_date: r.shift_date || '',
-        status: r.status || 'open',
-        draft: r.reply_draft || '',
-        at: r.created_at || '',
-        thread_messages: r.thread_messages || '[]',
-      }));
-      try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(workerInquiriesCache)); } catch(e){}
-    }
-  } catch(e) { /* keep cached */ }
-  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-  if (document.getElementById('page-tasks')?.style.display !== 'none') { try { renderTasksPanel(); } catch(e){} }
-}
-function subscribeWorkerInquiries() {
-  try {
-    supabaseClient
-      .channel('worker_inquiries_live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'worker_inquiries' }, (payload) => {
-        loadWorkerInquiries().then(() => {
-          // If a new inbound message arrived for the open thread, refresh it
-          const tp = document.getElementById('task-thread-panel');
-          if (tp && tp.style.display !== 'none' && tp.dataset.kind === 'inq') {
-            renderTaskThread('inq', tp.dataset.id);
-          }
-        });
-      })
-      .subscribe();
-  } catch(e) {}
-}
-function getStoredInquiries() {
-  return (workerInquiriesCache || []).filter(i => i.status === 'open');
-}
-async function saveStoredInquiries(arr) {
-  // Update local cache
-  workerInquiriesCache = arr;
-  try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(arr)); } catch(e){}
-}
-async function updateInquiryDraft(id, val) {
-  // Update cache optimistically
-  const inq = (workerInquiriesCache || []).find(i => i.id === id);
-  if (inq) { inq.draft = val; }
-  try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(workerInquiriesCache)); } catch(e){}
-  // Persist to Supabase (debounced via try/catch — no await to keep typing smooth)
-  try {
-    supabaseClient.from('worker_inquiries').update({ reply_draft: val, updated_at: new Date().toISOString() }).eq('id', parseInt(id));
-  } catch(e){}
-}
-async function closeInquiry(id) {
-  // Optimistic local update
-  const inqs = workerInquiriesCache || [];
-  const inq = inqs.find(i => i.id === id);
-  if (inq) { inq.status = 'closed'; }
-  workerInquiriesCache = inqs;
-  try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(inqs)); } catch(e){}
-  renderTasksPanel();
-  // Persist to Supabase
-  try {
-    await supabaseClient.from('worker_inquiries').update({ status: 'closed', updated_at: new Date().toISOString() }).eq('id', parseInt(id));
-  } catch(e) {}
-  toast('Inquiry closed ✓');
-}
-async function submitNewInquiry() {
-  const worker = document.getElementById('inq-worker')?.value.trim();
-  const type   = document.getElementById('inq-type')?.value || 'other_inquiry';
-  const msg    = document.getElementById('inq-message')?.value.trim();
-  if (!worker || !msg) { toast('Please fill in worker name and message', 'error'); return; }
-  // Find phone from loaded shifts
-  const shift = (allShifts||[]).find(s=> (s.worker_name||'').toLowerCase().trim() === worker.toLowerCase().trim());
-  const phone = shift?.worker_phone || '';
-  // Insert into Supabase
-  try {
-    const { data, error } = await supabaseClient.from('worker_inquiries').insert({
-      worker_name: worker,
-      worker_phone: phone || '0',
-      message: msg,
-      category: type,
-      ai_summary: msg.slice(0, 80),
-      status: 'open',
-    }).select().single();
-    if (!error && data) {
-      workerInquiriesCache.unshift({
-        id: String(data.id), worker, phone: phone||'', type, message: msg,
-        ai_summary: data.ai_summary||msg.slice(0,80), shift_id: null, shift_date: '',
-        status: 'open', draft: '', at: data.created_at||new Date().toISOString()
-      });
-    }
-  } catch(e) {
-    // Fallback to local if Supabase fails
-    const id = 'inq_' + Date.now();
-    workerInquiriesCache.unshift({ id, worker, phone:'', type, message: msg, ai_summary:'', shift_id:null, shift_date:'', status:'open', draft:'', at: new Date().toISOString() });
-  }
-  document.getElementById('inq-worker').value = '';
-  document.getElementById('inq-message').value = '';
-  document.getElementById('new-inquiry-panel').style.display = 'none';
-  toast('Inquiry logged ✓');
-  renderTasksPanel();
-}
-async function sendInquiryReply(id) {
-  const inqs = workerInquiriesCache || [];
-  const inq = inqs.find(i=>i.id===id);
-  if (!inq) return;
-  const draft = document.getElementById(`draft-ta-${id}`)?.value || inq.draft || '';
-  if (!draft.trim()) { toast('Nothing to send — draft is empty', 'error'); return; }
-  const phone = inq.phone || (typeof workerPhone === 'function' ? workerPhone(inq.worker) : '');
-  if (!phone || phone === '0') { toast('No phone number found for this worker', 'error'); return; }
-  const btn = document.getElementById(`send-btn-${id}`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
-  const ok = await sendPeriskopeMessage(phone, draft.trim());
-  if (ok) {
-    inq.draft = draft; inq.status = 'replied'; inq.repliedAt = new Date().toISOString();
-    try {
-      await supabaseClient.from('worker_inquiries').update({
-        reply_draft: draft, status: 'replied', replied_at: inq.repliedAt, updated_at: inq.repliedAt
-      }).eq('id', parseInt(id));
-    } catch(e){}
-    toast('Reply sent via Periskope ✓');
-    renderTasksPanel();
-  } else {
-    if (btn) { btn.disabled = false; btn.textContent = '📤 Send via Periskope'; }
-    toast('Send failed — check Periskope settings', 'error');
-  }
-}
-async function generateInquiryDraft(id) {
-  const inq = (workerInquiriesCache || []).find(i=>i.id===id);
-  if (!inq) return;
-  const labelEl = document.getElementById(`draft-label-${id}`);
-  const taEl    = document.getElementById(`draft-ta-${id}`);
-  if (labelEl) labelEl.innerHTML = `<span class="spinner-inline"></span> Claude is drafting…`;
-  // Find any upcoming shifts for this worker for context
-  const workerShifts = (allShifts||[])
-    .filter(s=>(s.worker_name||'').toLowerCase().trim()===(inq.worker||'').toLowerCase().trim())
-    .slice(0,3)
-    .map(s=>`${s.shift_date} ${s.scheduled_start||''}–${s.scheduled_end||''} @ ${s.outlet||''}`)
-    .join('; ');
-  const typeLabels = { shift_inquiry:'shift inquiry', payment_inquiry:'payment inquiry', other_inquiry:'general inquiry', dispute:'cancellation request', late:'late arrival notice' };
-  const systemPrompt = `You are the operations coordinator for Anytime Work, a Singapore part-time worker marketplace for F&B and hospitality. You reply to workers professionally but warmly, using simple clear English. Keep replies concise (2–4 sentences max). Business rules: cancellations with valid MC waive penalty but suspension still applies if repeated; shifts can only be amended with at least 24h notice and outlet approval; pay is processed weekly every Friday; late arrivals must be communicated immediately. Always be helpful and solution-focused.`;
-  const userPrompt = `Draft a professional reply to this worker's ${typeLabels[inq.type]||'inquiry'}.\nWorker name: ${inq.worker}\nWorker message: "${inq.message}"\n${workerShifts ? `Worker's upcoming shifts: ${workerShifts}` : ''}\nReply as the Anytime Work ops team. Return only the reply message text, no preamble.`;
-  try {
-    const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpwZm5yc3hubmJ0Y2Fkc25qcnBjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkwODk0NTIsImV4cCI6MjA5NDY2NTQ1Mn0.Kord4oX6j6cO9LjomvympIFoPhRLEG04pSW8kASe7DY';
-    const res = await fetch('https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/claude-proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ANON_KEY}` },
-      body: JSON.stringify({ system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] })
-    });
-    const data = await res.json();
-    const text = data?.content?.[0]?.text || '';
-    if (text && taEl) { taEl.value = text; updateInquiryDraft(id, text); }
-    if (labelEl) labelEl.innerHTML = '✦ AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span>';
-  } catch(e) {
-    if (labelEl) labelEl.innerHTML = '✦ AI Draft';
-    toast('Draft generation failed', 'error');
-  }
-}
-// ── Tasks full page ───────────────────────────────────────────────────
-let selectedTaskId = null; // currently open thread
-
-function renderTasksPage() {
-  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-  const el = document.getElementById('tasks-page-list');
-  if (!el) return;
-
-  // Sync filter bar counts
-  const urgentTasks = getOpenTasks();
-  const inquiries   = getStoredInquiries();
-  const f = currentTaskFilter;
-
-  // Update filter pill counts on page filter bar
-  document.querySelectorAll('#task-page-filter-bar .task-filter-btn').forEach(btn => {
-    const bf = btn.dataset.filter;
-    const count = bf === 'all'
-      ? urgentTasks.length + inquiries.length
-      : urgentTasks.filter(t=>t.type===bf).length + inquiries.filter(i=>i.type===bf).length;
-    btn.textContent = btn.textContent.replace(/ \(\d+\)$/,'');
-    if (count > 0) btn.textContent += ` (${count})`;
-  });
-
-  const filteredUrgent = urgentTasks.filter(t => f==='all' || t.type===f);
-  const filteredInqs   = inquiries.filter(i => f==='all' || i.type===f);
-
-  if (!filteredUrgent.length && !filteredInqs.length) {
-    el.innerHTML = `<div style="text-align:center;padding:48px 16px;color:var(--text3);">
-      <div style="font-size:36px;margin-bottom:10px;">✓</div>
-      <div style="font-size:14px;font-weight:600;color:var(--green);">No open tasks</div>
-      <div style="font-size:12px;margin-top:6px;">Cancellations, late notices and worker inquiries appear here</div>
-    </div>`;
-    return;
-  }
-
-  const typeInfo = {
-    late:            { cls:'tl-late',           icon:'⏰', label:'Late arrival' },
-    dispute:         { cls:'tl-dispute',         icon:'🚫', label:'Cancellation' },
-    replacement:     { cls:'tl-replacement',     icon:'🔁', label:'Replacement' },
-    shift_inquiry:   { cls:'tl-shift_inquiry',   icon:'📋', label:'Shift inquiry' },
-    payment_inquiry: { cls:'tl-payment_inquiry', icon:'💰', label:'Payment' },
-    other_inquiry:   { cls:'tl-other_inquiry',   icon:'💬', label:'Other' },
-  };
-
-  let html = '';
-
-  filteredUrgent.forEach(t => {
-    const info = typeInfo[t.type] || { cls:'', icon:'⚡', label:t.type };
-    const dLabel = shiftDateLabel(t.date);
-    const tRange = shiftTimeRange(t.start, t.end);
-    const preview = t.reason || (t.type==='late' ? `${t.worker} will be late` : t.type==='dispute' ? `${t.worker} wants to cancel` : '');
-    const sel = selectedTaskId === 'urgent_'+t.id ? ' selected' : '';
-    html += `<div class="task-list-card ${info.cls}${sel}" onclick="selectTask('urgent','${escapeAttr(String(t.id))}')">
-      <div class="tl-worker">
-        <span class="task-tag ${info.cls.replace('tl-','tag-')}" style="font-size:9px;">${info.icon} ${info.label}</span>
-        ${t.isToday ? '<span class="task-tag tag-today" style="font-size:9px;">TODAY</span>' : ''}
-        ${!t.acked && t.type==='late' ? '<span class="tl-unread" title="Needs action"></span>' : ''}
-        <span style="margin-left:auto;font-size:10px;color:var(--text3);">${t.at ? relTime(t.at) : ''}</span>
-      </div>
-      <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;">${escapeHtml(t.worker||'Unknown')}</div>
-      <div class="tl-preview">${escapeHtml(preview)}</div>
-      <div class="tl-meta">
-        📅 ${dLabel}${tRange ? ' · 🕒 '+tRange : ''}
-        ${t.outlet ? ' · '+escapeHtml(t.outlet) : ''}
-      </div>
-    </div>`;
-  });
-
-  if (filteredInqs.length && filteredUrgent.length) {
-    html += `<div class="task-completed-divider" style="color:var(--text2);border-top-style:solid;margin:12px 0 10px;">Worker Inquiries</div>`;
-  }
-
-  filteredInqs.forEach(inq => {
-    const info = typeInfo[inq.type] || typeInfo.other_inquiry;
-    const sel = selectedTaskId === 'inq_'+inq.id ? ' selected' : '';
-    html += `<div class="task-list-card ${info.cls}${sel}" onclick="selectTask('inq','${escapeAttr(String(inq.id))}')">
-      <div class="tl-worker">
-        <span class="task-tag ${info.cls.replace('tl-','tag-')}" style="font-size:9px;">${info.icon} ${info.label}</span>
-        <span class="tl-unread" title="Open"></span>
-        <span style="margin-left:auto;font-size:10px;color:var(--text3);">${inq.at ? relTime(inq.at) : ''}</span>
-      </div>
-      <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;">${escapeHtml(inq.worker||'Unknown')}</div>
-      <div class="tl-preview">${escapeHtml(inq.ai_summary || inq.message || '')}</div>
-      <div class="tl-meta">${inq.shift_date ? '📅 '+shiftDateLabel(inq.shift_date) : '💬 Direct message'}</div>
-    </div>`;
-  });
-
-  el.innerHTML = html;
-
-  // If something was selected, restore thread view
-  if (selectedTaskId) {
-    const [kind, id] = selectedTaskId.split('_').reduce((a,v,i)=>i===0?[v,'']:[a[0],a[1]+(a[1]?'_':'')+v],[]);
-    renderTaskThread(kind, id);
-  }
-}
-
-// ── Thread: select a task and show conversation ───────────────────────
-function selectTask(kind, id) {
-  selectedTaskId = kind + '_' + id;
-  // Highlight selected card
-  document.querySelectorAll('.task-list-card').forEach(c => c.classList.remove('selected'));
-  event?.currentTarget?.classList.add('selected');
-  renderTaskThread(kind, id);
-}
-
-function renderTaskThread(kind, id) {
-  const threadPanel  = document.getElementById('task-thread-panel');
-  const threadEmpty  = document.getElementById('task-thread-empty');
-  const headerEl     = document.getElementById('task-thread-header');
-  const messagesEl   = document.getElementById('task-thread-messages');
-  const closeBtn     = document.getElementById('task-thread-close-btn');
-  if (!threadPanel || !headerEl || !messagesEl) return;
-
-  threadEmpty.style.display  = 'none';
-  threadPanel.style.display  = 'flex';
-
-  const typeInfo = {
-    late:            { icon:'⏰', label:'Late arrival',   tagCls:'tag-late' },
-    dispute:         { icon:'🚫', label:'Cancellation',   tagCls:'tag-dispute' },
-    replacement:     { icon:'🔁', label:'Replacement',    tagCls:'tag-replacement' },
-    shift_inquiry:   { icon:'📋', label:'Shift inquiry',  tagCls:'tag-shift-inquiry' },
-    payment_inquiry: { icon:'💰', label:'Payment',        tagCls:'tag-payment-inquiry' },
-    other_inquiry:   { icon:'💬', label:'Other',          tagCls:'tag-other-inquiry' },
-  };
-
-  if (kind === 'inq') {
-    const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
-    if (!inq) return;
-    const info = typeInfo[inq.type] || typeInfo.other_inquiry;
-
-    headerEl.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <span class="task-tag ${info.tagCls}">${info.icon} ${info.label}</span>
-      <span style="font-size:15px;font-weight:600;">${escapeHtml(inq.worker)}</span>
-      ${inq.phone && inq.phone !== '0' ? `<span style="font-size:11px;color:var(--text3);font-family:var(--mono);">+${inq.phone}</span>` : ''}
-      ${inq.shift_date ? `<span style="font-size:12px;color:var(--text2);">📅 ${shiftDateLabel(inq.shift_date)}</span>` : ''}
-      <span style="margin-left:auto;">
-        <button class="btn btn-ghost btn-sm" onclick="closeInquiry('${escapeAttr(String(inq.id))}')">✓ Close</button>
-      </span>
-    </div>`;
-
-    // Build message thread from Supabase thread_messages (set by webhook)
-    // plus any locally stored outbound replies
-    let msgsHtml = '';
-    const supabaseThread = [];
-    try {
-      const parsed = JSON.parse(inq.thread_messages || '[]');
-      supabaseThread.push(...parsed);
-    } catch(e) {
-      // Fallback: show the original message as first entry
-      supabaseThread.push({ text: inq.message, direction: 'inbound', at: inq.at });
-    }
-    // Merge with locally stored outbound replies (sent from ShiftOps)
-    const localReplies = getWorkerThreadMessages(inq.phone || inq.worker);
-    // Combine and sort by timestamp
-    const allMsgs = [...supabaseThread, ...localReplies].sort((a, b) => new Date(a.at||0).getTime() - new Date(b.at||0).getTime());
-    // Deduplicate (same text + direction within 5s)
-    const seen = new Set();
-    allMsgs.forEach(m => {
-      const key = m.direction + '|' + (m.text||'').slice(0,30) + '|' + Math.floor(new Date(m.at||0).getTime()/5000);
-      if (seen.has(key)) return;
-      seen.add(key);
-      msgsHtml += renderThreadMsg(m.text, m.direction, m.at, m.direction === 'inbound' ? escapeHtml(inq.worker||'Worker') : 'Anytime Work');
-    });
-    messagesEl.innerHTML = msgsHtml || `<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px;">No messages yet</div>`;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-
-    // Pre-fill draft if saved
-    const draftEl = document.getElementById('task-thread-draft');
-    if (draftEl) draftEl.value = inq.draft || '';
-    document.getElementById('task-thread-draft-label').textContent = '✦ Reply';
-    if (closeBtn) closeBtn.onclick = () => closeInquiry(String(inq.id));
-
-    // Store current context for draft generation
-    threadPanel.dataset.kind = 'inq';
-    threadPanel.dataset.id   = String(inq.id);
-
-  } else {
-    // urgent task (late / dispute / replacement)
-    const urgentTasks = getOpenTasks();
-    const t = urgentTasks.find(x => String(x.id) === String(id));
-    if (!t) return;
-    const info = typeInfo[t.type] || { icon:'⚡', label:t.type, tagCls:'' };
-    const dLabel = shiftDateLabel(t.date);
-    const tRange = shiftTimeRange(t.start, t.end);
-
-    headerEl.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <span class="task-tag ${info.tagCls}">${info.icon} ${info.label}</span>
-      ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
-      <span style="font-size:15px;font-weight:600;">${escapeHtml(t.worker||'')}</span>
-      <span style="font-size:12px;color:var(--text2);">📅 ${dLabel}${tRange?' · 🕒 '+tRange:''}</span>
-      ${t.outlet ? `<span style="font-size:12px;color:var(--text2);">@ ${escapeHtml(t.outlet)}</span>` : ''}
-      <span style="margin-left:auto;display:flex;gap:6px;">
-        ${t.type==='dispute' ? `<button class="btn btn-primary btn-sm" onclick="acknowledgeDispute('${escapeAttr(String(t.id))}');renderTasksPage();">Acknowledge</button>
-          <button class="btn btn-danger btn-sm" onclick="openCancelFromDispute('${escapeAttr(String(t.id))}')">Process cancel</button>` : ''}
-        ${t.type==='late' && !t.acked ? `<button class="btn btn-primary btn-sm" onclick="ackLate('${escapeAttr(String(t.id))}')">Acknowledge</button>` : ''}
-        ${t.type==='late' && !t.outletInformed ? `<button class="btn btn-amber btn-sm" onclick="markOutletInformed('${escapeAttr(String(t.id))}')">Inform outlet ✓</button>` : ''}
-        <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
-      </span>
-    </div>`;
-
-    // Messages: the original reason + thread
-    const workerPhone = typeof window.workerPhone === 'function' ? window.workerPhone(t.worker) : '';
-    const threadMsgs = getWorkerThreadMessages(workerPhone || t.worker);
-    let msgsHtml = '';
-    if (t.reason) msgsHtml += renderThreadMsg(t.reason, 'inbound', t.at, t.worker||'Worker');
-    threadMsgs.forEach(m => {
-      msgsHtml += renderThreadMsg(m.text, m.direction, m.at, m.direction==='inbound' ? (t.worker||'Worker') : 'Anytime Work');
-    });
-    messagesEl.innerHTML = msgsHtml || `<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px;">No messages yet</div>`;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-
-    const draftEl = document.getElementById('task-thread-draft');
-    const uid = 'task_' + String(t.id).replace(/[^a-z0-9]/gi,'_');
-    if (draftEl) {
-      try { const d = JSON.parse(localStorage.getItem('task_drafts')||'{}'); draftEl.value = d[uid] || ''; } catch(e) { draftEl.value = ''; }
-    }
-    if (closeBtn) {
-      if (t.type === 'late') closeBtn.onclick = () => { clearLate(String(t.id)); renderTasksPage(); };
-      else if (t.type === 'dispute') closeBtn.onclick = () => { clearDispute(String(t.id)); renderTasksPage(); };
-      else closeBtn.onclick = () => renderTasksPage();
-    }
-    threadPanel.dataset.kind   = 'urgent';
-    threadPanel.dataset.id     = String(t.id);
-    threadPanel.dataset.worker = t.worker||'';
-    threadPanel.dataset.type   = t.type||'';
-    threadPanel.dataset.date   = dLabel;
-    threadPanel.dataset.time   = tRange;
-    threadPanel.dataset.outlet = t.outlet||'';
-    threadPanel.dataset.reason = t.reason||'';
-  }
-}
-
-function renderThreadMsg(text, direction, at, sender) {
-  const ts = at ? new Date(at).toLocaleTimeString('en-SG', { hour:'2-digit', minute:'2-digit', hour12:true }) : '';
-  return `<div style="display:flex;flex-direction:column;align-items:${direction==='outbound'?'flex-end':'flex-start'};">
-    <div class="task-thread-msg ${direction}">${escapeHtml(text)}</div>
-    <div class="task-thread-msg-meta" style="text-align:${direction==='outbound'?'right':'left'}">${escapeHtml(sender)} · ${ts}</div>
-  </div>`;
-}
-
-// localStorage thread store — keyed by phone or worker name
-function getWorkerThreadMessages(key) {
-  if (!key) return [];
-  try {
-    const all = JSON.parse(localStorage.getItem('worker_threads') || '{}');
-    return all[String(key)] || [];
-  } catch(e) { return []; }
-}
-function saveWorkerThreadMessage(key, msg) {
-  if (!key) return;
-  try {
-    const all = JSON.parse(localStorage.getItem('worker_threads') || '{}');
-    if (!all[String(key)]) all[String(key)] = [];
-    all[String(key)].push(msg);
-    // Keep last 50 messages per worker
-    if (all[String(key)].length > 50) all[String(key)] = all[String(key)].slice(-50);
-    localStorage.setItem('worker_threads', JSON.stringify(all));
-  } catch(e) {}
-}
-
-function closeTaskThread() {
-  const threadPanel = document.getElementById('task-thread-panel');
-  const threadEmpty = document.getElementById('task-thread-empty');
-  if (threadPanel) threadPanel.style.display = 'none';
-  if (threadEmpty) threadEmpty.style.display = 'flex';
-  selectedTaskId = null;
-  document.querySelectorAll('.task-list-card').forEach(c => c.classList.remove('selected'));
-}
-
-async function generateThreadDraft() {
-  const threadPanel = document.getElementById('task-thread-panel');
-  const draftEl     = document.getElementById('task-thread-draft');
-  const labelEl     = document.getElementById('task-thread-draft-label');
-  if (!threadPanel || !draftEl) return;
-
-  const kind = threadPanel.dataset.kind;
-  const id   = threadPanel.dataset.id;
-  if (labelEl) labelEl.innerHTML = '<span class="spinner-inline"></span> Drafting…';
-
-  const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpwZm5yc3hubmJ0Y2Fkc25qcnBjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkwODk0NTIsImV4cCI6MjA5NDY2NTQ1Mn0.Kord4oX6j6cO9LjomvympIFoPhRLEG04pSW8kASe7DY';
-  const PROXY = 'https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/claude-proxy';
-
-  const sys = `You are the operations coordinator for Anytime Work, a Singapore part-time worker marketplace for F&B and hospitality. Reply professionally but warmly, in simple clear English. Keep replies concise (2–4 sentences). Business rules: cancellations with valid MC waive penalty but suspension may still apply for repeated cases; shifts can only be amended with 24h notice and outlet approval; pay is processed weekly every Friday; late arrivals must be communicated to the outlet immediately. Be solution-focused and friendly.`;
-
-  let userMsg = '';
-  if (kind === 'inq') {
-    const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
-    if (!inq) { if (labelEl) labelEl.textContent = '✦ Reply'; return; }
-    const workerShifts = (allShifts||[])
-      .filter(s=>(s.worker_name||'').toLowerCase().trim()===(inq.worker||'').toLowerCase().trim())
-      .slice(0,3).map(s=>`${s.shift_date} ${s.scheduled_start||''}–${s.scheduled_end||''} @ ${s.outlet||''}`).join('; ');
-    const typeLabels = { shift_inquiry:'shift inquiry', payment_inquiry:'payment inquiry', other_inquiry:'general inquiry' };
-    userMsg = `Draft a reply to this worker's ${typeLabels[inq.type]||'inquiry'}.\nWorker: ${inq.worker}\nMessage: "${inq.message}"\n${workerShifts ? 'Upcoming shifts: '+workerShifts : ''}\nReturn only the reply text, no preamble.`;
-  } else {
-    userMsg = `Draft a reply to this worker.\nWorker: ${threadPanel.dataset.worker}\nSituation: ${threadPanel.dataset.type} — ${threadPanel.dataset.reason||'(no reason given)'}\nShift: ${threadPanel.dataset.date} ${threadPanel.dataset.time} @ ${threadPanel.dataset.outlet}\nReturn only the reply text, no preamble.`;
-  }
-
-  try {
-    const res = await fetch(PROXY, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ANON_KEY}` },
-      body: JSON.stringify({ system: sys, messages: [{ role: 'user', content: userMsg }] })
-    });
-    const data = await res.json();
-    const text = data?.content?.[0]?.text || '';
-    if (text) draftEl.value = text;
-    if (labelEl) labelEl.textContent = '✦ Reply';
-  } catch(e) {
-    if (labelEl) labelEl.textContent = '✦ Reply';
-    toast('Draft failed — check Periskope/proxy settings', 'error');
-  }
-}
-
-async function sendThreadReply() {
-  const threadPanel = document.getElementById('task-thread-panel');
-  const draftEl     = document.getElementById('task-thread-draft');
-  const statusEl    = document.getElementById('task-thread-send-status');
-  if (!threadPanel || !draftEl) return;
-
-  const draft = draftEl.value.trim();
-  if (!draft) { toast('Nothing to send', 'error'); return; }
-
-  const kind = threadPanel.dataset.kind;
-  const id   = threadPanel.dataset.id;
-
-  let phone = '';
-  let workerKey = '';
-
-  if (kind === 'inq') {
-    const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
-    if (!inq) return;
-    phone = inq.phone || (typeof workerPhone === 'function' ? workerPhone(inq.worker) : '');
-    workerKey = phone || inq.worker;
-    // Save draft back
-    try {
-      supabaseClient.from('worker_inquiries').update({ reply_draft: draft }).eq('id', parseInt(id));
-    } catch(e){}
-  } else {
-    const worker = threadPanel.dataset.worker;
-    phone = typeof window.workerPhone === 'function' ? window.workerPhone(worker) : '';
-    workerKey = phone || worker;
-  }
-
-  if (!phone || phone === '0') { toast('No phone number for this worker', 'error'); return; }
-
-  if (statusEl) statusEl.textContent = 'Sending…';
-  const ok = await sendPeriskopeMessage(phone, draft);
-
-  if (ok) {
-    const sentMsg = { text: draft, direction: 'outbound', at: new Date().toISOString() };
-    // Save locally
-    saveWorkerThreadMessage(workerKey, sentMsg);
-
-    if (kind === 'inq') {
-      const inq = (workerInquiriesCache || []).find(i => String(i.id) === String(id));
-      if (inq) {
-        // Append to Supabase thread_messages
-        let thread = [];
-        try { thread = JSON.parse(inq.thread_messages || '[]'); } catch(e) {}
-        thread.push(sentMsg);
-        inq.thread_messages = JSON.stringify(thread);
-        inq.status = 'replied';
-        try {
-          supabaseClient.from('worker_inquiries').update({
-            thread_messages: inq.thread_messages,
-            reply_draft: draft,
-            status: 'replied',
-            replied_at: sentMsg.at,
-            updated_at: sentMsg.at,
-          }).eq('id', parseInt(id));
-        } catch(e) {}
-      }
-    }
-
-    // Re-render thread to show the sent message
-    renderTaskThread(kind, id);
-    draftEl.value = '';
-    if (statusEl) statusEl.textContent = '';
-    toast('Sent ✓');
-  } else {
-    if (statusEl) statusEl.textContent = '';
-    toast('Send failed — check Periskope settings', 'error');
-  }
-}
-
-// Also update renderTasksPanel to refresh the page list if page is active
 function renderTasksPanel() {
-  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
-  // If the tasks page is visible, refresh it
-  if (document.getElementById('page-tasks')?.style.display !== 'none') {
-    renderTasksPage();
-    return;
-  }
-  // Legacy modal fallback (modal HTML still exists for metric card clicks)
   const el = document.getElementById('tasks-list');
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
   if (!el) return;
-  const urgentTasks = getOpenTasks();
-  const inquiries   = getStoredInquiries();
-  const f = currentTaskFilter;
-  const filteredUrgent = urgentTasks.filter(t => f==='all' || t.type===f);
-  const filteredInqs   = inquiries.filter(i => f==='all' || i.type===f);
-  if (!filteredUrgent.length && !filteredInqs.length) {
+  const tasks = getOpenTasks();
+  if (!tasks.length) {
     el.innerHTML = `<div style="text-align:center;padding:30px 12px;color:var(--text3);">
       <div style="font-size:28px;margin-bottom:8px;">✓</div>
-      <div style="font-weight:600;color:var(--green);">No open tasks</div>
+      <div style="font-weight:600;color:var(--green);">No urgent tasks right now</div>
+      <div class="sub-text" style="margin-top:4px;">Cancellation requests, late-arrival notices and replacement slots will appear here — for every date, not just today.</div>
     </div>`;
     return;
   }
-  let html = '';
   let lastDone = false;
-  filteredUrgent.forEach(t => {
+  el.innerHTML = tasks.map(t => {
     const dLabel = shiftDateLabel(t.date);
     const tRange = shiftTimeRange(t.start, t.end);
+    // Prominent shift line shown on every card: date + timing
     const shiftLine = `<div class="task-shift">📅 <strong>${dLabel}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>`;
     const when = t.at ? `<span class="task-when">${relTime(t.at)}</span>` : '';
+    // Separator before the first completed (collapsed) task
     let sep = '';
     if (t.done && !lastDone) { sep = '<div class="task-completed-divider">Completed</div>'; lastDone = true; }
-    html += sep + renderOneTaskCard(t, dLabel, tRange, shiftLine, when);
-  });
-  if (filteredInqs.length) {
-    if (filteredUrgent.length) html += '<div class="task-completed-divider" style="color:var(--text2);border-top-style:solid;">Worker Inquiries</div>';
-    filteredInqs.forEach(inq => { html += renderInquiryCard(inq); });
-  }
-  el.innerHTML = html;
+    const card = renderOneTaskCard(t, dLabel, tRange, shiftLine, when);
+    return sep + card;
+  }).join('');
 }
-
 function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
-    const uid = 'task_' + String(t.id).replace(/[^a-z0-9]/gi,'_');
-    function draftBox(ctx) {
-      let stored = {}; try { stored = JSON.parse(localStorage.getItem('task_drafts')||'{}'); } catch(e){}
-      const dv = (stored[uid]||'').replace(/"/g,'&quot;');
-      const ctxJson = JSON.stringify(ctx).replace(/'/g,"\'");
-      return `<div class="task-draft-box">
-        <div class="task-draft-label" id="dlabel-${uid}">\u2746 AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span></div>
-        <textarea class="task-draft-textarea" id="dta-${uid}" placeholder="Click 'Draft reply' to generate, or type manually\u2026" oninput="saveTaskDraft('${uid}',this.value)">${dv}</textarea>
-        <div class="task-draft-actions">
-          <button class="btn btn-primary btn-sm" onclick="generateTaskDraft('${uid}',${ctxJson})">\u2746 Draft reply</button>
-          <button class="btn btn-amber btn-sm" id="tsend-${uid}" onclick="sendTaskDraft('${uid}','${escapeAttr(String(t.worker||''))}')">\ud83d\udce4 Send via Periskope</button>
-        </div>
-      </div>`;
-    }
     if (t.type === 'dispute') {
       const kindTxt = t.kind === 'cancel' ? 'wants to cancel'
         : (t.kind === 'cantmake' ? "can't make this shift" : 'flagged an issue');
-      const reason = t.reason ? `<div class="task-reason">"${escapeHtml(t.reason)}"</div>` : '';
-      const ctx = { type:'dispute', worker:t.worker||'', outlet:t.outlet||'', date:dLabel, time:tRange, kind:t.kind||'', reason:t.reason||''};
+      const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
       return `<div class="task-card task-dispute">
         <div class="task-head">
-          <span class="task-tag tag-dispute">\ud83d\udeab Cancellation request</span>
+          <span class="task-tag tag-dispute">🚫 Cancellation request</span>
           ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
           ${when}
         </div>
         <div class="task-body">
           <div class="task-title">${escapeHtml(t.worker)} ${kindTxt}</div>
           ${shiftLine}
-          <div class="task-meta">\ud83d\udc64 <strong>${escapeHtml(t.worker)}</strong> \u00b7 ${escapeHtml(t.outlet)}</div>
+          <div class="task-meta">👤 <strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)}</div>
           ${reason}
         </div>
         <div class="task-actions">
-          <button class="btn btn-primary btn-sm" onclick="acknowledgeDispute('${escapeAttr(String(t.id))}')">Acknowledge</button>
+          <button class="btn btn-primary btn-sm" onclick="acknowledgeDispute('${escapeAttr(String(t.id))}')" title="Confirm the drop-out and move this to Replacement needed (no penalty applied here)">Acknowledge</button>
           <button class="btn btn-danger btn-sm" onclick="openCancelFromDispute('${escapeAttr(String(t.id))}')">Process cancellation</button>
           <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
           <button class="btn btn-ghost btn-sm" onclick="clearDispute('${escapeAttr(String(t.id))}'); renderTasksPanel();">Dismiss</button>
         </div>
-        ${draftBox(ctx)}
       </div>`;
     }
     if (t.type === 'replacement') {
       const whoTxt = t.worker ? `${escapeHtml(t.worker)} dropped out` : 'Worker dropped out';
       return `<div class="task-card task-replacement">
         <div class="task-head">
-          <span class="task-tag tag-replacement">\ud83d\udd01 Replacement needed</span>
+          <span class="task-tag tag-replacement">🔁 Replacement needed</span>
           ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
           ${when}
         </div>
         <div class="task-body">
-          <div class="task-title">${whoTxt} \u2014 slot open${t.role ? ' \u00b7 '+escapeHtml(t.role) : ''}</div>
+          <div class="task-title">${whoTxt} — slot open${t.role ? ' · '+escapeHtml(t.role) : ''}</div>
           ${shiftLine}
-          <div class="task-meta">${escapeHtml(t.outlet)} \u00b7 slot returned to Available</div>
+          <div class="task-meta">${escapeHtml(t.outlet)} · slot returned to Available</div>
         </div>
         <div class="task-actions">
           <button class="btn btn-primary btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">Assign / re-fill</button>
@@ -4909,26 +4105,26 @@ function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
       </div>`;
     }
     // Late notice
-    const reason = t.reason ? `<div class="task-reason">"${escapeHtml(t.reason)}"</div>` : '';
-    const ackBadge = t.acked ? '<span class="task-tag tag-done">\u2713 Acknowledged</span>' : '';
-    const informedBadge = t.outletInformed ? '<span class="task-tag tag-done">\u2713 Outlet informed</span>' : '';
+    const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
+    const ackBadge = t.acked ? '<span class="task-tag tag-done">✓ Acknowledged</span>' : '';
+    const informedBadge = t.outletInformed ? '<span class="task-tag tag-done">✓ Outlet informed</span>' : '';
+    // COMPLETED late task → collapsed, compact card pinned to the bottom of the panel.
     if (t.done) {
       const compWhen = t.completedAt ? `<span class="task-when">done ${relTime(t.completedAt)}</span>` : when;
       return `<div class="task-card task-late task-done task-collapsed">
         <div class="task-head">
-          <span class="task-tag tag-late">\u23f0 Late arrival</span>
-          <span class="task-tag tag-done">\u2713 Done</span>
+          <span class="task-tag tag-late">⏰ Late arrival</span>
+          <span class="task-tag tag-done">✓ Done</span>
           ${compWhen}
         </div>
         <div class="task-body">
-          <div class="task-collapsed-line"><strong>${escapeHtml(t.worker)}</strong> \u00b7 ${escapeHtml(t.outlet)} \u00b7 ${shiftDateLabel(t.date)}${tRange ? ' \u00b7 '+tRange : ''}</div>
+          <div class="task-collapsed-line"><strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)} · ${shiftDateLabel(t.date)}${tRange ? ' · '+tRange : ''}</div>
         </div>
       </div>`;
     }
-    const ctx2 = { type:'late', worker:t.worker||'', outlet:t.outlet||'', date:dLabel, time:tRange, reason:t.reason||''};
     return `<div class="task-card task-late">
       <div class="task-head">
-        <span class="task-tag tag-late">\u23f0 Late arrival</span>
+        <span class="task-tag tag-late">⏰ Late arrival</span>
         ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
         ${ackBadge}${informedBadge}
         ${when}
@@ -4941,84 +4137,18 @@ function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
       </div>
       <div class="task-actions">
         ${!t.acked ? `<button class="btn btn-primary btn-sm" onclick="ackLate('${escapeAttr(String(t.id))}')">Acknowledge</button>` : ''}
-        ${!t.outletInformed ? `<button class="btn btn-amber btn-sm" onclick="markOutletInformed('${escapeAttr(String(t.id))}')">Inform outlet \u2713</button>` : ''}
+        ${!t.outletInformed ? `<button class="btn btn-amber btn-sm" onclick="markOutletInformed('${escapeAttr(String(t.id))}')">Inform outlet ✓</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
         <button class="btn btn-ghost btn-sm" onclick="clearLate('${escapeAttr(String(t.id))}'); renderTasksPanel();">Clear</button>
       </div>
-      ${draftBox(ctx2)}
     </div>`;
 }
-function saveTaskDraft(uid, val) {
-  try { const d = JSON.parse(localStorage.getItem('task_drafts')||'{}'); d[uid]=val; localStorage.setItem('task_drafts', JSON.stringify(d)); } catch(e){}
-}
-async function generateTaskDraft(uid, ctx) {
-  const labelEl = document.getElementById(`dlabel-${uid}`);
-  const taEl    = document.getElementById(`dta-${uid}`);
-  if (labelEl) labelEl.innerHTML = '<span class="spinner-inline"></span> Claude is drafting\u2026';
-  const typeLabels = { dispute:'cancellation request', late:'late arrival notice' };
-  const sys = `You are the operations coordinator for Anytime Work, a Singapore part-time worker marketplace for F&B and hospitality. Reply professionally but warmly, in simple clear English. Keep replies concise (2\u20134 sentences). Business rules: cancellations with valid MC waive penalty but suspension may still apply for repeated cases; pay is weekly every Friday; late arrivals must be communicated to the outlet immediately. Always be solution-focused.`;
-  const user = `Draft a professional reply to a worker's ${typeLabels[ctx.type]||ctx.type}.\nWorker: ${ctx.worker}\nShift: ${ctx.date}${ctx.time?' at '+ctx.time:''}${ctx.outlet?' @ '+ctx.outlet:''}\n${ctx.reason?'Worker said: "'+ctx.reason+'"':''}\nReturn only the reply message, no preamble.`;
-  try {
-    const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpwZm5yc3hubmJ0Y2Fkc25qcnBjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkwODk0NTIsImV4cCI6MjA5NDY2NTQ1Mn0.Kord4oX6j6cO9LjomvympIFoPhRLEG04pSW8kASe7DY';
-    const res = await fetch('https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/claude-proxy', { method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':`Bearer ${ANON_KEY}`},
-      body: JSON.stringify({ system:sys, messages:[{role:'user',content:user}] }) });
-    const data = await res.json();
-    const text = data?.content?.[0]?.text || '';
-    if (text && taEl) { taEl.value = text; saveTaskDraft(uid, text); }
-    if (labelEl) labelEl.innerHTML = '\u2746 AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span>';
-  } catch(e) { if (labelEl) labelEl.innerHTML = '\u2746 AI Draft'; toast('Draft generation failed','error'); }
-}
-async function sendTaskDraft(uid, workerName) {
-  const taEl = document.getElementById(`dta-${uid}`);
-  const draft = taEl?.value?.trim();
-  if (!draft) { toast('Nothing to send \u2014 draft is empty','error'); return; }
-  const phone = typeof workerPhone === 'function' ? workerPhone(workerName) : '';
-  if (!phone) { toast('No phone number for this worker','error'); return; }
-  const btn = document.getElementById(`tsend-${uid}`);
-  if (btn) { btn.disabled=true; btn.textContent='Sending\u2026'; }
-  const ok = await sendPeriskopeMessage(phone, draft);
-  if (ok) { toast('Reply sent via Periskope \u2713'); }
-  else { toast('Send failed \u2014 check Periskope settings','error'); }
-  if (btn) { btn.disabled=false; btn.textContent='\ud83d\udce4 Send via Periskope'; }
-}
-
 // Jump to the shift's day in attendance from a task, closing the panel first
 function jumpToShiftFromTask(shiftId, dateStr) {
   closeTasksPanel();
   if (typeof jumpToShift === 'function' && dateStr) {
     jumpToShift(dateStr, shiftId);
   }
-}
-// ── Inquiry card renderer ────────────────────────────────────────
-function renderInquiryCard(inq) {
-  const typeMap = {
-    shift_inquiry:   { cls:'task-shift-inquiry',   tag:'tag-shift-inquiry',   icon:'📋', label:'Shift inquiry' },
-    payment_inquiry: { cls:'task-payment-inquiry',  tag:'tag-payment-inquiry',  icon:'💰', label:'Payment inquiry' },
-    other_inquiry:   { cls:'task-other-inquiry',    tag:'tag-other-inquiry',    icon:'💬', label:'Other inquiry' },
-  };
-  const m = typeMap[inq.type] || typeMap.other_inquiry;
-  const when = inq.at ? `<span class="task-when">${relTime(inq.at)}</span>` : '';
-  const draftVal = (inq.draft||'').replace(/"/g,'&quot;');
-  return `<div class="task-card ${m.cls}" id="inq-card-${inq.id}">
-    <div class="task-head">
-      <span class="task-tag ${m.tag}">${m.icon} ${m.label}</span>
-      ${when}
-    </div>
-    <div class="task-body">
-      <div class="task-title">${escapeHtml(inq.worker)}</div>
-      <div class="task-reason">"${escapeHtml(inq.message)}"</div>
-    </div>
-    <div class="task-draft-box">
-      <div class="task-draft-label" id="draft-label-${inq.id}">✦ AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span></div>
-      <textarea class="task-draft-textarea" id="draft-ta-${inq.id}" placeholder="Click 'Draft reply' to generate, or type manually…" oninput="updateInquiryDraft('${inq.id}',this.value)">${draftVal}</textarea>
-      <div class="task-draft-actions">
-        <button class="btn btn-primary btn-sm" onclick="generateInquiryDraft('${inq.id}')">✦ Draft reply</button>
-        <button class="btn btn-amber btn-sm" id="send-btn-${inq.id}" onclick="sendInquiryReply('${inq.id}')">📤 Send via Periskope</button>
-        <button class="btn btn-ghost btn-sm" onclick="closeInquiry('${inq.id}')">✓ Close</button>
-      </div>
-    </div>
-  </div>`;
 }
 
 async function loadShifts() {
