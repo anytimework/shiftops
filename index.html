@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v35 — Tasks panel expanded: wider modal (860px), category filter bar (All / Late / Cancellation / Shift inquiry / Payment / Other), new "+ New Inquiry" button to log worker messages manually, AI-powered draft reply on all task types (dispute, late, inquiries) via Anthropic API, Send via Periskope button on each draft. Task drafts persisted locally per task. New inquiry types: shift_inquiry, payment_inquiry, other_inquiry stored in worker_inquiries localStorage. -->
+<!-- Build patch: v36 — Worker inquiries now Supabase-backed (worker_inquiries table) with realtime subscription. periskope-webhook updated to use Claude (Haiku) to classify ALL inbound worker messages (late, dispute, shift inquiry, payment inquiry, other inquiry, ack) and auto-insert into worker_inquiries. Tasks panel nav badge now counts open inquiries from Supabase. Inquiries appear instantly in Tasks panel via realtime push without manual logging. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -1979,6 +1979,8 @@ async function init() {
   updateSidebarDate();
   requireInternalLogin();
   subscribeToReminderChanges(); // live sync + 30s polling fallback
+  loadWorkerInquiries();        // load open inquiries from Supabase
+  subscribeWorkerInquiries();   // realtime push for new webhook-created inquiries
   checkReminderAlerts();
   updateTasksNavBadge();
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
@@ -3984,7 +3986,9 @@ function getOpenTasks() {
 }
 // Count of tasks still requiring action (excludes completed/collapsed tasks)
 function openTaskCount() {
-  return getOpenTasks().filter(t => !t.done).length;
+  const urgentCount = getOpenTasks().filter(t => !t.done).length;
+  const inquiryCount = (workerInquiriesCache || []).filter(i => i.status === 'open').length;
+  return urgentCount + inquiryCount;
 }
 // Keep the always-visible sidebar Tasks badge in sync (works on every page)
 function updateTasksNavBadge() {
@@ -4134,40 +4138,135 @@ async function submitNewInquiry() {
   toast('Inquiry logged ✓');
   renderTasksPanel();
 }
+// ── Worker Inquiries — Supabase-backed ──────────────────────────────
+// Cached locally for instant render; Supabase is source of truth.
+let workerInquiriesCache = [];
+async function loadWorkerInquiries() {
+  // Seed from localStorage for instant paint
+  try { workerInquiriesCache = JSON.parse(localStorage.getItem('worker_inquiries_cache') || '[]'); } catch(e) { workerInquiriesCache = []; }
+  try {
+    const { data, error } = await supabaseClient
+      .from('worker_inquiries')
+      .select('*')
+      .eq('status', 'open')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (!error && Array.isArray(data)) {
+      workerInquiriesCache = data.map(r => ({
+        id: String(r.id),
+        worker: r.worker_name || '',
+        phone: r.worker_phone || '',
+        type: r.category || 'other_inquiry',
+        message: r.message || '',
+        ai_summary: r.ai_summary || '',
+        shift_id: r.shift_id || null,
+        shift_date: r.shift_date || '',
+        status: r.status || 'open',
+        draft: r.reply_draft || '',
+        at: r.created_at || '',
+      }));
+      try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(workerInquiriesCache)); } catch(e){}
+    }
+  } catch(e) { /* keep cached */ }
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+  if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+}
+function subscribeWorkerInquiries() {
+  try {
+    supabaseClient
+      .channel('worker_inquiries_live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'worker_inquiries' }, () => {
+        loadWorkerInquiries();
+      })
+      .subscribe();
+  } catch(e) {}
+}
 function getStoredInquiries() {
-  try { return JSON.parse(localStorage.getItem('worker_inquiries') || '[]'); } catch(e) { return []; }
+  return (workerInquiriesCache || []).filter(i => i.status === 'open');
 }
-function saveStoredInquiries(arr) {
-  localStorage.setItem('worker_inquiries', JSON.stringify(arr));
+async function saveStoredInquiries(arr) {
+  // Update local cache
+  workerInquiriesCache = arr;
+  try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(arr)); } catch(e){}
 }
-function updateInquiryDraft(id, val) {
-  const inqs = getStoredInquiries();
-  const inq = inqs.find(i=>i.id===id);
-  if (inq) { inq.draft = val; saveStoredInquiries(inqs); }
+async function updateInquiryDraft(id, val) {
+  // Update cache optimistically
+  const inq = (workerInquiriesCache || []).find(i => i.id === id);
+  if (inq) { inq.draft = val; }
+  try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(workerInquiriesCache)); } catch(e){}
+  // Persist to Supabase (debounced via try/catch — no await to keep typing smooth)
+  try {
+    supabaseClient.from('worker_inquiries').update({ reply_draft: val, updated_at: new Date().toISOString() }).eq('id', parseInt(id));
+  } catch(e){}
 }
-function closeInquiry(id) {
-  const inqs = getStoredInquiries();
-  const inq = inqs.find(i=>i.id===id);
-  if (inq) { inq.status = 'closed'; saveStoredInquiries(inqs); }
+async function closeInquiry(id) {
+  // Optimistic local update
+  const inqs = workerInquiriesCache || [];
+  const inq = inqs.find(i => i.id === id);
+  if (inq) { inq.status = 'closed'; }
+  workerInquiriesCache = inqs;
+  try { localStorage.setItem('worker_inquiries_cache', JSON.stringify(inqs)); } catch(e){}
   renderTasksPanel();
+  // Persist to Supabase
+  try {
+    await supabaseClient.from('worker_inquiries').update({ status: 'closed', updated_at: new Date().toISOString() }).eq('id', parseInt(id));
+  } catch(e) {}
   toast('Inquiry closed ✓');
 }
+async function submitNewInquiry() {
+  const worker = document.getElementById('inq-worker')?.value.trim();
+  const type   = document.getElementById('inq-type')?.value || 'other_inquiry';
+  const msg    = document.getElementById('inq-message')?.value.trim();
+  if (!worker || !msg) { toast('Please fill in worker name and message', 'error'); return; }
+  // Find phone from loaded shifts
+  const shift = (allShifts||[]).find(s=> (s.worker_name||'').toLowerCase().trim() === worker.toLowerCase().trim());
+  const phone = shift?.worker_phone || '';
+  // Insert into Supabase
+  try {
+    const { data, error } = await supabaseClient.from('worker_inquiries').insert({
+      worker_name: worker,
+      worker_phone: phone || '0',
+      message: msg,
+      category: type,
+      ai_summary: msg.slice(0, 80),
+      status: 'open',
+    }).select().single();
+    if (!error && data) {
+      workerInquiriesCache.unshift({
+        id: String(data.id), worker, phone: phone||'', type, message: msg,
+        ai_summary: data.ai_summary||msg.slice(0,80), shift_id: null, shift_date: '',
+        status: 'open', draft: '', at: data.created_at||new Date().toISOString()
+      });
+    }
+  } catch(e) {
+    // Fallback to local if Supabase fails
+    const id = 'inq_' + Date.now();
+    workerInquiriesCache.unshift({ id, worker, phone:'', type, message: msg, ai_summary:'', shift_id:null, shift_date:'', status:'open', draft:'', at: new Date().toISOString() });
+  }
+  document.getElementById('inq-worker').value = '';
+  document.getElementById('inq-message').value = '';
+  document.getElementById('new-inquiry-panel').style.display = 'none';
+  toast('Inquiry logged ✓');
+  renderTasksPanel();
+}
 async function sendInquiryReply(id) {
-  const inqs = getStoredInquiries();
+  const inqs = workerInquiriesCache || [];
   const inq = inqs.find(i=>i.id===id);
   if (!inq) return;
   const draft = document.getElementById(`draft-ta-${id}`)?.value || inq.draft || '';
   if (!draft.trim()) { toast('Nothing to send — draft is empty', 'error'); return; }
-  // Look up worker phone
-  const shift = (allShifts||[]).find(s=> (s.worker_name||'').toLowerCase().trim() === (inq.worker||'').toLowerCase().trim());
-  const phone = shift?.worker_phone || (typeof workerPhone === 'function' ? workerPhone(inq.worker) : '');
-  if (!phone) { toast('No phone number found for this worker', 'error'); return; }
+  const phone = inq.phone || (typeof workerPhone === 'function' ? workerPhone(inq.worker) : '');
+  if (!phone || phone === '0') { toast('No phone number found for this worker', 'error'); return; }
   const btn = document.getElementById(`send-btn-${id}`);
   if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
   const ok = await sendPeriskopeMessage(phone, draft.trim());
   if (ok) {
-    inq.draft = draft; inq.status = 'closed'; inq.repliedAt = new Date().toISOString();
-    saveStoredInquiries(inqs);
+    inq.draft = draft; inq.status = 'replied'; inq.repliedAt = new Date().toISOString();
+    try {
+      await supabaseClient.from('worker_inquiries').update({
+        reply_draft: draft, status: 'replied', replied_at: inq.repliedAt, updated_at: inq.repliedAt
+      }).eq('id', parseInt(id));
+    } catch(e){}
     toast('Reply sent via Periskope ✓');
     renderTasksPanel();
   } else {
@@ -4176,8 +4275,7 @@ async function sendInquiryReply(id) {
   }
 }
 async function generateInquiryDraft(id) {
-  const inqs = getStoredInquiries();
-  const inq = inqs.find(i=>i.id===id);
+  const inq = (workerInquiriesCache || []).find(i=>i.id===id);
   if (!inq) return;
   const labelEl = document.getElementById(`draft-label-${id}`);
   const taEl    = document.getElementById(`draft-ta-${id}`);
