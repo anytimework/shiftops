@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v29 — Tasks dashboard card + Tasks panel (disputes + late notices), late-arrival capture (acknowledge + inform outlet), good-will cancellation option, MC made optional/deferrable, Cancelled card renamed to Replacement Needed -->
 <!-- Build patch: v28 — Periskope acknowledgement auto-tick + shift dispute/cancellation detection (disputed/dispute_kind/dispute_reason/dispute_at) -->
 <!-- Build patch: v27 — local expandable attendance comments without DB schema changes -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -166,6 +167,28 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .reminder-flag-label { font-size: 9.5px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.4px; font-weight: 700; }
 .btn-flag-issue { font-size: 10px; padding: 2px 7px; border-radius: 4px; cursor: pointer; font-family: var(--font); font-weight: 500; border: 1px solid rgba(232,64,64,0.35); background: none; color: #e88; }
 .btn-flag-issue:hover { background: rgba(232,64,64,0.12); color: #ff9a9a; }
+/* Tasks card + amber button + tasks panel */
+.btn-amber { background: var(--amber-dim, rgba(245,166,35,0.15)); border: 1px solid rgba(245,166,35,0.3); color: var(--amber); }
+.btn-amber:hover { background: rgba(245,166,35,0.25); }
+.metric-card-tasks { border-color: rgba(245,166,35,0.3); }
+.metric-card-tasks.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
+.modal-wide { max-width: 640px; width: 92%; }
+.task-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--bg2); }
+.task-card.task-dispute { border-left: 3px solid var(--red); }
+.task-card.task-late { border-left: 3px solid var(--amber); }
+.task-card.task-done { opacity: 0.62; }
+.task-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 7px; }
+.task-tag { font-size: 10px; font-weight: 700; letter-spacing: 0.3px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; font-family: var(--mono); }
+.tag-dispute { background: rgba(232,64,64,0.15); color: #ff9a9a; }
+.tag-late { background: rgba(245,166,35,0.15); color: var(--amber); }
+.tag-today { background: rgba(79,142,247,0.18); color: #8fb6ff; }
+.tag-done { background: rgba(60,200,120,0.15); color: #6fdd9b; }
+.task-when { font-size: 11px; color: var(--text3); margin-left: auto; }
+.task-title { font-weight: 600; font-size: 14px; color: var(--text); }
+.task-meta { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.task-reason { margin-top: 6px; font-size: 12px; color: var(--text2); font-style: italic; background: var(--bg3); border-radius: 6px; padding: 6px 9px; }
+.task-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
+.task-actions .btn { padding: 6px 12px; font-size: 12px; }
 /* Grouped collapsible night-reminder alert */
 .ra-grouped { flex-direction: column; cursor: pointer; user-select: none; }
 .ra-summary { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -1026,6 +1049,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <select id="cancel-type" onchange="updateCancelTypeUI()">
         <option value="worker_penalty">Worker cancellation - apply $15 penalty</option>
         <option value="worker_mc">Worker cancellation with MC - waive penalty</option>
+        <option value="worker_goodwill">Worker cancellation - NO penalty (good will)</option>
         <option value="outlet_bypass">Outlet cancelled shift - delete slot completely</option>
       </select>
       <div id="cancel-type-note" class="sub-text" style="margin-top:6px;line-height:1.5;">Penalty applies and counts toward worker suspension.</div>
@@ -1038,10 +1062,11 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     </div>
     <div class="divider"></div>
     <div id="mc-upload-section">
-    <div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-family:var(--mono);">Upload MC to waive $15 penalty</div>
+    <div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-family:var(--mono);">Upload MC to waive $15 penalty <span style="color:var(--amber);text-transform:none;letter-spacing:0;font-weight:500;">(optional — can be added later)</span></div>
+    <div class="alert alert-amber" style="margin-bottom:8px;"><span class="alert-icon">ℹ️</span><span>No MC yet? You can confirm now and the penalty stays waived as pending — upload the MC later from the shift row when the worker sends it.</span></div>
     <div class="upload-zone" onclick="document.getElementById('mc-file').click()">
       <div style="font-size:20px;margin-bottom:4px;">📄</div>
-      Tap to upload MC photo or PDF
+      Tap to upload MC photo or PDF (optional)
       <input type="file" id="mc-file" accept="image/*,.pdf" onchange="handleMcUpload(event)">
     </div>
     <div class="mc-uploaded" id="mc-uploaded">
@@ -1054,6 +1079,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <button class="btn btn-ghost btn-sm" onclick="closeCancelModal()">Back</button>
       <button class="btn btn-danger btn-sm" onclick="confirmCancel()">Confirm cancellation</button>
     </div>
+  </div>
+</div>
+
+<!-- TASKS PANEL MODAL -->
+<div class="modal-overlay" id="tasks-modal">
+  <div class="modal modal-wide">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+      <h3 style="margin:0;">⚡ Urgent tasks</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeTasksPanel()">Close</button>
+    </div>
+    <div class="sub-text" style="margin-bottom:12px;">Cancellation requests and late-arrival notices that need an agent to act now. Disputes need a cancellation decision; late notices need acknowledgement and the outlet informed.</div>
+    <div id="tasks-list"></div>
   </div>
 </div>
 
@@ -1593,7 +1630,7 @@ let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby
 let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, totalDeducted }
 // Built-in WA fallback — used when localStorage has no saved config (e.g. different origin / first open)
 const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
-let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt }
+let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt, lateNotified, lateReason, lateAt, lateAck, outletInformed }
 let attendanceView = 'day';
 let activeMetricFilter = 'all';
 let collapsedView = false;
@@ -1832,7 +1869,12 @@ async function loadReminders() {
           disputed: !!r.disputed,
           disputeKind: r.dispute_kind || '',
           disputeReason: r.dispute_reason || '',
-          disputeAt: r.dispute_at || ''
+          disputeAt: r.dispute_at || '',
+          lateNotified: !!r.late_notified,
+          lateReason: r.late_reason || '',
+          lateAt: r.late_at || '',
+          lateAck: !!r.late_ack,
+          outletInformed: !!r.outlet_informed
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1856,6 +1898,11 @@ async function persistReminder(shiftId) {
       dispute_kind: r.disputeKind || null,
       dispute_reason: r.disputeReason || null,
       dispute_at: r.disputeAt || null,
+      late_notified: !!r.lateNotified,
+      late_reason: r.lateReason || null,
+      late_at: r.lateAt || null,
+      late_ack: !!r.lateAck,
+      outlet_informed: !!r.outletInformed,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -1887,7 +1934,12 @@ function subscribeToReminderChanges() {
             disputed: !!row.disputed,
             disputeKind: row.dispute_kind || '',
             disputeReason: row.dispute_reason || '',
-            disputeAt: row.dispute_at || ''
+            disputeAt: row.dispute_at || '',
+            lateNotified: !!row.late_notified,
+            lateReason: row.late_reason || '',
+            lateAt: row.late_at || '',
+            lateAck: !!row.late_ack,
+            outletInformed: !!row.outlet_informed
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1917,7 +1969,12 @@ async function silentSyncReminders() {
         disputed: !!r.disputed,
         disputeKind: r.dispute_kind || '',
         disputeReason: r.dispute_reason || '',
-        disputeAt: r.dispute_at || ''
+        disputeAt: r.dispute_at || '',
+        lateNotified: !!r.late_notified,
+        lateReason: r.late_reason || '',
+        lateAt: r.late_at || '',
+        lateAck: !!r.late_ack,
+        outletInformed: !!r.outlet_informed
       };
     });
     // Find shift IDs where something changed
@@ -1928,7 +1985,9 @@ async function silentSyncReminders() {
       const b = incoming[id] || {};
       if (a.nightSent !== b.nightSent || a.nightAcked !== b.nightAcked ||
           a.clockinSent !== b.clockinSent || a.clockinResponded !== b.clockinResponded ||
-          a.disputed !== b.disputed || (a.disputeReason||'') !== (b.disputeReason||'')) {
+          a.disputed !== b.disputed || (a.disputeReason||'') !== (b.disputeReason||'') ||
+          a.lateNotified !== b.lateNotified || a.lateAck !== b.lateAck ||
+          a.outletInformed !== b.outletInformed || (a.lateReason||'') !== (b.lateReason||'')) {
         changed.push(id);
       }
     });
@@ -1948,7 +2007,7 @@ async function toggleReminder(shiftId, field, checked) {
   await persistReminder(shiftId);      // sync to Supabase for all other users
 }
 async function undoFullAck(shiftId) {
-  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '' };
+  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
@@ -1975,6 +2034,65 @@ async function flagDispute(shiftId, kind) {
   checkReminderAlerts();
   await persistReminder(shiftId);
   toast('⚠ Shift flagged as disputed');
+}
+// ── Late-arrival notice handling ──────────────────────────────
+// Worker notified they're running late. Surfaces in the Tasks panel for an agent
+// to acknowledge and to inform the outlet. Can be set by the webhook or manually.
+async function flagLate(shiftId, reason) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].lateNotified = true;
+  shiftReminders[shiftId].lateReason = reason || '';
+  shiftReminders[shiftId].lateAt = new Date().toISOString();
+  shiftReminders[shiftId].lateAck = false;
+  shiftReminders[shiftId].outletInformed = false;
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  renderTasksPanel();
+  await persistReminder(shiftId);
+  toast('⏰ Late arrival logged as a task');
+}
+// Agent picks up / acknowledges the late notice
+async function ackLate(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].lateAck = true;
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  renderTasksPanel();
+  await persistReminder(shiftId);
+  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  if (s) await logActivity('Late arrival acknowledged',
+    `${s.worker_name || 'Worker'}'s late arrival at ${s.outlet || '—'} was acknowledged by ops.`,
+    'shift', shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  toast('✓ Late arrival acknowledged');
+}
+// Agent marks that the outlet has been informed of the late arrival
+async function markOutletInformed(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].outletInformed = true;
+  shiftReminders[shiftId].lateAck = true; // informing implies acknowledged
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  renderTasksPanel();
+  await persistReminder(shiftId);
+  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  if (s) await logActivity('Outlet informed of late arrival',
+    `Outlet ${s.outlet || '—'} was informed that ${s.worker_name || 'the worker'} will arrive late.`,
+    'shift', shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  toast('✓ Outlet informed');
+}
+// Fully clear a late notice (resolved)
+async function clearLate(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].lateNotified = false;
+  shiftReminders[shiftId].lateReason = '';
+  shiftReminders[shiftId].lateAt = '';
+  shiftReminders[shiftId].lateAck = false;
+  shiftReminders[shiftId].outletInformed = false;
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  renderTasksPanel();
+  await persistReminder(shiftId);
+  toast('✓ Late notice cleared');
 }
 function updateReminderPanelInPlace(shiftId) {
   const row = document.getElementById('row-' + shiftId);
@@ -2005,7 +2123,7 @@ function reminderPanelHtml(s) {
   const isTomorrow = shiftDay.getTime() === tomorrow.getTime();
   const isPast     = shiftDay.getTime() < today.getTime();
   const r = shiftReminders[s.id] || {};
-  const hasAnyData = r.nightSent || r.nightAcked || r.clockinSent || r.clockinResponded || r.disputed;
+  const hasAnyData = r.nightSent || r.nightAcked || r.clockinSent || r.clockinResponded || r.disputed || r.lateNotified;
   // Show panel for today, tomorrow, OR any past shift that already has reminder data recorded
   if (!isToday && !isTomorrow && !hasAnyData) return '';
   const sidEarly = escapeAttr(String(s.id));
@@ -2026,9 +2144,32 @@ function reminderPanelHtml(s) {
       </div>
     </div>`;
   }
+  // ── Late-arrival banner — worker notified they will be late ──
+  function lateBanner() {
+    if (!r.lateNotified) return '';
+    const when = r.lateAt ? new Date(r.lateAt).toLocaleString('en-SG', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+    const reason = r.lateReason ? `<div class="dispute-reason">“${escapeHtml(r.lateReason)}”</div>` : '';
+    const statusBits = [
+      r.lateAck ? '<span style="color:#6fdd9b;">✓ Acknowledged</span>' : '',
+      r.outletInformed ? '<span style="color:#6fdd9b;">✓ Outlet informed</span>' : ''
+    ].filter(Boolean).join(' · ');
+    return `<div class="dispute-banner" style="background:rgba(245,166,35,0.13);border-color:rgba(245,166,35,0.4);border-left-color:var(--amber);">
+      <div class="dispute-head" style="color:var(--amber);">⏰ <strong>Worker running LATE</strong>${when ? ` <span class="dispute-when">· ${when}</span>` : ''}</div>
+      ${reason}
+      ${statusBits ? `<div style="font-size:11px;margin-top:4px;">${statusBits}</div>` : ''}
+      <div class="dispute-actions">
+        ${!r.lateAck ? `<button class="btn-dispute-act" style="background:var(--accent);color:#fff;border:none;" onclick="ackLate('${sidEarly}')">Acknowledge</button>` : ''}
+        ${!r.outletInformed ? `<button class="btn-dispute-act" style="background:rgba(245,166,35,0.2);color:var(--amber);border:1px solid rgba(245,166,35,0.4);" onclick="markOutletInformed('${sidEarly}')">Inform outlet ✓</button>` : ''}
+        <button class="btn-dispute-act clear" onclick="clearLate('${sidEarly}')">Clear</button>
+      </div>
+    </div>`;
+  }
   const isFullyAck = r.nightSent && r.nightAcked && r.clockinSent && r.clockinResponded;
-  if (isFullyAck && !r.disputed) {
+  if (isFullyAck && !r.disputed && !r.lateNotified) {
     return `<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
+  }
+  if (isFullyAck && !r.disputed && r.lateNotified) {
+    return `${lateBanner()}<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
   }
   const sid = escapeAttr(String(s.id));
   // Past shifts with partial data: show read-only summary so ops can see what was recorded
@@ -2039,13 +2180,14 @@ function reminderPanelHtml(s) {
       r.clockinSent    ? '<span style="color:var(--green);">⏰✓</span>' : '<span style="color:var(--text3);">⏰✗</span>',
       r.clockinResponded ? '<span style="color:var(--green);">✅✓</span>' : '<span style="color:var(--text3);">✅✗</span>',
       r.disputed       ? '<span style="color:var(--red);">⚠ disputed</span>' : '',
+      r.lateNotified   ? '<span style="color:var(--amber);">⏰ late</span>' : '',
     ].filter(Boolean).join(' ');
-    return `${disputeBanner()}<div class="reminder-panel" style="font-size:10px;color:var(--text3);">Reminders: ${badges} <button class="btn-undo-ack" style="margin-left:4px;" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Reset</button></div>`;
+    return `${disputeBanner()}${lateBanner()}<div class="reminder-panel" style="font-size:10px;color:var(--text3);">Reminders: ${badges} <button class="btn-undo-ack" style="margin-left:4px;" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Reset</button></div>`;
   }
   const pkEnabled = getPeriskopeConfig()?.enabled === true;
   const workerHasPhone = !!workerPhone(s.worker_name);
   const canSendPk = pkEnabled && workerHasPhone;
-  let html = disputeBanner() + '<div class="reminder-panel">';
+  let html = disputeBanner() + lateBanner() + '<div class="reminder-panel">';
   // Night reminder section — shown on tomorrow + today
   html += `<div class="reminder-section-label">🌙 Night reminder</div>`;
   html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label>`;
@@ -2066,6 +2208,13 @@ function reminderPanelHtml(s) {
       <span class="reminder-flag-label">Issue after reminder?</span>
       <button class="btn-flag-issue" onclick="flagDispute('${sid}','cantmake')" title="Worker says they can't make it">⚠ Can't make it</button>
       <button class="btn-flag-issue" onclick="flagDispute('${sid}','cancel')" title="Worker wants to cancel">🚫 Wants to cancel</button>
+      ${!r.lateNotified ? `<button class="btn-flag-issue" onclick="flagLate('${sid}','')" title="Worker notified they will be late" style="border-color:rgba(245,166,35,0.4);color:var(--amber);">⏰ Running late</button>` : ''}
+    </div>`;
+  } else if (!r.lateNotified) {
+    // Already disputed but ops may still want to log a late notice
+    html += `<div class="reminder-flag-row">
+      <span class="reminder-flag-label">Also late?</span>
+      <button class="btn-flag-issue" onclick="flagLate('${sid}','')" title="Worker notified they will be late" style="border-color:rgba(245,166,35,0.4);color:var(--amber);">⏰ Running late</button>
     </div>`;
   }
   html += '</div>';
@@ -2082,6 +2231,7 @@ function checkReminderAlerts() {
   const nightUnacked = [];   // grouped into one collapsible alert
   const clockinAlerts = [];  // shown individually — urgent, time-sensitive
   const disputeAlerts = [];  // shown individually — most urgent
+  const lateAlerts = [];     // late-arrival notices needing acknowledgement
 
   (allShifts || []).forEach(s => {
     const r = shiftReminders[s.id] || {};
@@ -2094,6 +2244,10 @@ function checkReminderAlerts() {
       const kindTxt = r.disputeKind === 'cancel' ? 'wants to cancel'
         : (r.disputeKind === 'cantmake' ? "can't make it" : 'flagged an issue');
       disputeAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', kindTxt, reason: r.disputeReason || '', start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
+    }
+    // Late-arrival notice — show until both acknowledged and outlet informed
+    if (r.lateNotified && !(r.lateAck && r.outletInformed)) {
+      lateAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '', acked: !!r.lateAck, informed: !!r.outletInformed });
     }
 
     // Night reminder: collect all who haven't acked (past 8am)
@@ -2126,6 +2280,19 @@ function checkReminderAlerts() {
     </div>`;
   });
 
+  // ── Late-arrival notices — high urgency, shown after disputes ──
+  lateAlerts.forEach(a => {
+    const ackBtn = a.acked ? '' : `<button class="ra-dispute-btn" style="background:var(--accent);color:#fff;border:none;" onclick="ackLate('${escapeAttr(String(a.id))}')">Acknowledge</button>`;
+    const infBtn = a.informed ? '' : `<button class="ra-dispute-btn" style="background:rgba(245,166,35,0.2);color:var(--amber);border:1px solid rgba(245,166,35,0.4);" onclick="markOutletInformed('${escapeAttr(String(a.id))}')">Inform outlet</button>`;
+    html += `<div class="reminder-alert-item reminder-alert-dispute" style="background:rgba(245,166,35,0.14);border-left-color:var(--amber);color:var(--amber);">
+      <span>⏰ <strong style="color:#fff;">${escapeHtml(a.name)}</strong> (${escapeHtml(a.outlet)}${a.start ? ' · ' + a.start : ''}) is running LATE for today's shift — inform the outlet</span>
+      <span class="ra-dispute-actions">
+        ${ackBtn}${infBtn}
+        <button class="ra-dispute-btn clear" onclick="clearLate('${escapeAttr(String(a.id))}')">Clear</button>
+      </span>
+    </div>`;
+  });
+
   // ── Night reminder: one grouped collapsible alert ──
   if (nightUnacked.length > 0) {
     const firstNames = nightUnacked.map(w => firstName(w.name));
@@ -2150,6 +2317,13 @@ function checkReminderAlerts() {
   });
 
   container.innerHTML = html;
+  // Keep the Tasks card badge and (if open) the Tasks panel in sync with live changes
+  if (typeof renderMetrics === 'function' && document.getElementById('metrics')) {
+    try { renderMetrics(); } catch(e) {}
+  }
+  if (document.getElementById('tasks-modal')?.classList.contains('open')) {
+    renderTasksPanel();
+  }
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3290,6 +3464,181 @@ function cancellationCountForLoadedShifts() {
   return workerCancellationLogs + directlyCancelledShifts;
 }
 
+// ── Replacement Needed ────────────────────────────────────────
+// A slot "needs replacement" when a worker has dropped out but the booking still
+// stands and must be re-filled. This is higher priority than an ordinary open slot.
+// Covers: (a) shifts flagged disputed (worker wants to cancel / can't make it),
+// still has a named worker, not yet processed; and (b) shifts whose worker was
+// cancelled and the slot returned to "Available" for today/upcoming (open booking
+// that originated from a drop-out). We treat any "Available" upcoming slot whose
+// reminder shows a recent dispute/cancellation as replacement-needed.
+function needsReplacement(s) {
+  if (!s || s.cancelled) return false; // hard-cancelled/outlet-deleted slots are gone
+  const r = shiftReminders[s.id] || {};
+  const wn = String(s.worker_name || '').trim().toLowerCase();
+  // (a) Worker still named but flagged as disputed → urgent: decide + re-fill
+  if (r.disputed && wn && wn !== 'available') return true;
+  // (b) Slot returned to Available but a dispute/cancellation was recorded on it
+  if (wn === 'available' && (r.disputed || r.disputeKind)) return true;
+  return false;
+}
+function replacementNeededCountForLoadedShifts() {
+  return (allShifts || []).filter(needsReplacement).length;
+}
+
+// ── Tasks (urgent agent actions) ──────────────────────────────
+// Aggregates the urgent items an agent must act on right now:
+//  • Cancellation / dispute requests (worker wants to cancel / can't make it)
+//  • Late-arrival notices (acknowledge + inform outlet)
+// Returns an array of task objects sorted by urgency (disputes first, then unacked late).
+function getOpenTasks() {
+  const tasks = [];
+  const todayStr = formatDate(new Date());
+  (allShifts || []).forEach(s => {
+    const r = shiftReminders[s.id] || {};
+    const wn = String(s.worker_name || '').trim();
+    const isToday = s.shift_date === todayStr;
+    const start = s.scheduled_start ? s.scheduled_start.slice(0,5) : '';
+    // Dispute / cancellation request — needs an ops decision
+    if (r.disputed && wn && wn.toLowerCase() !== 'available' && !s.cancelled) {
+      tasks.push({
+        type: 'dispute',
+        id: s.id,
+        worker: wn,
+        outlet: s.outlet || '',
+        date: s.shift_date,
+        start,
+        isToday,
+        kind: r.disputeKind || 'cancel',
+        reason: r.disputeReason || '',
+        at: r.disputeAt || ''
+      });
+    }
+    // Late-arrival notice — needs acknowledge + inform outlet
+    if (r.lateNotified && !s.cancelled) {
+      tasks.push({
+        type: 'late',
+        id: s.id,
+        worker: wn,
+        outlet: s.outlet || '',
+        date: s.shift_date,
+        start,
+        isToday,
+        reason: r.lateReason || '',
+        at: r.lateAt || '',
+        acked: !!r.lateAck,
+        outletInformed: !!r.outletInformed,
+        done: !!r.lateAck && !!r.outletInformed
+      });
+    }
+  });
+  // Sort: today first, disputes before late, not-done before done, earliest start first
+  const rank = t => (t.isToday ? 0 : 1) * 100 + (t.type === 'dispute' ? 0 : 10) + (t.done ? 5 : 0);
+  tasks.sort((a,b) => {
+    const ra = rank(a), rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    return (a.start || '').localeCompare(b.start || '');
+  });
+  return tasks;
+}
+// Count of tasks still requiring action (excludes fully-completed late notices)
+function openTaskCount() {
+  return getOpenTasks().filter(t => t.type === 'dispute' || !t.done).length;
+}
+// ── Tasks panel UI ────────────────────────────────────────────
+function openTasksPanel() {
+  renderTasksPanel();
+  const m = document.getElementById('tasks-modal');
+  if (m) m.classList.add('open');
+}
+function closeTasksPanel() {
+  const m = document.getElementById('tasks-modal');
+  if (m) m.classList.remove('open');
+}
+function relTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const diff = Math.round((Date.now() - t) / 60000);
+  if (diff < 1) return 'just now';
+  if (diff < 60) return diff + ' min ago';
+  const h = Math.round(diff/60);
+  if (h < 24) return h + 'h ago';
+  return new Date(iso).toLocaleDateString('en-SG',{day:'numeric',month:'short'});
+}
+function renderTasksPanel() {
+  const el = document.getElementById('tasks-list');
+  if (!el) return;
+  const tasks = getOpenTasks();
+  if (!tasks.length) {
+    el.innerHTML = `<div style="text-align:center;padding:30px 12px;color:var(--text3);">
+      <div style="font-size:28px;margin-bottom:8px;">✓</div>
+      <div style="font-weight:600;color:var(--green);">No urgent tasks right now</div>
+      <div class="sub-text" style="margin-top:4px;">Cancellation requests and late-arrival notices will appear here.</div>
+    </div>`;
+    return;
+  }
+  el.innerHTML = tasks.map(t => {
+    const dateLabel = (() => {
+      try { return new Date((t.date||'')+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}); }
+      catch(e){ return t.date || ''; }
+    })();
+    const when = t.at ? `<span class="task-when">${relTime(t.at)}</span>` : '';
+    if (t.type === 'dispute') {
+      const kindTxt = t.kind === 'cancel' ? 'wants to cancel'
+        : (t.kind === 'cantmake' ? "can't make this shift" : 'flagged an issue');
+      const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
+      return `<div class="task-card task-dispute">
+        <div class="task-head">
+          <span class="task-tag tag-dispute">🚫 Cancellation request</span>
+          ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+          ${when}
+        </div>
+        <div class="task-body">
+          <div class="task-title">${escapeHtml(t.worker)} ${kindTxt}</div>
+          <div class="task-meta">${escapeHtml(t.outlet)} · ${dateLabel}${t.start ? ' · '+t.start : ''}</div>
+          ${reason}
+        </div>
+        <div class="task-actions">
+          <button class="btn btn-danger btn-sm" onclick="openCancelFromDispute('${escapeAttr(String(t.id))}')">Process cancellation</button>
+          <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearDispute('${escapeAttr(String(t.id))}'); renderTasksPanel();">Dismiss</button>
+        </div>
+      </div>`;
+    }
+    // Late notice
+    const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
+    const ackBadge = t.acked ? '<span class="task-tag tag-done">✓ Acknowledged</span>' : '';
+    const informedBadge = t.outletInformed ? '<span class="task-tag tag-done">✓ Outlet informed</span>' : '';
+    return `<div class="task-card task-late ${t.done?'task-done':''}">
+      <div class="task-head">
+        <span class="task-tag tag-late">⏰ Late arrival</span>
+        ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+        ${ackBadge}${informedBadge}
+        ${when}
+      </div>
+      <div class="task-body">
+        <div class="task-title">${escapeHtml(t.worker)} will be late</div>
+        <div class="task-meta">${escapeHtml(t.outlet)} · ${dateLabel}${t.start ? ' · shift '+t.start : ''}</div>
+        ${reason}
+      </div>
+      <div class="task-actions">
+        ${!t.acked ? `<button class="btn btn-primary btn-sm" onclick="ackLate('${escapeAttr(String(t.id))}')">Acknowledge</button>` : ''}
+        ${!t.outletInformed ? `<button class="btn btn-amber btn-sm" onclick="markOutletInformed('${escapeAttr(String(t.id))}')">Inform outlet ✓</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
+        <button class="btn btn-ghost btn-sm" onclick="clearLate('${escapeAttr(String(t.id))}'); renderTasksPanel();">Clear</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+// Jump to the shift's day in attendance from a task, closing the panel first
+function jumpToShiftFromTask(shiftId, dateStr) {
+  closeTasksPanel();
+  if (typeof jumpToShift === 'function' && dateStr) {
+    jumpToShift(dateStr, shiftId);
+  }
+}
+
 async function loadShifts() {
   const outlet = document.getElementById('outlet-filter')?.value || '';
   let q = supabaseClient.from('shifts').select('*').order('shift_date').order('scheduled_start');
@@ -3403,6 +3752,7 @@ function matchesMetricFilter(s) {
   if (activeMetricFilter === 'estimated_payout') return isPayableShift(s) && !s.clock_out && estimatedPaymentForShift(s) > 0;
   if (activeMetricFilter === 'late') return isPayableShift(s) && calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late';
   if (activeMetricFilter === 'cancelled') return !!s.cancelled;
+  if (activeMetricFilter === 'replacement_needed') return needsReplacement(s);
   if (activeMetricFilter === 'penalties') return shiftPenaltyAmount(s) > 0;
   if (activeMetricFilter === 'sr_absorbed') return srAbsorbedForShift(s) > 0 || !!s.sr_worker;
   return true;
@@ -4609,12 +4959,17 @@ async function manualSendReminder(shiftId, type) {
 }
 
 function showReminderSchemaSQL() {
-  const sql = `-- 1) Add dispute-tracking columns to the existing shift_reminders table
+  const sql = `-- 1) Add dispute + late-arrival tracking columns to shift_reminders
 alter table public.shift_reminders
-  add column if not exists disputed       boolean default false,
-  add column if not exists dispute_kind   text,     -- 'cancel' | 'cantmake'
-  add column if not exists dispute_reason text,      -- raw worker message
-  add column if not exists dispute_at      timestamptz;
+  add column if not exists disputed        boolean default false,
+  add column if not exists dispute_kind    text,     -- 'cancel' | 'cantmake'
+  add column if not exists dispute_reason  text,      -- raw worker message
+  add column if not exists dispute_at       timestamptz,
+  add column if not exists late_notified    boolean default false,
+  add column if not exists late_reason      text,      -- raw worker message
+  add column if not exists late_at          timestamptz,
+  add column if not exists late_ack         boolean default false,
+  add column if not exists outlet_informed  boolean default false;
 
 -- 2) Periskope webhook Edge Function logic (deploy as periskope-webhook).
 --    For each inbound message.created event, find the worker's most recent
@@ -5196,6 +5551,8 @@ function renderMetrics() {
   const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = cancellationCountForLoadedShifts();
+  const replacementNeeded = replacementNeededCountForLoadedShifts();
+  const openTasks = openTaskCount();
   const latePenalties = allShifts.reduce((a,s) => a + effectiveLatePenalty(s), 0);
   const cancelPenalties = allShifts.filter(s => s.cancelled).reduce((a,s) => a + shiftPenaltyAmount(s), 0);
   // Also count prior-cancellation deductions on active (non-cancelled) imported shifts
@@ -5216,15 +5573,18 @@ function renderMetrics() {
   updatePendingClockInBadge(pendingClockIn);
   updatePendingClockOutBadge(pendingClockOut);
   const card = (filter, label, value, cls = '', sub = '', badge = 0) => `<div class="metric-card clickable ${activeMetricFilter===filter?'active-filter':''}" onclick="setMetricFilter('${filter}')">${notificationBubble(badge)}<div class="metric-label">${label}</div><div class="metric-val ${cls}">${value}</div>${sub ? `<div class="metric-sub">${sub}</div>` : ''}</div>`;
+  // Tasks card — opens the Tasks panel (urgent agent actions), not a table filter
+  const tasksCard = `<div class="metric-card clickable metric-card-tasks ${openTasks>0?'tasks-hot':''}" onclick="openTasksPanel()">${notificationBubble(openTasks)}<div class="metric-label">⚡ Tasks</div><div class="metric-val ${openTasks>0?'red':'green'}">${openTasks}</div><div class="metric-sub">${openTasks>0?'Need action now':'All clear'}</div></div>`;
   document.getElementById('metrics').innerHTML = `
+    ${tasksCard}
     ${card('not_clocked_in','Scheduled (Not Clocked-In Yet)', notClockedIn, '')}
     ${card('clocked_in','Clocked in', present, 'blue')}
     ${card('pending_clock_in','Pending clock-in', pendingClockIn, pendingClockIn>0?'amber':'green', pendingClockInLabel, pendingClockIn)}
     ${card('pending_clock_out','Pending clock-out', pendingClockOut, pendingClockOut>0?'amber':'green', pendingClockOutLabel, pendingClockOut)}
+    ${card('replacement_needed','🔁 Replacement needed', replacementNeeded, replacementNeeded>0?'red':'green', replacementNeeded>0?'Re-fill these slots':'', replacementNeeded)}
     ${card('paid_out','Total payment', countrySplitMetric(totalPaidOutByCountry, 'green'), '', '', unpaidPaidOut)}
     ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
     ${card('late','Late', late, late>0?'red':'green')}
-    ${card('cancelled','Cancelled', cancelled, cancelled>0?'red':'')}
     ${card('penalties','Penalties', countrySplitMetric(penaltyByCountry, totalPenalties>0?'red':'green'), '')}
     ${card('sr_absorbed','SR absorbed', countrySplitMetric(srAbsorbedByCountry, srAbsorbedTotal>0?'amber':'green'), '')}
   `;
@@ -5684,7 +6044,8 @@ function updateCancelTypeUI() {
   if (type !== 'worker_mc') removeMc();
   if (note) {
     if (type === 'worker_penalty') note.textContent = 'Worker cancellation: records cancellation, counts toward suspension, and returns the slot to Available.';
-    if (type === 'worker_mc') note.textContent = 'Worker cancellation with MC: penalty waived, still counts toward suspension, and returns the slot to Available.';
+    if (type === 'worker_mc') note.textContent = 'Worker cancellation with MC: penalty waived (MC optional — can be uploaded later), still counts toward suspension, and returns the slot to Available.';
+    if (type === 'worker_goodwill') note.textContent = 'Good-will cancellation: NO penalty and does NOT count toward suspension. Use sparingly for genuine goodwill cases. Slot returns to Available.';
     if (type === 'outlet_bypass') note.textContent = 'Outlet/client cancellation: deletes the whole shift slot and does not count against the worker.';
   }
 }
@@ -5711,15 +6072,16 @@ async function confirmCancel() {
   const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
   const isOutletBypass = type === 'outlet_bypass';
   const isMcWaiver = type === 'worker_mc';
+  const isGoodwill = type === 'worker_goodwill';
   const isPenalty  = type === 'worker_penalty';
   const penaltyOverrideRaw = document.getElementById('cancel-penalty-override')?.value;
   const penaltyAmount = (isPenalty && penaltyOverrideRaw && parseFloat(penaltyOverrideRaw) >= 0)
     ? parseFloat(penaltyOverrideRaw)
     : 15;
-  if (isMcWaiver && !mcDataUrl) {
-    toast('Please upload MC, or choose worker penalty / outlet cancellation', 'error');
-    return;
-  }
+  // MC is now OPTIONAL for the MC-waiver path — agents usually don't have the MC at
+  // cancellation time. They can confirm now (penalty waived, marked MC-pending) and
+  // upload the MC later from the shift row. So no hard block here.
+  const mcPending = isMcWaiver && !mcDataUrl;
 
   // Outlet/client cancellation = remove the slot entirely from the booking grid.
   if (isOutletBypass) {
@@ -5740,7 +6102,8 @@ async function confirmCancel() {
   // Worker cancellation = keep the booking slot, but return it to Available.
   // This allows Ops to re-fill the same outlet/date/time/role slot.
   const originalWorker = s.worker_name;
-  const shouldCountWorkerCancellation = originalWorker && String(originalWorker).toLowerCase() !== 'available';
+  // Good-will cancellations do NOT count toward suspension and carry no penalty.
+  const shouldCountWorkerCancellation = !isGoodwill && originalWorker && String(originalWorker).toLowerCase() !== 'available';
 
   if (shouldCountWorkerCancellation) {
     await supabaseClient.from('cancellation_log').insert({
@@ -5779,16 +6142,35 @@ async function confirmCancel() {
 
   const _wcDateFmt = (s.shift_date || formatDate(currentDate));
   const _wcDate = new Date(_wcDateFmt+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'});
+  const cancelDetailTail = isGoodwill
+    ? ' — good-will cancellation, NO penalty, not counted toward suspension'
+    : (isMcWaiver
+        ? (mcPending ? ' — MC waiver (MC pending upload), no penalty' : ' — MC uploaded, no penalty')
+        : ` — $${penaltyAmount.toFixed(2)} penalty applied`);
   await logActivity(
     'Shift cancelled',
-    `${originalWorker || 'Worker'} cancelled shift at ${s.outlet || '—'} on ${_wcDate} ${s.scheduled_start?.slice(0,5)||''}${isMcWaiver ? ' — MC uploaded, no penalty' : ` — $${penaltyAmount.toFixed(2)} penalty applied`}. Slot returned to Available.`,
+    `${originalWorker || 'Worker'} cancelled shift at ${s.outlet || '—'} on ${_wcDate} ${s.scheduled_start?.slice(0,5)||''}${cancelDetailTail}. Slot returned to Available.`,
     'shift', pendingCancelId, { shift_date: s.shift_date, worker_name: originalWorker, outlet: s.outlet }
   );
+
+  // Clear any dispute/late flags on this slot now that the cancellation is processed,
+  // so it leaves the Tasks panel (it becomes a plain Available slot to re-fill).
+  if (shiftReminders[pendingCancelId]) {
+    shiftReminders[pendingCancelId].disputed = false;
+    shiftReminders[pendingCancelId].disputeKind = '';
+    shiftReminders[pendingCancelId].disputeReason = '';
+    shiftReminders[pendingCancelId].lateNotified = false;
+    await persistReminder(pendingCancelId);
+  }
 
   await loadWorkers();
   closeCancelModal();
   await loadShifts();
-  toast(isMcWaiver ? 'Worker cancellation recorded; slot returned to Available' : `Worker cancellation recorded ($${penaltyAmount.toFixed(2)} penalty)`);
+  toast(isGoodwill
+    ? 'Good-will cancellation recorded (no penalty); slot returned to Available'
+    : (isMcWaiver
+        ? (mcPending ? 'Cancellation recorded — MC pending, penalty waived; slot returned to Available' : 'Worker cancellation recorded; slot returned to Available')
+        : `Worker cancellation recorded ($${penaltyAmount.toFixed(2)} penalty)`));
 
   // Offer to apply penalty to worker's next upcoming shift
   if (isPenalty && penaltyAmount > 0 && originalWorker && originalWorker !== 'Available') {
