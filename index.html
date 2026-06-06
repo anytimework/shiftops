@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
 <!-- Build patch: v31 — Tasks panel: new/incomplete tasks pinned to top (newest first); completed late tasks collapse into a compact card under a "Completed" divider and auto-disappear from the panel 18h after completion. New sidebar "Completed Tasks" page logs every finished task (late/dispute/replacement) with outcome + timestamp, kept 60 days then auto-pruned (local + Supabase completed_tasks table). Replacement-needed card now opens a dedicated cross-date panel grouping today + all upcoming open slots by date, regardless of viewed dashboard date. New columns: shift_reminders.completed_at; new table completed_tasks. -->
 <!-- Build patch: v30 — Tasks & Replacement-needed now span ALL dates (cross-date task cache), not just the viewed day. Tasks panel shows shift date (Today/Tomorrow/date) + timings. Always-visible sidebar Tasks badge on every page. Processed worker cancellations set a persistent needs_replacement flag so the open slot stays in Replacement-needed across dates until re-filled or dismissed; outlet cancellations excluded. Re-filling a slot auto-clears the flag. Webhook guidance extended with LATE detection + correct upcoming-shift matching. New shift_reminders columns: needs_replacement, replacement_at. -->
 <!-- Build patch: v29 — Tasks dashboard card + Tasks panel (disputes + late notices), late-arrival capture (acknowledge + inform outlet), good-will cancellation option, MC made optional/deferrable, Cancelled card renamed to Replacement Needed -->
@@ -1133,7 +1134,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <h3 style="margin:0;">⚡ Urgent tasks</h3>
       <button class="btn btn-ghost btn-sm" onclick="closeTasksPanel()">Close</button>
     </div>
-    <div class="sub-text" style="margin-bottom:12px;">Cancellation requests and late-arrival notices that need an agent to act now. Disputes need a cancellation decision; late notices need acknowledgement and the outlet informed.</div>
+    <div class="sub-text" style="margin-bottom:12px;">Cancellation requests and late-arrival notices that need an agent to act now. For a drop-out you can <strong>Acknowledge</strong> (confirm the worker is out and move the open slot to Replacement needed, no penalty) or <strong>Process cancellation</strong> (apply penalty / MC / suspension rules). Late notices need acknowledgement and the outlet informed.</div>
     <div id="tasks-list"></div>
   </div>
 </div>
@@ -2162,6 +2163,68 @@ async function clearDispute(shiftId) {
   checkReminderAlerts();
   await persistReminder(shiftId);
   toast('✓ Dispute cleared');
+}
+// Acknowledge a worker cancellation/dispute WITHOUT going through the full
+// cancellation modal (no penalty / suspension / MC handling here — that's what
+// "Process cancellation" is for). Acknowledging confirms the worker is out and the
+// booking still stands: the slot is returned to Available and flagged
+// needs_replacement, so it LEAVES the Tasks section and appears ONLY in the
+// Replacement-needed tab. The cancelling worker's name is preserved on the slot.
+async function acknowledgeDispute(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  const s = (taskShiftCache[String(shiftId)]) || allShifts.find(x => String(x.id) === String(shiftId));
+  const droppedWorker = s ? String(s.worker_name || '').trim() : '';
+  // Return the slot to Available in the DB (mirror of the lightweight part of confirmCancel)
+  try {
+    const { error } = await supabaseClient.from('shifts').update({
+      worker_name: 'Available',
+      cancelled: false,
+      clock_in: null,
+      clock_out: null,
+      late_penalty: 0,
+      cancellation_penalty: 0,
+      mc_url: null,
+      sr_worker: null,
+      sr_rate: null,
+      sr_absorbed: null,
+      updated_at: new Date().toISOString()
+    }).eq('id', shiftId);
+    if (error) { toast('Failed to acknowledge: ' + error.message, 'error'); return; }
+  } catch(e) { toast('Failed to acknowledge — network error', 'error'); return; }
+  // Flip the reminder from "disputed" to "needs replacement"; keep who dropped out.
+  shiftReminders[shiftId].disputed = false;
+  shiftReminders[shiftId].disputeKind = '';
+  shiftReminders[shiftId].disputeReason = '';
+  shiftReminders[shiftId].disputeAt = '';
+  shiftReminders[shiftId].needsReplacement = true;
+  shiftReminders[shiftId].replacementAt = new Date().toISOString();
+  if (droppedWorker && droppedWorker.toLowerCase() !== 'available') {
+    shiftReminders[shiftId].replacedWorker = droppedWorker;
+  }
+  // Keep the cross-date cache current so the slot moves panels without a full reload
+  if (s && taskShiftCache[String(shiftId)]) {
+    taskShiftCache[String(shiftId)] = Object.assign({}, s, { worker_name: 'Available', cancelled: false });
+  }
+  await persistReminder(shiftId);
+  if (s) {
+    const _d = new Date((s.shift_date || formatDate(currentDate)) + 'T00:00:00')
+      .toLocaleDateString('en-SG', { day:'numeric', month:'short', weekday:'short' });
+    await logActivity('Cancellation acknowledged',
+      `${droppedWorker || 'Worker'}'s drop-out at ${s.outlet || '—'} on ${_d} was acknowledged. Slot returned to Available and flagged for replacement (no penalty applied).`,
+      'shift', shiftId, { shift_date: s.shift_date, worker_name: droppedWorker, outlet: s.outlet });
+  }
+  await loadWorkers();
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); } catch(e){} }
+  renderTasksPanel();
+  if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
+  if (typeof renderMetrics === 'function' && document.getElementById('metrics')) { try { renderMetrics(); } catch(e){} }
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+  // If the acknowledged shift is on the currently-viewed day, refresh the grid too
+  if (s && s.shift_date === formatDate(currentDate)) { try { await loadShifts(); } catch(e){} }
+  toast('✓ Acknowledged — moved to Replacement needed');
 }
 // Manually flag a dispute from the panel (when ops hears verbally / outside Periskope)
 async function flagDispute(shiftId, kind) {
@@ -3695,17 +3758,26 @@ function getReplacementNeeded() {
   const todayStr = formatDate(new Date());
   return taskShiftPool()
     .filter(needsReplacement)
-    .map(s => ({
-      id: s.id,
-      worker: String(s.worker_name || '').trim(),
-      outlet: s.outlet || '',
-      role: s.role || '',
-      date: s.shift_date,
-      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
-      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
-      isToday: s.shift_date === todayStr,
-      at: (shiftReminders[s.id] || {}).replacementAt || (shiftReminders[s.id] || {}).disputeAt || ''
-    }))
+    .map(s => {
+      const r = shiftReminders[s.id] || {};
+      const liveName = String(s.worker_name || '').trim();
+      // The worker who dropped out: if the slot was already returned to Available,
+      // the live name is "Available", so fall back to the stored replacedWorker.
+      const droppedWorker = (liveName && liveName.toLowerCase() !== 'available')
+        ? liveName
+        : (r.replacedWorker || '');
+      return {
+        id: s.id,
+        worker: droppedWorker,
+        outlet: s.outlet || '',
+        role: s.role || '',
+        date: s.shift_date,
+        start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+        end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+        isToday: s.shift_date === todayStr,
+        at: r.replacementAt || r.disputeAt || ''
+      };
+    })
     .sort((a,b) => (a.date||'').localeCompare(b.date||'') || (a.start||'').localeCompare(b.start||''));
 }
 function replacementNeededCountForLoadedShifts() {
@@ -3970,10 +4042,11 @@ function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
         <div class="task-body">
           <div class="task-title">${escapeHtml(t.worker)} ${kindTxt}</div>
           ${shiftLine}
-          <div class="task-meta">${escapeHtml(t.outlet)}</div>
+          <div class="task-meta">👤 <strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)}</div>
           ${reason}
         </div>
         <div class="task-actions">
+          <button class="btn btn-primary btn-sm" onclick="acknowledgeDispute('${escapeAttr(String(t.id))}')" title="Confirm the drop-out and move this to Replacement needed (no penalty applied here)">Acknowledge</button>
           <button class="btn btn-danger btn-sm" onclick="openCancelFromDispute('${escapeAttr(String(t.id))}')">Process cancellation</button>
           <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
           <button class="btn btn-ghost btn-sm" onclick="clearDispute('${escapeAttr(String(t.id))}'); renderTasksPanel();">Dismiss</button>
