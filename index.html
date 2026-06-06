@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
 <!-- Build patch: v31 — Tasks panel: new/incomplete tasks pinned to top (newest first); completed late tasks collapse into a compact card under a "Completed" divider and auto-disappear from the panel 18h after completion. New sidebar "Completed Tasks" page logs every finished task (late/dispute/replacement) with outcome + timestamp, kept 60 days then auto-pruned (local + Supabase completed_tasks table). Replacement-needed card now opens a dedicated cross-date panel grouping today + all upcoming open slots by date, regardless of viewed dashboard date. New columns: shift_reminders.completed_at; new table completed_tasks. -->
 <!-- Build patch: v30 — Tasks & Replacement-needed now span ALL dates (cross-date task cache), not just the viewed day. Tasks panel shows shift date (Today/Tomorrow/date) + timings. Always-visible sidebar Tasks badge on every page. Processed worker cancellations set a persistent needs_replacement flag so the open slot stays in Replacement-needed across dates until re-filled or dismissed; outlet cancellations excluded. Re-filling a slot auto-clears the flag. Webhook guidance extended with LATE detection + correct upcoming-shift matching. New shift_reminders columns: needs_replacement, replacement_at. -->
@@ -1968,7 +1969,8 @@ async function loadReminders() {
           outletInformed: !!r.outlet_informed,
           needsReplacement: !!r.needs_replacement,
           replacementAt: r.replacement_at || '',
-          completedAt: r.completed_at || ''
+          completedAt: r.completed_at || '',
+          lastReminderAt: r.last_reminder_at || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2000,6 +2002,7 @@ async function persistReminder(shiftId) {
       needs_replacement: !!r.needsReplacement,
       replacement_at: r.replacementAt || null,
       completed_at: r.completedAt || null,
+      last_reminder_at: r.lastReminderAt || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -2039,7 +2042,8 @@ function subscribeToReminderChanges() {
             outletInformed: !!row.outlet_informed,
             needsReplacement: !!row.needs_replacement,
             replacementAt: row.replacement_at || '',
-            completedAt: row.completed_at || ''
+            completedAt: row.completed_at || '',
+            lastReminderAt: row.last_reminder_at || ''
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2087,7 +2091,8 @@ async function silentSyncReminders() {
         outletInformed: !!r.outlet_informed,
         needsReplacement: !!r.needs_replacement,
         replacementAt: r.replacement_at || '',
-        completedAt: r.completed_at || ''
+        completedAt: r.completed_at || '',
+        lastReminderAt: r.last_reminder_at || ''
       };
     });
     // Find shift IDs where something changed
@@ -5584,6 +5589,7 @@ async function autoSendShiftReminders() {
       if (ok) {
         if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
         shiftReminders[s.id].nightSent = true;
+        shiftReminders[s.id].lastReminderAt = new Date().toISOString();
         await persistReminder(s.id);
         toast(`🌙 Night reminder sent to ${workerName}`);
       }
@@ -5598,6 +5604,7 @@ async function autoSendShiftReminders() {
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
           shiftReminders[s.id].clockinSent = true;
+          shiftReminders[s.id].lastReminderAt = new Date().toISOString();
           await persistReminder(s.id);
           toast(`⏰ Clock-in reminder sent to ${workerName}`);
         }
@@ -5617,6 +5624,7 @@ async function manualSendReminder(shiftId, type) {
   if (ok) {
     if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
     shiftReminders[shiftId][type === 'night' ? 'nightSent' : 'clockinSent'] = true;
+    shiftReminders[shiftId].lastReminderAt = new Date().toISOString();
     await persistReminder(shiftId);
     updateReminderPanelInPlace(shiftId);
     toast(`✓ Reminder sent to ${s.worker_name}`);
@@ -5639,7 +5647,8 @@ alter table public.shift_reminders
   add column if not exists outlet_informed  boolean default false,
   add column if not exists needs_replacement boolean default false,  -- slot awaiting re-fill after a processed worker cancellation
   add column if not exists replacement_at    timestamptz,            -- when the slot became replacement-needed
-  add column if not exists completed_at       timestamptz;           -- when a late task was fully handled (drives 18h collapse)
+  add column if not exists completed_at       timestamptz,           -- when a late task was fully handled (drives 18h collapse)
+  add column if not exists last_reminder_at    timestamptz;           -- when the most recent reminder was SENT for this shift (used by the webhook to route a bare reply to the most recently-reminded shift)
 
 -- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
 --     Entries older than 60 days are auto-deleted by the app, but you can also
