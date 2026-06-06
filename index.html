@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v35 — Tasks panel expanded: wider modal (860px), category filter bar (All / Late / Cancellation / Shift inquiry / Payment / Other), new "+ New Inquiry" button to log worker messages manually, AI-powered draft reply on all task types (dispute, late, inquiries) via Anthropic API, Send via Periskope button on each draft. Task drafts persisted locally per task. New inquiry types: shift_inquiry, payment_inquiry, other_inquiry stored in worker_inquiries localStorage. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -183,6 +184,35 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .metric-card-replacement { border-color: rgba(43,179,163,0.3); }
 .metric-card-replacement.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .modal-wide { max-width: 640px; width: 92%; }
+.modal-tasks { max-width: 860px; width: 96%; max-height: 92vh; }
+.task-filter-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.task-filter-btn { font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text2); cursor: pointer; font-family: var(--mono); letter-spacing: 0.3px; transition: all 0.13s; }
+.task-filter-btn:hover { border-color: var(--accent); color: var(--text); }
+.task-filter-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+.task-card.task-shift-inquiry { border-left: 3px solid var(--purple); }
+.task-card.task-payment-inquiry { border-left: 3px solid var(--green); }
+.task-card.task-other-inquiry { border-left: 3px solid var(--text3); }
+.tag-shift-inquiry { background: rgba(167,139,250,0.15); color: var(--purple); }
+.tag-payment-inquiry { background: rgba(52,199,123,0.15); color: var(--green); }
+.tag-other-inquiry { background: rgba(139,144,160,0.15); color: var(--text2); }
+.task-draft-box { margin-top: 10px; background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px; padding: 10px 12px; }
+.task-draft-label { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent); font-family: var(--mono); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.task-draft-text { font-size: 12.5px; color: var(--text); line-height: 1.6; white-space: pre-wrap; min-height: 48px; }
+.task-draft-textarea { width: 100%; background: var(--bg); border: 1px solid var(--border2); border-radius: 6px; color: var(--text); font-family: var(--font); font-size: 12.5px; padding: 8px 10px; resize: vertical; min-height: 80px; margin-top: 6px; line-height: 1.6; }
+.task-draft-textarea:focus { outline: none; border-color: var(--accent); }
+.task-draft-actions { display: flex; gap: 7px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+.task-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 640px) { .task-two-col { grid-template-columns: 1fr; } }
+.task-col-label { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text3); font-family: var(--mono); margin-bottom: 8px; }
+.task-inquiry-form { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 10px; }
+.task-inquiry-form label { font-size: 11px; color: var(--text2); display: block; margin-bottom: 4px; font-weight: 500; }
+.task-inquiry-form input, .task-inquiry-form select, .task-inquiry-form textarea { width: 100%; background: var(--bg); border: 1px solid var(--border2); border-radius: 6px; color: var(--text); font-family: var(--font); font-size: 12.5px; padding: 7px 10px; margin-bottom: 10px; }
+.task-inquiry-form textarea { resize: vertical; min-height: 64px; }
+.task-inquiry-form input:focus, .task-inquiry-form select:focus, .task-inquiry-form textarea:focus { outline: none; border-color: var(--accent); }
+.new-inquiry-btn { display: flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: var(--radius); border: 1px dashed var(--border2); background: none; color: var(--text2); cursor: pointer; font-size: 12.5px; font-weight: 500; width: 100%; margin-bottom: 14px; transition: all 0.13s; }
+.new-inquiry-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.spinner-inline { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(79,142,247,0.3); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 5px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--bg2); }
 .task-card.task-dispute { border-left: 3px solid var(--red); }
 .task-card.task-late { border-left: 3px solid var(--amber); }
@@ -1131,12 +1161,50 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
 <!-- TASKS PANEL MODAL -->
 <div class="modal-overlay" id="tasks-modal">
-  <div class="modal modal-wide">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
-      <h3 style="margin:0;">⚡ Urgent tasks</h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeTasksPanel()">Close</button>
+  <div class="modal modal-tasks">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
+      <h3 style="margin:0;">⚡ Tasks &amp; Inquiries</h3>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="btn btn-ghost btn-sm" onclick="openNewInquiryForm()" title="Log a new worker inquiry">+ New Inquiry</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeTasksPanel()">Close ✕</button>
+      </div>
     </div>
-    <div class="sub-text" style="margin-bottom:12px;">Cancellation requests and late-arrival notices that need an agent to act now. For a drop-out you can <strong>Acknowledge</strong> (confirm the worker is out and move the open slot to Replacement needed, no penalty) or <strong>Process cancellation</strong> (apply penalty / MC / suspension rules). Late notices need acknowledgement and the outlet informed.</div>
+    <!-- Category filter bar -->
+    <div class="task-filter-bar" id="task-filter-bar">
+      <button class="task-filter-btn active" data-filter="all" onclick="setTaskFilter('all',this)">All</button>
+      <button class="task-filter-btn" data-filter="late" onclick="setTaskFilter('late',this)">⏰ Late arrival</button>
+      <button class="task-filter-btn" data-filter="dispute" onclick="setTaskFilter('dispute',this)">🚫 Cancellation</button>
+      <button class="task-filter-btn" data-filter="shift_inquiry" onclick="setTaskFilter('shift_inquiry',this)">📋 Shift inquiry</button>
+      <button class="task-filter-btn" data-filter="payment_inquiry" onclick="setTaskFilter('payment_inquiry',this)">💰 Payment</button>
+      <button class="task-filter-btn" data-filter="other_inquiry" onclick="setTaskFilter('other_inquiry',this)">💬 Other</button>
+    </div>
+    <!-- New inquiry form (hidden by default) -->
+    <div id="new-inquiry-panel" style="display:none;margin-bottom:14px;">
+      <div class="task-inquiry-form">
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px;color:var(--text);">Log new worker inquiry</div>
+        <div class="task-two-col">
+          <div>
+            <label>Worker name</label>
+            <input type="text" id="inq-worker" placeholder="e.g. Ahmad Faris" list="inq-worker-opts">
+            <datalist id="inq-worker-opts"></datalist>
+          </div>
+          <div>
+            <label>Category</label>
+            <select id="inq-type">
+              <option value="shift_inquiry">📋 Shift inquiry</option>
+              <option value="payment_inquiry">💰 Payment inquiry</option>
+              <option value="other_inquiry">💬 Other inquiry</option>
+            </select>
+          </div>
+        </div>
+        <label>Message / inquiry details</label>
+        <textarea id="inq-message" placeholder="Paste or type the worker's message here…"></textarea>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary btn-sm" onclick="submitNewInquiry()">Log inquiry</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('new-inquiry-panel').style.display='none'">Cancel</button>
+        </div>
+      </div>
+    </div>
     <div id="tasks-list"></div>
   </div>
 </div>
@@ -4031,70 +4099,211 @@ function shiftTimeRange(start, end) {
   if (!start) return '';
   return end ? `${start}–${end}` : start;
 }
+// ── Task filter state ────────────────────────────────────────────
+let currentTaskFilter = 'all';
+function setTaskFilter(f, btn) {
+  currentTaskFilter = f;
+  document.querySelectorAll('.task-filter-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderTasksPanel();
+}
+function openNewInquiryForm() {
+  const p = document.getElementById('new-inquiry-panel');
+  if (!p) return;
+  // Populate worker datalist
+  const dl = document.getElementById('inq-worker-opts');
+  if (dl) {
+    const names = [...new Set((allShifts||[]).map(s=>s.worker_name).filter(n=>n&&n!=='Available'))].sort();
+    dl.innerHTML = names.map(n=>`<option value="${escapeHtml(n)}">`).join('');
+  }
+  p.style.display = p.style.display === 'none' ? '' : 'none';
+}
+async function submitNewInquiry() {
+  const worker = document.getElementById('inq-worker')?.value.trim();
+  const type   = document.getElementById('inq-type')?.value || 'other_inquiry';
+  const msg    = document.getElementById('inq-message')?.value.trim();
+  if (!worker || !msg) { toast('Please fill in worker name and message', 'error'); return; }
+  // Save as a local inquiry task (stored in localStorage, not shift_reminders)
+  const inquiries = getStoredInquiries();
+  const id = 'inq_' + Date.now();
+  inquiries.push({ id, worker, type, message: msg, at: new Date().toISOString(), status: 'open', draft: '' });
+  saveStoredInquiries(inquiries);
+  document.getElementById('inq-worker').value = '';
+  document.getElementById('inq-message').value = '';
+  document.getElementById('new-inquiry-panel').style.display = 'none';
+  toast('Inquiry logged ✓');
+  renderTasksPanel();
+}
+function getStoredInquiries() {
+  try { return JSON.parse(localStorage.getItem('worker_inquiries') || '[]'); } catch(e) { return []; }
+}
+function saveStoredInquiries(arr) {
+  localStorage.setItem('worker_inquiries', JSON.stringify(arr));
+}
+function updateInquiryDraft(id, val) {
+  const inqs = getStoredInquiries();
+  const inq = inqs.find(i=>i.id===id);
+  if (inq) { inq.draft = val; saveStoredInquiries(inqs); }
+}
+function closeInquiry(id) {
+  const inqs = getStoredInquiries();
+  const inq = inqs.find(i=>i.id===id);
+  if (inq) { inq.status = 'closed'; saveStoredInquiries(inqs); }
+  renderTasksPanel();
+  toast('Inquiry closed ✓');
+}
+async function sendInquiryReply(id) {
+  const inqs = getStoredInquiries();
+  const inq = inqs.find(i=>i.id===id);
+  if (!inq) return;
+  const draft = document.getElementById(`draft-ta-${id}`)?.value || inq.draft || '';
+  if (!draft.trim()) { toast('Nothing to send — draft is empty', 'error'); return; }
+  // Look up worker phone
+  const shift = (allShifts||[]).find(s=> (s.worker_name||'').toLowerCase().trim() === (inq.worker||'').toLowerCase().trim());
+  const phone = shift?.worker_phone || (typeof workerPhone === 'function' ? workerPhone(inq.worker) : '');
+  if (!phone) { toast('No phone number found for this worker', 'error'); return; }
+  const btn = document.getElementById(`send-btn-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  const ok = await sendPeriskopeMessage(phone, draft.trim());
+  if (ok) {
+    inq.draft = draft; inq.status = 'closed'; inq.repliedAt = new Date().toISOString();
+    saveStoredInquiries(inqs);
+    toast('Reply sent via Periskope ✓');
+    renderTasksPanel();
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = '📤 Send via Periskope'; }
+    toast('Send failed — check Periskope settings', 'error');
+  }
+}
+async function generateInquiryDraft(id) {
+  const inqs = getStoredInquiries();
+  const inq = inqs.find(i=>i.id===id);
+  if (!inq) return;
+  const labelEl = document.getElementById(`draft-label-${id}`);
+  const taEl    = document.getElementById(`draft-ta-${id}`);
+  if (labelEl) labelEl.innerHTML = `<span class="spinner-inline"></span> Claude is drafting…`;
+  // Find any upcoming shifts for this worker for context
+  const workerShifts = (allShifts||[])
+    .filter(s=>(s.worker_name||'').toLowerCase().trim()===(inq.worker||'').toLowerCase().trim())
+    .slice(0,3)
+    .map(s=>`${s.shift_date} ${s.scheduled_start||''}–${s.scheduled_end||''} @ ${s.outlet||''}`)
+    .join('; ');
+  const typeLabels = { shift_inquiry:'shift inquiry', payment_inquiry:'payment inquiry', other_inquiry:'general inquiry', dispute:'cancellation request', late:'late arrival notice' };
+  const systemPrompt = `You are the operations coordinator for Anytime Work, a Singapore part-time worker marketplace for F&B and hospitality. You reply to workers professionally but warmly, using simple clear English. Keep replies concise (2–4 sentences max). Business rules: cancellations with valid MC waive penalty but suspension still applies if repeated; shifts can only be amended with at least 24h notice and outlet approval; pay is processed weekly every Friday; late arrivals must be communicated immediately. Always be helpful and solution-focused.`;
+  const userPrompt = `Draft a professional reply to this worker's ${typeLabels[inq.type]||'inquiry'}.\nWorker name: ${inq.worker}\nWorker message: "${inq.message}"\n${workerShifts ? `Worker's upcoming shifts: ${workerShifts}` : ''}\nReply as the Anytime Work ops team. Return only the reply message text, no preamble.`;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] })
+    });
+    const data = await res.json();
+    const text = data?.content?.[0]?.text || '';
+    if (text && taEl) { taEl.value = text; updateInquiryDraft(id, text); }
+    if (labelEl) labelEl.innerHTML = '✦ AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span>';
+  } catch(e) {
+    if (labelEl) labelEl.innerHTML = '✦ AI Draft';
+    toast('Draft generation failed', 'error');
+  }
+}
 function renderTasksPanel() {
   const el = document.getElementById('tasks-list');
   if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
   if (!el) return;
-  const tasks = getOpenTasks();
-  if (!tasks.length) {
-    el.innerHTML = `<div style="text-align:center;padding:30px 12px;color:var(--text3);">
+  const urgentTasks = getOpenTasks();
+  const inquiries   = getStoredInquiries().filter(i => i.status === 'open');
+  // Merge and filter by category
+  const f = currentTaskFilter;
+  const filteredUrgent = urgentTasks.filter(t => f === 'all' || t.type === f);
+  const filteredInqs   = inquiries.filter(i => f === 'all' || i.type === f);
+  // Update filter badges
+  const allCount = urgentTasks.length + inquiries.length;
+  document.querySelectorAll('.task-filter-btn').forEach(btn => {
+    const bf = btn.dataset.filter;
+    const count = bf === 'all' ? allCount
+      : urgentTasks.filter(t=>t.type===bf).length + inquiries.filter(i=>i.type===bf).length;
+    btn.textContent = btn.textContent.replace(/ \(\d+\)$/,'');
+    if (count > 0) btn.textContent += ` (${count})`;
+  });
+  if (!filteredUrgent.length && !filteredInqs.length) {
+    const msg = f === 'all' ? 'No tasks or inquiries right now' : `No ${f.replace('_',' ')} tasks`;
+    el.innerHTML = `<div style="text-align:center;padding:40px 12px;color:var(--text3);">
       <div style="font-size:28px;margin-bottom:8px;">✓</div>
-      <div style="font-weight:600;color:var(--green);">No urgent tasks right now</div>
-      <div class="sub-text" style="margin-top:4px;">Cancellation requests, late-arrival notices and replacement slots will appear here — for every date, not just today.</div>
+      <div style="font-weight:600;color:var(--green);">${msg}</div>
+      <div class="sub-text" style="margin-top:4px;">Cancellations, late notices, shift &amp; payment inquiries will appear here across all dates.</div>
     </div>`;
     return;
   }
+  let html = '';
   let lastDone = false;
-  el.innerHTML = tasks.map(t => {
+  filteredUrgent.forEach(t => {
     const dLabel = shiftDateLabel(t.date);
     const tRange = shiftTimeRange(t.start, t.end);
-    // Prominent shift line shown on every card: date + timing
     const shiftLine = `<div class="task-shift">📅 <strong>${dLabel}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>`;
     const when = t.at ? `<span class="task-when">${relTime(t.at)}</span>` : '';
-    // Separator before the first completed (collapsed) task
     let sep = '';
     if (t.done && !lastDone) { sep = '<div class="task-completed-divider">Completed</div>'; lastDone = true; }
-    const card = renderOneTaskCard(t, dLabel, tRange, shiftLine, when);
-    return sep + card;
-  }).join('');
+    html += sep + renderOneTaskCard(t, dLabel, tRange, shiftLine, when);
+  });
+  if (filteredInqs.length) {
+    if (filteredUrgent.length) html += '<div class="task-completed-divider" style="color:var(--text2);border-top-style:solid;">Worker Inquiries</div>';
+    filteredInqs.forEach(inq => { html += renderInquiryCard(inq); });
+  }
+  el.innerHTML = html;
 }
 function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
+    const uid = 'task_' + String(t.id).replace(/[^a-z0-9]/gi,'_');
+    function draftBox(ctx) {
+      let stored = {}; try { stored = JSON.parse(localStorage.getItem('task_drafts')||'{}'); } catch(e){}
+      const dv = (stored[uid]||'').replace(/"/g,'&quot;');
+      const ctxJson = JSON.stringify(ctx).replace(/'/g,"\'");
+      return `<div class="task-draft-box">
+        <div class="task-draft-label" id="dlabel-${uid}">\u2746 AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span></div>
+        <textarea class="task-draft-textarea" id="dta-${uid}" placeholder="Click 'Draft reply' to generate, or type manually\u2026" oninput="saveTaskDraft('${uid}',this.value)">${dv}</textarea>
+        <div class="task-draft-actions">
+          <button class="btn btn-primary btn-sm" onclick="generateTaskDraft('${uid}',${ctxJson})">\u2746 Draft reply</button>
+          <button class="btn btn-amber btn-sm" id="tsend-${uid}" onclick="sendTaskDraft('${uid}','${escapeAttr(String(t.worker||''))}')">\ud83d\udce4 Send via Periskope</button>
+        </div>
+      </div>`;
+    }
     if (t.type === 'dispute') {
       const kindTxt = t.kind === 'cancel' ? 'wants to cancel'
         : (t.kind === 'cantmake' ? "can't make this shift" : 'flagged an issue');
-      const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
+      const reason = t.reason ? `<div class="task-reason">"${escapeHtml(t.reason)}"</div>` : '';
+      const ctx = { type:'dispute', worker:t.worker||'', outlet:t.outlet||'', date:dLabel, time:tRange, kind:t.kind||'', reason:t.reason||''};
       return `<div class="task-card task-dispute">
         <div class="task-head">
-          <span class="task-tag tag-dispute">🚫 Cancellation request</span>
+          <span class="task-tag tag-dispute">\ud83d\udeab Cancellation request</span>
           ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
           ${when}
         </div>
         <div class="task-body">
           <div class="task-title">${escapeHtml(t.worker)} ${kindTxt}</div>
           ${shiftLine}
-          <div class="task-meta">👤 <strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)}</div>
+          <div class="task-meta">\ud83d\udc64 <strong>${escapeHtml(t.worker)}</strong> \u00b7 ${escapeHtml(t.outlet)}</div>
           ${reason}
         </div>
         <div class="task-actions">
-          <button class="btn btn-primary btn-sm" onclick="acknowledgeDispute('${escapeAttr(String(t.id))}')" title="Confirm the drop-out and move this to Replacement needed (no penalty applied here)">Acknowledge</button>
+          <button class="btn btn-primary btn-sm" onclick="acknowledgeDispute('${escapeAttr(String(t.id))}')">Acknowledge</button>
           <button class="btn btn-danger btn-sm" onclick="openCancelFromDispute('${escapeAttr(String(t.id))}')">Process cancellation</button>
           <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
           <button class="btn btn-ghost btn-sm" onclick="clearDispute('${escapeAttr(String(t.id))}'); renderTasksPanel();">Dismiss</button>
         </div>
+        ${draftBox(ctx)}
       </div>`;
     }
     if (t.type === 'replacement') {
       const whoTxt = t.worker ? `${escapeHtml(t.worker)} dropped out` : 'Worker dropped out';
       return `<div class="task-card task-replacement">
         <div class="task-head">
-          <span class="task-tag tag-replacement">🔁 Replacement needed</span>
+          <span class="task-tag tag-replacement">\ud83d\udd01 Replacement needed</span>
           ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
           ${when}
         </div>
         <div class="task-body">
-          <div class="task-title">${whoTxt} — slot open${t.role ? ' · '+escapeHtml(t.role) : ''}</div>
+          <div class="task-title">${whoTxt} \u2014 slot open${t.role ? ' \u00b7 '+escapeHtml(t.role) : ''}</div>
           ${shiftLine}
-          <div class="task-meta">${escapeHtml(t.outlet)} · slot returned to Available</div>
+          <div class="task-meta">${escapeHtml(t.outlet)} \u00b7 slot returned to Available</div>
         </div>
         <div class="task-actions">
           <button class="btn btn-primary btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">Assign / re-fill</button>
@@ -4103,26 +4312,26 @@ function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
       </div>`;
     }
     // Late notice
-    const reason = t.reason ? `<div class="task-reason">“${escapeHtml(t.reason)}”</div>` : '';
-    const ackBadge = t.acked ? '<span class="task-tag tag-done">✓ Acknowledged</span>' : '';
-    const informedBadge = t.outletInformed ? '<span class="task-tag tag-done">✓ Outlet informed</span>' : '';
-    // COMPLETED late task → collapsed, compact card pinned to the bottom of the panel.
+    const reason = t.reason ? `<div class="task-reason">"${escapeHtml(t.reason)}"</div>` : '';
+    const ackBadge = t.acked ? '<span class="task-tag tag-done">\u2713 Acknowledged</span>' : '';
+    const informedBadge = t.outletInformed ? '<span class="task-tag tag-done">\u2713 Outlet informed</span>' : '';
     if (t.done) {
       const compWhen = t.completedAt ? `<span class="task-when">done ${relTime(t.completedAt)}</span>` : when;
       return `<div class="task-card task-late task-done task-collapsed">
         <div class="task-head">
-          <span class="task-tag tag-late">⏰ Late arrival</span>
-          <span class="task-tag tag-done">✓ Done</span>
+          <span class="task-tag tag-late">\u23f0 Late arrival</span>
+          <span class="task-tag tag-done">\u2713 Done</span>
           ${compWhen}
         </div>
         <div class="task-body">
-          <div class="task-collapsed-line"><strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)} · ${shiftDateLabel(t.date)}${tRange ? ' · '+tRange : ''}</div>
+          <div class="task-collapsed-line"><strong>${escapeHtml(t.worker)}</strong> \u00b7 ${escapeHtml(t.outlet)} \u00b7 ${shiftDateLabel(t.date)}${tRange ? ' \u00b7 '+tRange : ''}</div>
         </div>
       </div>`;
     }
+    const ctx2 = { type:'late', worker:t.worker||'', outlet:t.outlet||'', date:dLabel, time:tRange, reason:t.reason||''};
     return `<div class="task-card task-late">
       <div class="task-head">
-        <span class="task-tag tag-late">⏰ Late arrival</span>
+        <span class="task-tag tag-late">\u23f0 Late arrival</span>
         ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
         ${ackBadge}${informedBadge}
         ${when}
@@ -4135,18 +4344,82 @@ function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
       </div>
       <div class="task-actions">
         ${!t.acked ? `<button class="btn btn-primary btn-sm" onclick="ackLate('${escapeAttr(String(t.id))}')">Acknowledge</button>` : ''}
-        ${!t.outletInformed ? `<button class="btn btn-amber btn-sm" onclick="markOutletInformed('${escapeAttr(String(t.id))}')">Inform outlet ✓</button>` : ''}
+        ${!t.outletInformed ? `<button class="btn btn-amber btn-sm" onclick="markOutletInformed('${escapeAttr(String(t.id))}')">Inform outlet \u2713</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
         <button class="btn btn-ghost btn-sm" onclick="clearLate('${escapeAttr(String(t.id))}'); renderTasksPanel();">Clear</button>
       </div>
+      ${draftBox(ctx2)}
     </div>`;
 }
+function saveTaskDraft(uid, val) {
+  try { const d = JSON.parse(localStorage.getItem('task_drafts')||'{}'); d[uid]=val; localStorage.setItem('task_drafts', JSON.stringify(d)); } catch(e){}
+}
+async function generateTaskDraft(uid, ctx) {
+  const labelEl = document.getElementById(`dlabel-${uid}`);
+  const taEl    = document.getElementById(`dta-${uid}`);
+  if (labelEl) labelEl.innerHTML = '<span class="spinner-inline"></span> Claude is drafting\u2026';
+  const typeLabels = { dispute:'cancellation request', late:'late arrival notice' };
+  const sys = `You are the operations coordinator for Anytime Work, a Singapore part-time worker marketplace for F&B and hospitality. Reply professionally but warmly, in simple clear English. Keep replies concise (2\u20134 sentences). Business rules: cancellations with valid MC waive penalty but suspension may still apply for repeated cases; pay is weekly every Friday; late arrivals must be communicated to the outlet immediately. Always be solution-focused.`;
+  const user = `Draft a professional reply to a worker's ${typeLabels[ctx.type]||ctx.type}.\nWorker: ${ctx.worker}\nShift: ${ctx.date}${ctx.time?' at '+ctx.time:''}${ctx.outlet?' @ '+ctx.outlet:''}\n${ctx.reason?'Worker said: "'+ctx.reason+'"':''}\nReturn only the reply message, no preamble.`;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ model:'claude-sonnet-4-20250514', max_tokens:1000, system:sys, messages:[{role:'user',content:user}] }) });
+    const data = await res.json();
+    const text = data?.content?.[0]?.text || '';
+    if (text && taEl) { taEl.value = text; saveTaskDraft(uid, text); }
+    if (labelEl) labelEl.innerHTML = '\u2746 AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span>';
+  } catch(e) { if (labelEl) labelEl.innerHTML = '\u2746 AI Draft'; toast('Draft generation failed','error'); }
+}
+async function sendTaskDraft(uid, workerName) {
+  const taEl = document.getElementById(`dta-${uid}`);
+  const draft = taEl?.value?.trim();
+  if (!draft) { toast('Nothing to send \u2014 draft is empty','error'); return; }
+  const phone = typeof workerPhone === 'function' ? workerPhone(workerName) : '';
+  if (!phone) { toast('No phone number for this worker','error'); return; }
+  const btn = document.getElementById(`tsend-${uid}`);
+  if (btn) { btn.disabled=true; btn.textContent='Sending\u2026'; }
+  const ok = await sendPeriskopeMessage(phone, draft);
+  if (ok) { toast('Reply sent via Periskope \u2713'); }
+  else { toast('Send failed \u2014 check Periskope settings','error'); }
+  if (btn) { btn.disabled=false; btn.textContent='\ud83d\udce4 Send via Periskope'; }
+}
+
 // Jump to the shift's day in attendance from a task, closing the panel first
 function jumpToShiftFromTask(shiftId, dateStr) {
   closeTasksPanel();
   if (typeof jumpToShift === 'function' && dateStr) {
     jumpToShift(dateStr, shiftId);
   }
+}
+// ── Inquiry card renderer ────────────────────────────────────────
+function renderInquiryCard(inq) {
+  const typeMap = {
+    shift_inquiry:   { cls:'task-shift-inquiry',   tag:'tag-shift-inquiry',   icon:'📋', label:'Shift inquiry' },
+    payment_inquiry: { cls:'task-payment-inquiry',  tag:'tag-payment-inquiry',  icon:'💰', label:'Payment inquiry' },
+    other_inquiry:   { cls:'task-other-inquiry',    tag:'tag-other-inquiry',    icon:'💬', label:'Other inquiry' },
+  };
+  const m = typeMap[inq.type] || typeMap.other_inquiry;
+  const when = inq.at ? `<span class="task-when">${relTime(inq.at)}</span>` : '';
+  const draftVal = (inq.draft||'').replace(/"/g,'&quot;');
+  return `<div class="task-card ${m.cls}" id="inq-card-${inq.id}">
+    <div class="task-head">
+      <span class="task-tag ${m.tag}">${m.icon} ${m.label}</span>
+      ${when}
+    </div>
+    <div class="task-body">
+      <div class="task-title">${escapeHtml(inq.worker)}</div>
+      <div class="task-reason">"${escapeHtml(inq.message)}"</div>
+    </div>
+    <div class="task-draft-box">
+      <div class="task-draft-label" id="draft-label-${inq.id}">✦ AI Draft <span style="font-size:9px;opacity:0.6;font-weight:400;">(edit before sending)</span></div>
+      <textarea class="task-draft-textarea" id="draft-ta-${inq.id}" placeholder="Click 'Draft reply' to generate, or type manually…" oninput="updateInquiryDraft('${inq.id}',this.value)">${draftVal}</textarea>
+      <div class="task-draft-actions">
+        <button class="btn btn-primary btn-sm" onclick="generateInquiryDraft('${inq.id}')">✦ Draft reply</button>
+        <button class="btn btn-amber btn-sm" id="send-btn-${inq.id}" onclick="sendInquiryReply('${inq.id}')">📤 Send via Periskope</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeInquiry('${inq.id}')">✓ Close</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 async function loadShifts() {
