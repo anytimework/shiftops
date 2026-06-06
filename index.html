@@ -2158,9 +2158,16 @@ async function persistReminder(shiftId) {
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
   // Save to Supabase so all other users can see it
   const r = shiftReminders[shiftId] || {};
+  // Look up the shift to get worker phone for webhook matching
+  const shift = (allShifts || []).find(s => String(s.id) === String(shiftId))
+             || taskShiftCache?.[String(shiftId)];
+  const wPhone = shift ? (workerPhone(shift.worker_name) || '').replace(/\D/g,'') : '';
+  const wName  = shift?.worker_name || '';
   try {
     const { error } = await supabaseClient.from('shift_reminders').upsert({
       shift_id: String(shiftId),
+      worker_phone: wPhone || null,
+      worker_name: wName || null,
       night_sent: !!r.nightSent,
       night_acked: !!r.nightAcked,
       clockin_sent: !!r.clockinSent,
