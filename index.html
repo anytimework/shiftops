@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v30 — Tasks & Replacement-needed now span ALL dates (cross-date task cache), not just the viewed day. Tasks panel shows shift date (Today/Tomorrow/date) + timings. Always-visible sidebar Tasks badge on every page. Processed worker cancellations set a persistent needs_replacement flag so the open slot stays in Replacement-needed across dates until re-filled or dismissed; outlet cancellations excluded. Re-filling a slot auto-clears the flag. Webhook guidance extended with LATE detection + correct upcoming-shift matching. New shift_reminders columns: needs_replacement, replacement_at. -->
 <!-- Build patch: v29 — Tasks dashboard card + Tasks panel (disputes + late notices), late-arrival capture (acknowledge + inform outlet), good-will cancellation option, MC made optional/deferrable, Cancelled card renamed to Replacement Needed -->
 <!-- Build patch: v28 — Periskope acknowledgement auto-tick + shift dispute/cancellation detection (disputed/dispute_kind/dispute_reason/dispute_at) -->
 <!-- Build patch: v27 — local expandable attendance comments without DB schema changes -->
@@ -53,6 +54,9 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .nav-badge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff; display: none; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; font-family: var(--mono); line-height: 18px; box-shadow: 0 0 0 2px var(--bg2); }
 .nav-badge.show { display: inline-flex; }
 .nav-badge.clockout { background: var(--amber); color: #1b1304; margin-left: 4px; }
+.nav-badge.tasks { background: var(--red); color: #fff; }
+.nav-item-tasks .nav-icon { filter: saturate(1.4); }
+.nav-item-tasks.has-tasks { background: rgba(232,64,64,0.10); }
 .nav-label { flex: 1; }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; }
 .sidebar-user { padding: 12px 14px; border-top: 1px solid var(--border); }
@@ -176,16 +180,19 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--bg2); }
 .task-card.task-dispute { border-left: 3px solid var(--red); }
 .task-card.task-late { border-left: 3px solid var(--amber); }
+.task-card.task-replacement { border-left: 3px solid var(--teal, #2bb3a3); }
 .task-card.task-done { opacity: 0.62; }
 .task-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 7px; }
 .task-tag { font-size: 10px; font-weight: 700; letter-spacing: 0.3px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; font-family: var(--mono); }
 .tag-dispute { background: rgba(232,64,64,0.15); color: #ff9a9a; }
 .tag-late { background: rgba(245,166,35,0.15); color: var(--amber); }
+.tag-replacement { background: rgba(43,179,163,0.16); color: #5fd6c8; }
 .tag-today { background: rgba(79,142,247,0.18); color: #8fb6ff; }
 .tag-done { background: rgba(60,200,120,0.15); color: #6fdd9b; }
 .task-when { font-size: 11px; color: var(--text3); margin-left: auto; }
 .task-title { font-weight: 600; font-size: 14px; color: var(--text); }
-.task-meta { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.task-shift { font-size: 12.5px; color: var(--text); margin-top: 4px; background: var(--bg3); border-radius: 6px; padding: 5px 9px; display: inline-block; }
+.task-meta { font-size: 12px; color: var(--text2); margin-top: 4px; }
 .task-reason { margin-top: 6px; font-size: 12px; color: var(--text2); font-style: italic; background: var(--bg3); border-radius: 6px; padding: 6px 9px; }
 .task-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
 .task-actions .btn { padding: 6px 12px; font-size: 12px; }
@@ -587,6 +594,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <span class="nav-icon">📋</span><span class="nav-label">Attendance</span>
         <span class="nav-badge" id="pending-clockin-nav-badge" title="Pending clock-in">0</span>
         <span class="nav-badge clockout" id="pending-clockout-nav-badge" title="Pending clock-out">0</span>
+      </button>
+      <button class="nav-item nav-item-tasks" onclick="openTasksPanel()" title="Urgent tasks across all dates">
+        <span class="nav-icon">⚡</span><span class="nav-label">Tasks</span>
+        <span class="nav-badge tasks" id="tasks-nav-badge" title="Open tasks (all dates)">0</span>
       </button>
       <button class="nav-item" onclick="switchPage('workers',this)">
         <span class="nav-icon">👥</span> Workers
@@ -1628,6 +1639,11 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [], allKnowledge = [];
 let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, totalDeducted }
+// Cross-date cache of shifts that have any open task (dispute/late) OR need replacement,
+// independent of the date currently being viewed. Keyed by String(shift_id) → shift row.
+// This is what powers the Tasks panel and the Replacement-needed list so they show
+// EVERY open item regardless of which day the attendance grid is showing.
+let taskShiftCache = {};
 // Built-in WA fallback — used when localStorage has no saved config (e.g. different origin / first open)
 const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt, lateNotified, lateReason, lateAt, lateAck, outletInformed }
@@ -1838,7 +1854,18 @@ async function init() {
   requireInternalLogin();
   subscribeToReminderChanges(); // live sync + 30s polling fallback
   checkReminderAlerts();
+  updateTasksNavBadge();
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
+  // Periodically refresh the cross-date task cache + sidebar badge so the global
+  // Tasks indicator stays accurate on every page, even without remote changes.
+  setInterval(() => {
+    if (typeof loadTaskShiftCache === 'function') {
+      loadTaskShiftCache().then(() => {
+        updateTasksNavBadge();
+        if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+      }).catch(()=>{});
+    }
+  }, 60000);
 }
 
 function updateSidebarDate() {
@@ -1874,7 +1901,9 @@ async function loadReminders() {
           lateReason: r.late_reason || '',
           lateAt: r.late_at || '',
           lateAck: !!r.late_ack,
-          outletInformed: !!r.outlet_informed
+          outletInformed: !!r.outlet_informed,
+          needsReplacement: !!r.needs_replacement,
+          replacementAt: r.replacement_at || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -1903,6 +1932,8 @@ async function persistReminder(shiftId) {
       late_at: r.lateAt || null,
       late_ack: !!r.lateAck,
       outlet_informed: !!r.outletInformed,
+      needs_replacement: !!r.needsReplacement,
+      replacement_at: r.replacementAt || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -1939,12 +1970,23 @@ function subscribeToReminderChanges() {
             lateReason: row.late_reason || '',
             lateAt: row.late_at || '',
             lateAck: !!row.late_ack,
-            outletInformed: !!row.outlet_informed
+            outletInformed: !!row.outlet_informed,
+            needsReplacement: !!row.needs_replacement,
+            replacementAt: row.replacement_at || ''
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
         updateReminderPanelInPlace(shiftId);
         checkReminderAlerts();
+        // A live reminder change may add a task on a date not currently loaded
+        // (e.g. a worker says "late tomorrow"). Refresh the cross-date cache so the
+        // Tasks panel and the always-visible nav badge reflect it immediately.
+        if (typeof loadTaskShiftCache === 'function') {
+          loadTaskShiftCache().then(() => {
+            if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+            if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+          }).catch(()=>{});
+        }
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') console.log('✅ Reminder real-time active');
@@ -1974,7 +2016,9 @@ async function silentSyncReminders() {
         lateReason: r.late_reason || '',
         lateAt: r.late_at || '',
         lateAck: !!r.late_ack,
-        outletInformed: !!r.outlet_informed
+        outletInformed: !!r.outlet_informed,
+        needsReplacement: !!r.needs_replacement,
+        replacementAt: r.replacement_at || ''
       };
     });
     // Find shift IDs where something changed
@@ -1987,7 +2031,8 @@ async function silentSyncReminders() {
           a.clockinSent !== b.clockinSent || a.clockinResponded !== b.clockinResponded ||
           a.disputed !== b.disputed || (a.disputeReason||'') !== (b.disputeReason||'') ||
           a.lateNotified !== b.lateNotified || a.lateAck !== b.lateAck ||
-          a.outletInformed !== b.outletInformed || (a.lateReason||'') !== (b.lateReason||'')) {
+          a.outletInformed !== b.outletInformed || (a.lateReason||'') !== (b.lateReason||'') ||
+          a.needsReplacement !== b.needsReplacement) {
         changed.push(id);
       }
     });
@@ -1996,6 +2041,17 @@ async function silentSyncReminders() {
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
       changed.forEach(id => updateReminderPanelInPlace(id));
       checkReminderAlerts();
+      // Cross-date task cache may now reference new shift IDs (e.g. a "late tomorrow"
+      // notice). Refresh it so the Tasks panel and nav badge stay accurate on any page.
+      if (typeof loadTaskShiftCache === 'function') {
+        loadTaskShiftCache().then(() => {
+          if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+          if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+          if (typeof renderMetrics === 'function' && document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') {
+            try { renderMetrics(); } catch(e){}
+          }
+        }).catch(()=>{});
+      }
     }
   } catch(e) {}
 }
@@ -2007,7 +2063,7 @@ async function toggleReminder(shiftId, field, checked) {
   await persistReminder(shiftId);      // sync to Supabase for all other users
 }
 async function undoFullAck(shiftId) {
-  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false };
+  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '' };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
@@ -2033,6 +2089,7 @@ async function flagDispute(shiftId, kind) {
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
+  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); if (document.getElementById('tasks-modal')?.classList.contains('open')) renderTasksPanel(); } catch(e){} }
   toast('⚠ Shift flagged as disputed');
 }
 // ── Late-arrival notice handling ──────────────────────────────
@@ -2049,6 +2106,7 @@ async function flagLate(shiftId, reason) {
   checkReminderAlerts();
   renderTasksPanel();
   await persistReminder(shiftId);
+  if (typeof loadTaskShiftCache === 'function') { try { await loadTaskShiftCache(); renderTasksPanel(); } catch(e){} }
   toast('⏰ Late arrival logged as a task');
 }
 // Agent picks up / acknowledges the late notice
@@ -2093,6 +2151,24 @@ async function clearLate(shiftId) {
   renderTasksPanel();
   await persistReminder(shiftId);
   toast('✓ Late notice cleared');
+}
+// Dismiss / mark-filled a replacement-needed open slot (clears the flag so it
+// leaves the Tasks panel and the Replacement-needed list across all dates).
+async function dismissReplacement(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].needsReplacement = false;
+  shiftReminders[shiftId].replacementAt = '';
+  shiftReminders[shiftId].replacedWorker = '';
+  // Clean up the cross-date cache so counts update immediately
+  if (taskShiftCache[String(shiftId)] && !needsReplacement(taskShiftCache[String(shiftId)])) {
+    // keep in cache only if still referenced by another flag; harmless either way
+  }
+  updateReminderPanelInPlace(shiftId);
+  checkReminderAlerts();
+  renderTasksPanel();
+  if (typeof renderMetrics === 'function') { try { renderMetrics(); } catch(e){} }
+  await persistReminder(shiftId);
+  toast('✓ Replacement slot cleared');
 }
 function updateReminderPanelInPlace(shiftId) {
   const row = document.getElementById('row-' + shiftId);
@@ -2321,6 +2397,7 @@ function checkReminderAlerts() {
   if (typeof renderMetrics === 'function' && document.getElementById('metrics')) {
     try { renderMetrics(); } catch(e) {}
   }
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
   if (document.getElementById('tasks-modal')?.classList.contains('open')) {
     renderTasksPanel();
   }
@@ -3466,39 +3543,64 @@ function cancellationCountForLoadedShifts() {
 
 // ── Replacement Needed ────────────────────────────────────────
 // A slot "needs replacement" when a worker has dropped out but the booking still
-// stands and must be re-filled. This is higher priority than an ordinary open slot.
-// Covers: (a) shifts flagged disputed (worker wants to cancel / can't make it),
-// still has a named worker, not yet processed; and (b) shifts whose worker was
-// cancelled and the slot returned to "Available" for today/upcoming (open booking
-// that originated from a drop-out). We treat any "Available" upcoming slot whose
-// reminder shows a recent dispute/cancellation as replacement-needed.
+// stands and must be re-filled. Higher priority than an ordinary open slot.
+// Covers:
+//  (a) shifts flagged disputed (worker wants to cancel / can't make it), still
+//      has a named worker, not yet processed;
+//  (b) shifts whose worker cancellation was processed and the slot returned to
+//      "Available" — the reminder carries a needsReplacement flag until an agent
+//      either re-fills it or dismisses it;
+//  (c) legacy: an "Available" slot that still carries a dispute marker.
+// Outlet/client cancellations are hard-deleted, so they never appear here.
 function needsReplacement(s) {
   if (!s || s.cancelled) return false; // hard-cancelled/outlet-deleted slots are gone
   const r = shiftReminders[s.id] || {};
   const wn = String(s.worker_name || '').trim().toLowerCase();
   // (a) Worker still named but flagged as disputed → urgent: decide + re-fill
   if (r.disputed && wn && wn !== 'available') return true;
-  // (b) Slot returned to Available but a dispute/cancellation was recorded on it
+  // (b) Processed worker cancellation left an open slot waiting to be re-filled
+  if (wn === 'available' && r.needsReplacement) return true;
+  // (c) Legacy / manual: Available slot still carrying a dispute marker
   if (wn === 'available' && (r.disputed || r.disputeKind)) return true;
   return false;
 }
+// Every replacement-needed slot across all dates (not just the viewed day)
+function getReplacementNeeded() {
+  const todayStr = formatDate(new Date());
+  return taskShiftPool()
+    .filter(needsReplacement)
+    .map(s => ({
+      id: s.id,
+      worker: String(s.worker_name || '').trim(),
+      outlet: s.outlet || '',
+      role: s.role || '',
+      date: s.shift_date,
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+      isToday: s.shift_date === todayStr,
+      at: (shiftReminders[s.id] || {}).replacementAt || (shiftReminders[s.id] || {}).disputeAt || ''
+    }))
+    .sort((a,b) => (a.date||'').localeCompare(b.date||'') || (a.start||'').localeCompare(b.start||''));
+}
 function replacementNeededCountForLoadedShifts() {
-  return (allShifts || []).filter(needsReplacement).length;
+  return getReplacementNeeded().length;
 }
 
 // ── Tasks (urgent agent actions) ──────────────────────────────
-// Aggregates the urgent items an agent must act on right now:
+// Aggregates the urgent items an agent must act on right now, ACROSS ALL DATES:
 //  • Cancellation / dispute requests (worker wants to cancel / can't make it)
 //  • Late-arrival notices (acknowledge + inform outlet)
-// Returns an array of task objects sorted by urgency (disputes first, then unacked late).
+//  • Replacement-needed open slots (cancellation processed, slot still to fill)
+// Returns an array of task objects sorted by urgency.
 function getOpenTasks() {
   const tasks = [];
   const todayStr = formatDate(new Date());
-  (allShifts || []).forEach(s => {
+  taskShiftPool().forEach(s => {
     const r = shiftReminders[s.id] || {};
     const wn = String(s.worker_name || '').trim();
     const isToday = s.shift_date === todayStr;
     const start = s.scheduled_start ? s.scheduled_start.slice(0,5) : '';
+    const end = s.scheduled_end ? s.scheduled_end.slice(0,5) : '';
     // Dispute / cancellation request — needs an ops decision
     if (r.disputed && wn && wn.toLowerCase() !== 'available' && !s.cancelled) {
       tasks.push({
@@ -3507,7 +3609,7 @@ function getOpenTasks() {
         worker: wn,
         outlet: s.outlet || '',
         date: s.shift_date,
-        start,
+        start, end,
         isToday,
         kind: r.disputeKind || 'cancel',
         reason: r.disputeReason || '',
@@ -3522,7 +3624,7 @@ function getOpenTasks() {
         worker: wn,
         outlet: s.outlet || '',
         date: s.shift_date,
-        start,
+        start, end,
         isToday,
         reason: r.lateReason || '',
         at: r.lateAt || '',
@@ -3531,19 +3633,44 @@ function getOpenTasks() {
         done: !!r.lateAck && !!r.outletInformed
       });
     }
+    // Replacement-needed open slot — cancellation processed, slot still to fill
+    if (!s.cancelled && String(wn).toLowerCase() === 'available' && r.needsReplacement) {
+      tasks.push({
+        type: 'replacement',
+        id: s.id,
+        worker: r.replacedWorker || '',
+        outlet: s.outlet || '',
+        role: s.role || '',
+        date: s.shift_date,
+        start, end,
+        isToday,
+        at: r.replacementAt || ''
+      });
+    }
   });
-  // Sort: today first, disputes before late, not-done before done, earliest start first
-  const rank = t => (t.isToday ? 0 : 1) * 100 + (t.type === 'dispute' ? 0 : 10) + (t.done ? 5 : 0);
+  // Sort: today first; disputes, then late, then replacements; not-done before done; earliest start first
+  const typeRank = t => t.type === 'dispute' ? 0 : (t.type === 'late' ? 10 : 20);
+  const rank = t => (t.isToday ? 0 : 1) * 100 + typeRank(t) + (t.done ? 5 : 0);
   tasks.sort((a,b) => {
     const ra = rank(a), rb = rank(b);
     if (ra !== rb) return ra - rb;
-    return (a.start || '').localeCompare(b.start || '');
+    return (a.date || '').localeCompare(b.date || '') || (a.start || '').localeCompare(b.start || '');
   });
   return tasks;
 }
 // Count of tasks still requiring action (excludes fully-completed late notices)
 function openTaskCount() {
-  return getOpenTasks().filter(t => t.type === 'dispute' || !t.done).length;
+  return getOpenTasks().filter(t => t.type !== 'late' || !t.done).length;
+}
+// Keep the always-visible sidebar Tasks badge in sync (works on every page)
+function updateTasksNavBadge() {
+  const badge = document.getElementById('tasks-nav-badge');
+  const navBtn = document.querySelector('.nav-item-tasks');
+  if (!badge) return;
+  const count = openTaskCount();
+  badge.textContent = count > 99 ? '99+' : String(count);
+  badge.classList.toggle('show', count > 0);
+  if (navBtn) navBtn.classList.toggle('has-tasks', count > 0);
 }
 // ── Tasks panel UI ────────────────────────────────────────────
 function openTasksPanel() {
@@ -3566,23 +3693,45 @@ function relTime(iso) {
   if (h < 24) return h + 'h ago';
   return new Date(iso).toLocaleDateString('en-SG',{day:'numeric',month:'short'});
 }
+// Friendly relative date label for a shift, e.g. "Today, 6 Jun" / "Tomorrow, 7 Jun" / "Mon, 8 Jun"
+function shiftDateLabel(dateStr) {
+  if (!dateStr) return '';
+  try {
+    const d = new Date(dateStr + 'T00:00:00');
+    if (isNaN(d)) return dateStr;
+    const today = new Date(); today.setHours(0,0,0,0);
+    const diffDays = Math.round((d - today) / 86400000);
+    const md = d.toLocaleDateString('en-SG', { day: 'numeric', month: 'short' });
+    if (diffDays === 0) return `Today, ${md}`;
+    if (diffDays === 1) return `Tomorrow, ${md}`;
+    if (diffDays === -1) return `Yesterday, ${md}`;
+    const wd = d.toLocaleDateString('en-SG', { weekday: 'short' });
+    return `${wd}, ${md}`;
+  } catch(e) { return dateStr; }
+}
+// Compact shift time-range, e.g. "9:00 AM – 5:00 PM" (falls back to start only)
+function shiftTimeRange(start, end) {
+  if (!start) return '';
+  return end ? `${start}–${end}` : start;
+}
 function renderTasksPanel() {
   const el = document.getElementById('tasks-list');
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
   if (!el) return;
   const tasks = getOpenTasks();
   if (!tasks.length) {
     el.innerHTML = `<div style="text-align:center;padding:30px 12px;color:var(--text3);">
       <div style="font-size:28px;margin-bottom:8px;">✓</div>
       <div style="font-weight:600;color:var(--green);">No urgent tasks right now</div>
-      <div class="sub-text" style="margin-top:4px;">Cancellation requests and late-arrival notices will appear here.</div>
+      <div class="sub-text" style="margin-top:4px;">Cancellation requests, late-arrival notices and replacement slots will appear here — for every date, not just today.</div>
     </div>`;
     return;
   }
   el.innerHTML = tasks.map(t => {
-    const dateLabel = (() => {
-      try { return new Date((t.date||'')+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}); }
-      catch(e){ return t.date || ''; }
-    })();
+    const dLabel = shiftDateLabel(t.date);
+    const tRange = shiftTimeRange(t.start, t.end);
+    // Prominent shift line shown on every card: date + timing
+    const shiftLine = `<div class="task-shift">📅 <strong>${dLabel}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>`;
     const when = t.at ? `<span class="task-when">${relTime(t.at)}</span>` : '';
     if (t.type === 'dispute') {
       const kindTxt = t.kind === 'cancel' ? 'wants to cancel'
@@ -3596,13 +3745,33 @@ function renderTasksPanel() {
         </div>
         <div class="task-body">
           <div class="task-title">${escapeHtml(t.worker)} ${kindTxt}</div>
-          <div class="task-meta">${escapeHtml(t.outlet)} · ${dateLabel}${t.start ? ' · '+t.start : ''}</div>
+          ${shiftLine}
+          <div class="task-meta">${escapeHtml(t.outlet)}</div>
           ${reason}
         </div>
         <div class="task-actions">
           <button class="btn btn-danger btn-sm" onclick="openCancelFromDispute('${escapeAttr(String(t.id))}')">Process cancellation</button>
           <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
           <button class="btn btn-ghost btn-sm" onclick="clearDispute('${escapeAttr(String(t.id))}'); renderTasksPanel();">Dismiss</button>
+        </div>
+      </div>`;
+    }
+    if (t.type === 'replacement') {
+      const whoTxt = t.worker ? `${escapeHtml(t.worker)} dropped out` : 'Worker dropped out';
+      return `<div class="task-card task-replacement">
+        <div class="task-head">
+          <span class="task-tag tag-replacement">🔁 Replacement needed</span>
+          ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+          ${when}
+        </div>
+        <div class="task-body">
+          <div class="task-title">${whoTxt} — slot open${t.role ? ' · '+escapeHtml(t.role) : ''}</div>
+          ${shiftLine}
+          <div class="task-meta">${escapeHtml(t.outlet)} · slot returned to Available</div>
+        </div>
+        <div class="task-actions">
+          <button class="btn btn-primary btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">Assign / re-fill</button>
+          <button class="btn btn-ghost btn-sm" onclick="dismissReplacement('${escapeAttr(String(t.id))}')">Mark filled / dismiss</button>
         </div>
       </div>`;
     }
@@ -3619,7 +3788,8 @@ function renderTasksPanel() {
       </div>
       <div class="task-body">
         <div class="task-title">${escapeHtml(t.worker)} will be late</div>
-        <div class="task-meta">${escapeHtml(t.outlet)} · ${dateLabel}${t.start ? ' · shift '+t.start : ''}</div>
+        ${shiftLine}
+        <div class="task-meta">${escapeHtml(t.outlet)}</div>
         ${reason}
       </div>
       <div class="task-actions">
@@ -3660,6 +3830,7 @@ async function loadShifts() {
   });
   saveShiftComments();
   await loadOverpaymentCache();
+  await loadTaskShiftCache();
   await loadCancellationLogsForCurrentView();
   await loadStandbyList();
   renderTable();
@@ -3683,6 +3854,41 @@ async function loadOverpaymentCache() {
     overpaymentCache[key].totalOverpaid  += parseFloat(row.overpayment || 0);
     overpaymentCache[key].totalDeducted += parseFloat(row.overpayment_deduction || 0);
   }
+}
+
+// Build a cross-date cache of every shift that currently has an OPEN task
+// (dispute / late-arrival) or is awaiting a replacement, regardless of the
+// date being viewed. The Tasks panel and Replacement-needed list read from this
+// so a "late tomorrow" notice or a cancellation 3 days out still shows today.
+async function loadTaskShiftCache() {
+  // Collect shift IDs that have any actionable reminder flag set
+  const ids = [];
+  for (const [id, r] of Object.entries(shiftReminders || {})) {
+    if (!r) continue;
+    if (r.disputed || r.lateNotified || r.needsReplacement) ids.push(String(id));
+  }
+  taskShiftCache = {};
+  // Always fold in the currently-loaded shifts (so same-day items work even
+  // before/without the cross-date fetch resolving).
+  (allShifts || []).forEach(s => { if (s && s.id != null) taskShiftCache[String(s.id)] = s; });
+  if (!ids.length) return;
+  try {
+    // Supabase .in() — chunk to stay well under URL limits
+    const chunk = 150;
+    for (let i = 0; i < ids.length; i += chunk) {
+      const slice = ids.slice(i, i + chunk);
+      const { data } = await supabaseClient.from('shifts').select('*').in('id', slice);
+      (data || []).forEach(s => { if (s && s.id != null) taskShiftCache[String(s.id)] = s; });
+    }
+  } catch(e) { /* keep whatever we have from allShifts */ }
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+}
+// The pool of shifts that Tasks / Replacement logic should scan: the cross-date
+// cache merged with the currently-loaded shifts (current view always fresh).
+function taskShiftPool() {
+  const pool = Object.assign({}, taskShiftCache);
+  (allShifts || []).forEach(s => { if (s && s.id != null) pool[String(s.id)] = s; });
+  return Object.values(pool);
 }
 
 // ── Render table ─────────────────────────────────────────────
@@ -4969,7 +5175,9 @@ alter table public.shift_reminders
   add column if not exists late_reason      text,      -- raw worker message
   add column if not exists late_at          timestamptz,
   add column if not exists late_ack         boolean default false,
-  add column if not exists outlet_informed  boolean default false;
+  add column if not exists outlet_informed  boolean default false,
+  add column if not exists needs_replacement boolean default false,  -- slot awaiting re-fill after a processed worker cancellation
+  add column if not exists replacement_at    timestamptz;            -- when the slot became replacement-needed
 
 -- 2) Periskope webhook Edge Function logic (deploy as periskope-webhook).
 --    For each inbound message.created event, find the worker's most recent
@@ -4978,18 +5186,38 @@ alter table public.shift_reminders
 --    const body = msg.body.toLowerCase().trim();
 --    const ACK = /\\b(ok|okay|yes|y|confirm|confirmed|noted|sure|can|coming|will be there)\\b|👍|✓|✅/;
 --    const DISPUTE = /\\b(cancel|can.?t make|cannot make|not coming|won.?t come|sick|mc|emergency|reschedule|can.?t come|drop)\\b/;
+--    const LATE = /\\b(late|delay|delayed|running late|caught up|stuck|traffic|jam|be there by|reach by|reaching late|slightly late|bit late|few mins late|15 ?min|20 ?min|30 ?min)\\b/;
 --
---    if (DISPUTE.test(body)) {
+--    // IMPORTANT: match the RIGHT shift. A reply like "late tomorrow" or "can't make
+--    // it tomorrow" refers to the worker's NEXT upcoming shift, not necessarily today.
+--    // Resolve the worker by phone, then pick their nearest upcoming shift:
+--    //   select id, shift_date from shifts
+--    //   where lower(worker_name) = <worker> and cancelled = false
+--    //     and shift_date >= current_date
+--    //   order by shift_date asc, scheduled_start asc limit 1;
+--    // If the message names a day ("today"/"tomorrow"), prefer that date.
+--
+--    if (LATE.test(body) && !DISPUTE.test(body)) {
+--      // Worker will arrive late — log as a Task (acknowledge + inform outlet).
+--      update shift_reminders set late_notified = true,
+--        late_reason = msg.body, late_at = now(),
+--        late_ack = false, outlet_informed = false
+--      where shift_id = <matched upcoming shift>;
+--    } else if (DISPUTE.test(body)) {
 --      update shift_reminders set disputed = true,
 --        dispute_kind = /cancel|drop/.test(body) ? 'cancel' : 'cantmake',
 --        dispute_reason = msg.body,
 --        dispute_at = now()
---      where shift_id = <matched shift>;
+--      where shift_id = <matched upcoming shift>;
 --    } else if (ACK.test(body)) {
 --      // tick acknowledgement on the matched shift
 --      update shift_reminders set night_acked = true, clockin_responded = true
 --      where shift_id = <matched shift>;
---    }`;
+--    }
+--
+--  NOTE: ShiftOps reads shift_reminders across ALL dates, so a late/dispute flag set
+--  on tomorrow's (or any future) shift appears immediately in the Tasks panel and the
+--  sidebar Tasks badge — regardless of which date the attendance grid is showing.`;
   const w = window.open('', '_blank', 'width=640,height=640');
   if (!w) { alert(sql); return; }
   w.document.write('<title>ShiftOps — Reminder/Dispute SQL</title><pre style="white-space:pre-wrap;font:12px/1.5 monospace;padding:18px;color:#222;">' + sql.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>');
@@ -5137,6 +5365,13 @@ async function confirmAssignWorker(id) {
     try { await supabaseClient.from('workers').insert({ name }); await loadWorkers(); } catch(e) {}
   }
   await logActivity('Assigned worker to slot', `${name} assigned to slot at ${s.outlet} on ${s.shift_date}`, 'shift', id, { worker_name: name, outlet: s.outlet });
+  // Re-filling a slot clears any replacement-needed flag on it
+  if (shiftReminders[id] && shiftReminders[id].needsReplacement) {
+    shiftReminders[id].needsReplacement = false;
+    shiftReminders[id].replacementAt = '';
+    shiftReminders[id].replacedWorker = '';
+    await persistReminder(id);
+  }
   toast(`✓ Assigned ${name}`);
   await loadShifts();
 }
@@ -5196,6 +5431,12 @@ async function confirmAssignSR() {
     try { await supabaseClient.from('workers').insert({ name }); await loadWorkers(); } catch(e) {}
   }
   await logActivity(`Assigned ${name} with special rate`, `${name} at ${currencySymbolForOutlet(s.outlet)}${srRate.toFixed(2)}/hr (base: ${currencySymbolForOutlet(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}/hr) — ${s.outlet} on ${s.shift_date}`, 'shift', s.id, {});
+  if (shiftReminders[s.id] && shiftReminders[s.id].needsReplacement) {
+    shiftReminders[s.id].needsReplacement = false;
+    shiftReminders[s.id].replacementAt = '';
+    shiftReminders[s.id].replacedWorker = '';
+    await persistReminder(s.id);
+  }
   toast(`✓ Assigned ${name} @ special rate ${currencySymbolForOutlet(s.outlet)}${srRate.toFixed(2)}/hr`);
   closeAssignSRModal();
   await loadShifts();
@@ -6154,13 +6395,22 @@ async function confirmCancel() {
   );
 
   // Clear any dispute/late flags on this slot now that the cancellation is processed,
-  // so it leaves the Tasks panel (it becomes a plain Available slot to re-fill).
-  if (shiftReminders[pendingCancelId]) {
-    shiftReminders[pendingCancelId].disputed = false;
-    shiftReminders[pendingCancelId].disputeKind = '';
-    shiftReminders[pendingCancelId].disputeReason = '';
-    shiftReminders[pendingCancelId].lateNotified = false;
-    await persistReminder(pendingCancelId);
+  // and mark it as Replacement-needed so the now-Available slot still surfaces in the
+  // Tasks panel and Replacement-needed list (across all dates) until it is re-filled.
+  if (!shiftReminders[pendingCancelId]) shiftReminders[pendingCancelId] = {};
+  shiftReminders[pendingCancelId].disputed = false;
+  shiftReminders[pendingCancelId].disputeKind = '';
+  shiftReminders[pendingCancelId].disputeReason = '';
+  shiftReminders[pendingCancelId].lateNotified = false;
+  shiftReminders[pendingCancelId].needsReplacement = true;
+  shiftReminders[pendingCancelId].replacementAt = new Date().toISOString();
+  shiftReminders[pendingCancelId].replacedWorker = originalWorker || '';
+  await persistReminder(pendingCancelId);
+  // Keep the cross-date cache current so the slot appears without a full reload
+  if (taskShiftCache) {
+    taskShiftCache[String(pendingCancelId)] = Object.assign({}, s, {
+      worker_name: 'Available', cancelled: false
+    });
   }
 
   await loadWorkers();
