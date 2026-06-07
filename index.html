@@ -2690,6 +2690,10 @@ function switchPage(name, btn) {
   page.style.display = name === 'billing' ? 'flex' : 'block';
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  // Always scroll to top of main content when switching pages
+  const mainEl = document.querySelector('.main');
+  if (mainEl) mainEl.scrollTop = 0;
+  window.scrollTo(0, 0);
   if (name === 'attendance') { loadShifts().then(() => renderAttendanceActivityBanner()); }
   if (name === 'workers') loadWorkerCards();
   if (name === 'outlets') loadOutletsList();
@@ -10951,6 +10955,7 @@ async function fetchPayableShiftsForPeriod(year, month) {
     return [];
   }
 
+  // First try: supabaseClient JS object (works on deployed site)
   try {
     const { data, error } = await supabaseClient
       .from('shifts')
@@ -10960,28 +10965,65 @@ async function fetchPayableShiftsForPeriod(year, month) {
       .order('shift_date')
       .order('scheduled_start');
 
-    if (error) {
-      console.error('Billing fetch error:', error);
-      toast('Failed to load billing shifts: ' + (error.message || error), 'error');
-      return [];
-    }
+    if (error) throw error;
 
     const rows = Array.isArray(data) ? data : [];
-    const filtered = rows.filter(s => {
-      if (s.cancelled) return false;
-      const workerName = String(s.worker_name || '').trim().toLowerCase();
-      if (!workerName || workerName === 'available') return false;
-      if (!s.outlet) return false;
-      return !!(s.clock_in && s.clock_out);
-    });
-
+    const filtered = _billingFilterShifts(rows);
     billingPeriodShiftsCache[cacheKey] = filtered;
     return filtered;
   } catch(e) {
-    console.error('Billing fetch exception:', e);
-    toast('Billing error: ' + e.message, 'error');
+    // DataCloneError happens in sandboxed iframes (e.g. artifact preview) where
+    // Supabase's internal BroadcastChannel/postMessage auth sync fails.
+    // Fall back to a plain REST fetch without the JS client.
+    if (e && (String(e.message || e).includes('DataClone') || String(e.message || e).includes('postMessage') || String(e.message || e).includes('cloned'))) {
+      return await _billingFetchViaRest(start, end, cacheKey);
+    }
+    console.error('Billing fetch error:', e);
+    toast('Failed to load billing shifts: ' + (e.message || e), 'error');
     return [];
   }
+}
+
+// Plain REST fallback — avoids the Supabase JS client's internal postMessage calls
+async function _billingFetchViaRest(start, end, cacheKey) {
+  try {
+    const params = new URLSearchParams({
+      shift_date: `gte.${start}`,
+      shift_date2: `lte.${end}`,   // we'll build manually below
+      order: 'shift_date.asc,scheduled_start.asc',
+      select: '*',
+      limit: '5000'
+    });
+    // Build the URL manually — Supabase REST API
+    const url = `${SUPABASE_URL}/rest/v1/shifts?select=*&shift_date=gte.${start}&shift_date=lte.${end}&order=shift_date.asc,scheduled_start.asc&limit=5000`;
+    const resp = await fetch(url, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Accept': 'application/json'
+      }
+    });
+    if (!resp.ok) throw new Error(`REST fetch failed: ${resp.status}`);
+    const data = await resp.json();
+    const rows = Array.isArray(data) ? data : [];
+    const filtered = _billingFilterShifts(rows);
+    if (cacheKey) billingPeriodShiftsCache[cacheKey] = filtered;
+    return filtered;
+  } catch(e2) {
+    console.error('Billing REST fallback error:', e2);
+    toast('Billing fetch failed: ' + (e2.message || e2), 'error');
+    return [];
+  }
+}
+
+function _billingFilterShifts(rows) {
+  return rows.filter(s => {
+    if (s.cancelled) return false;
+    const workerName = String(s.worker_name || '').trim().toLowerCase();
+    if (!workerName || workerName === 'available') return false;
+    if (!s.outlet) return false;
+    return !!(s.clock_in && s.clock_out);
+  });
 }
 
 function clearBillingCache() {
@@ -10993,23 +11035,38 @@ function computeClientBilling(billingName, periodShifts) {
   const shifts = Array.isArray(periodShifts) ? periodShifts : [];
   const clientShifts = shifts.filter(s => shiftBelongsToClient(s, billingName));
 
-  let workerPayout = 0;
-  let taxiTotal    = 0;
-  const shiftLines = [];
-  const outletsSeen = new Set();
+  // ── Group shifts by outlet ────────────────────────────────────
+  // Each outlet gets its own line item on the invoice
+  const outletMap = {}; // { outletName: { payout, taxiTotal, shiftLines } }
 
   clientShifts.forEach(s => {
+    const outletName = s.outlet || billingName;
+    if (!outletMap[outletName]) outletMap[outletName] = { payout: 0, taxiTotal: 0, shiftLines: [] };
     const net  = netPaymentForShift(s);
-    workerPayout += net;
+    outletMap[outletName].payout += net;
     const taxi = parseFloat(s.transport_claim || 0);
-    if (taxi > 0) taxiTotal += taxi;
-    outletsSeen.add(s.outlet || '');
+    if (taxi > 0) outletMap[outletName].taxiTotal += taxi;
     const d   = new Date(s.shift_date + 'T00:00:00');
     const day = `${d.getDate()}/${d.getMonth()+1}`;
     const hrs  = parseFloat(calcShiftHours(s) || 0);
     const rate = parseFloat(s.rate || 0);
-    shiftLines.push(`${day} - ${s.worker_name} ${hrs.toFixed(2)}hrs at SG$${rate}/hr = $${net.toFixed(2)}`);
+    outletMap[outletName].shiftLines.push(`${day} - ${s.worker_name} ${hrs.toFixed(2)}hrs at SG$${rate}/hr = $${net.toFixed(2)}`);
   });
+
+  // Build per-outlet line items array (sorted by outlet name)
+  const outletLineItems = Object.entries(outletMap)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([outletName, data]) => ({
+      outletName,
+      payout:     parseFloat(data.payout.toFixed(2)),
+      taxiTotal:  parseFloat(data.taxiTotal.toFixed(2)),
+      shiftLines: data.shiftLines,
+      description: `${outletName}\n${data.shiftLines.join('\n')}`
+    }));
+
+  const workerPayout = parseFloat(outletLineItems.reduce((s, o) => s + o.payout, 0).toFixed(2));
+  const taxiTotal    = parseFloat(outletLineItems.reduce((s, o) => s + o.taxiTotal, 0).toFixed(2));
+  const outletsSeen  = Object.keys(outletMap);
 
   const cfg           = billingClientSettings[billingName] || {};
   const commissionPct = cfg.commissionPct !== undefined ? cfg.commissionPct : 20;
@@ -11018,20 +11075,20 @@ function computeClientBilling(billingName, periodShifts) {
 
   return {
     billingName,
-    outlets: [...outletsSeen].filter(Boolean),
+    outlets: outletsSeen.filter(Boolean),
     configuredOutlets: cfg.outlets || [],
     shifts: clientShifts,
-    shiftLines,
-    workerPayout:   parseFloat(workerPayout.toFixed(2)),
-    taxiTotal:      parseFloat(taxiTotal.toFixed(2)),
+    outletLineItems,           // NEW: per-outlet breakdown
+    workerPayout,
+    taxiTotal,
     commissionPct,
     commissionAmt,
     subtotal,
-    shiftCount:        clientShifts.length,
-    incompleteCount:   0, // all shifts have clock_out now
-    paymentTermsDays:  cfg.paymentTermsDays || 30,
-    emails:            cfg.emails || [],
-    xeroContactId:     cfg.xeroContactId || ''
+    shiftCount:       clientShifts.length,
+    incompleteCount:  0,
+    paymentTermsDays: cfg.paymentTermsDays || 30,
+    emails:           cfg.emails || [],
+    xeroContactId:    cfg.xeroContactId || ''
   };
 }
 
@@ -11368,19 +11425,24 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
     ? escapeHtml(d.emails.join(', '))
     : `<span style="color:var(--amber);">⚠️ No email — set in Client Settings</span>`;
 
-  // Outlets display
-  const outletTag = d.outlets.length > 1
-    ? `<div style="font-size:11px;color:var(--text3);margin-bottom:8px;">Outlets included: ${d.outlets.map(o=>escapeHtml(o)).join(' · ')}</div>`
-    : '';
+  // Build per-outlet rows for the preview table
+  const outletRows = d.outletLineItems.map(item => `
+    <tr>
+      <td style="padding:8px 0;vertical-align:top;border-bottom:1px solid var(--border);">
+        <div style="font-weight:600;color:var(--text);">${escapeHtml(item.outletName)}</div>
+        <div style="color:var(--text3);font-size:11px;margin-top:4px;white-space:pre-wrap;font-family:var(--mono);line-height:1.5;">${escapeHtml(item.shiftLines.join('\n'))}</div>
+      </td>
+      <td style="padding:8px 0;text-align:right;vertical-align:top;font-size:10px;color:var(--text3);white-space:nowrap;border-bottom:1px solid var(--border);">11 - Svc AR</td>
+      <td style="padding:8px 0;font-family:var(--mono);color:var(--accent);text-align:right;vertical-align:top;border-bottom:1px solid var(--border);">$${item.payout.toFixed(2)}</td>
+    </tr>
+    ${item.taxiTotal > 0 ? `<tr>
+      <td style="padding:6px 0;border-bottom:1px solid var(--border);"><div style="font-size:12px;">↳ Taxi Fare (${escapeHtml(item.outletName)})</div></td>
+      <td style="padding:6px 0;text-align:right;font-size:10px;color:var(--text3);border-bottom:1px solid var(--border);">PTC</td>
+      <td style="padding:6px 0;font-family:var(--mono);color:var(--purple);text-align:right;border-bottom:1px solid var(--border);">$${item.taxiTotal.toFixed(2)}</td>
+    </tr>` : ''}
+  `).join('');
 
-  // Incomplete shift warning
-  const incompleteWarn = d.incompleteCount > 0
-    ? `<div class="alert alert-amber" style="margin-bottom:10px;"><span class="alert-icon">⚠️</span><span>${d.incompleteCount} shift(s) are missing clock-out — their payout is estimated. Mark them complete before sending if possible.</span></div>`
-    : '';
-
-  const shiftDesc = d.shiftLines.join('\n');
-
-  let previewHtml = `${incompleteWarn}
+  let previewHtml = `
     <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px;font-size:13px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
         <div><div style="font-size:10px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;margin-bottom:3px;">Send to</div>
@@ -11388,32 +11450,15 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
         <div style="text-align:right;"><div style="font-size:10px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;margin-bottom:3px;">Period</div>
           <div>${periodLabel}</div></div>
       </div>
-      ${outletTag}
       <div style="border-top:1px solid var(--border);padding-top:12px;">
         <table style="width:100%;font-size:12px;">
           <thead><tr>
-            <th style="text-align:left;padding:4px 0;color:var(--text3);font-size:10px;">Description</th>
-            <th style="text-align:right;padding:4px 0;color:var(--text3);font-size:10px;">Acct</th>
-            <th style="text-align:right;padding:4px 0;color:var(--text3);font-size:10px;">Amount</th>
+            <th style="text-align:left;padding:4px 0 8px;color:var(--text3);font-size:10px;">Description</th>
+            <th style="text-align:right;padding:4px 0 8px;color:var(--text3);font-size:10px;">Acct</th>
+            <th style="text-align:right;padding:4px 0 8px;color:var(--text3);font-size:10px;">Amount</th>
           </tr></thead>
           <tbody>
-            <tr>
-              <td style="padding:8px 0;vertical-align:top;">
-                <div style="font-weight:600;">${escapeHtml(billingName)}</div>
-                <div style="color:var(--text3);font-size:11px;margin-top:4px;white-space:pre-wrap;font-family:var(--mono);line-height:1.5;">${escapeHtml(shiftDesc)}</div>
-              </td>
-              <td style="padding:8px 0;text-align:right;vertical-align:top;font-size:10px;color:var(--text3);white-space:nowrap;">11 - Svc AR</td>
-              <td style="padding:8px 0;font-family:var(--mono);color:var(--accent);text-align:right;vertical-align:top;">$${d.workerPayout.toFixed(2)}</td>
-            </tr>`;
-
-  if (d.taxiTotal > 0) previewHtml += `
-            <tr>
-              <td style="padding:8px 0;"><div style="font-weight:600;">Taxi Fare</div></td>
-              <td style="padding:8px 0;text-align:right;font-size:10px;color:var(--text3);">PTC</td>
-              <td style="padding:8px 0;font-family:var(--mono);color:var(--purple);text-align:right;">$${d.taxiTotal.toFixed(2)}</td>
-            </tr>`;
-
-  previewHtml += `
+            ${outletRows}
             <tr>
               <td style="padding:8px 0;"><div style="font-weight:600;">${d.commissionPct}% Commission Fee</div></td>
               <td style="padding:8px 0;text-align:right;font-size:10px;color:var(--text3);">200 - Sales</td>
@@ -11427,11 +11472,9 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
         <span style="font-family:var(--mono);color:var(--green);font-size:16px;">$${d.subtotal.toFixed(2)}</span>
       </div>
       <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--text3);">
-        <span>📋 ${d.shiftCount} shifts</span>
+        <span>📋 ${d.shiftCount} shifts across ${d.outletLineItems.length} outlet${d.outletLineItems.length !== 1 ? 's' : ''}</span>
         <span>•</span>
         <span>📅 Net ${d.paymentTermsDays} days</span>
-        <span>•</span>
-        <span>📎 Excel usage report attached</span>
       </div>
     </div>`;
 
@@ -11448,39 +11491,51 @@ async function downloadClientExcel(billingName, year, month) {
     const periodLabel = `${BILLING_MONTHS[month-1]} ${year}`;
     const wb = XLSX.utils.book_new();
 
+    // Summary sheet - one row per outlet
     const summaryData = [
-      ['Anytime Work Pte. Ltd.', '', ''],
-      ['Usage Report — ' + billingName, '', ''],
-      ['', '', ''],
-      ['Period', periodLabel, ''],
-      ['Outlets', d.outlets.join(', ') || billingName, ''],
-      ['Generated', new Date().toLocaleDateString('en-SG'), ''],
-      ['', '', ''],
-      ['SUMMARY', '', ''],
-      ['Worker Payouts', '', d.workerPayout],
-      ...(d.taxiTotal > 0 ? [['Taxi / Pass-through Costs', '', d.taxiTotal]] : []),
-      [`Commission (${d.commissionPct}%)`, '', d.commissionAmt],
-      ['TOTAL TO INVOICE (SGD)', '', d.subtotal],
-      ['', '', ''],
-      ['Payment Terms', `Net ${d.paymentTermsDays} days`, ''],
+      ['Anytime Work Pte. Ltd.', '', '', ''],
+      [`Usage Report — ${billingName}`, '', '', ''],
+      ['', '', '', ''],
+      ['Period', periodLabel, '', ''],
+      ['Generated', new Date().toLocaleDateString('en-SG'), '', ''],
+      ['', '', '', ''],
+      ['OUTLET BREAKDOWN', '', '', ''],
+      ['Outlet', 'Shifts', 'Payout (SGD)', 'Taxi/PTC (SGD)'],
+      ...d.outletLineItems.map(item => [
+        item.outletName,
+        item.shiftLines.length,
+        item.payout,
+        item.taxiTotal > 0 ? item.taxiTotal : ''
+      ]),
+      ['', '', '', ''],
+      ['TOTALS', '', '', ''],
+      ['Worker Payouts', '', d.workerPayout, ''],
+      ...(d.taxiTotal > 0 ? [['Taxi / Pass-through Costs', '', d.taxiTotal, '']] : []),
+      [`Commission (${d.commissionPct}%)`, '', d.commissionAmt, ''],
+      ['TOTAL TO INVOICE (SGD)', '', d.subtotal, ''],
+      ['', '', '', ''],
+      ['Payment Terms', `Net ${d.paymentTermsDays} days`, '', ''],
     ];
     const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
     XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
 
+    // Shift detail sheet
     const detailHeaders = ['Date', 'Outlet', 'Worker', 'Role', 'Sched Start', 'Sched End', 'Clock In', 'Clock Out', 'Hours', 'Rate ($/hr)', 'Payout ($)', 'Transport ($)'];
-    const detailRows = d.shifts.map(s => {
-      const hrs  = parseFloat(calcShiftHours(s) || 0);
-      const rate = parseFloat(s.rate || 0);
-      const amt  = netPaymentForShift(s);
-      const taxi = parseFloat(s.transport_claim || 0);
-      return [
-        s.shift_date, s.outlet || '', s.worker_name || '', s.role || '',
-        s.scheduled_start?.slice(0,5) || '', s.scheduled_end?.slice(0,5) || '',
-        s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '',
-        parseFloat(hrs.toFixed(2)), parseFloat(rate.toFixed(2)),
-        parseFloat(amt.toFixed(2)), taxi > 0 ? parseFloat(taxi.toFixed(2)) : ''
-      ];
-    });
+    const detailRows = d.shifts
+      .sort((a, b) => (a.outlet || '').localeCompare(b.outlet || '') || a.shift_date.localeCompare(b.shift_date))
+      .map(s => {
+        const hrs  = parseFloat(calcShiftHours(s) || 0);
+        const rate = parseFloat(s.rate || 0);
+        const amt  = netPaymentForShift(s);
+        const taxi = parseFloat(s.transport_claim || 0);
+        return [
+          s.shift_date, s.outlet || '', s.worker_name || '', s.role || '',
+          s.scheduled_start?.slice(0,5) || '', s.scheduled_end?.slice(0,5) || '',
+          s.clock_in?.slice(0,5) || '', s.clock_out?.slice(0,5) || '',
+          parseFloat(hrs.toFixed(2)), parseFloat(rate.toFixed(2)),
+          parseFloat(amt.toFixed(2)), taxi > 0 ? parseFloat(taxi.toFixed(2)) : ''
+        ];
+      });
     const wsDetail = XLSX.utils.aoa_to_sheet([detailHeaders, ...detailRows]);
     XLSX.utils.book_append_sheet(wb, wsDetail, 'Shift Detail');
 
@@ -11539,27 +11594,51 @@ async function confirmSendInvoice() {
 }
 
 async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xeroContactId) {
+  // Build per-outlet line items (one line per outlet, not one combined line)
+  const lineItems = [];
+
+  d.outletLineItems.forEach(item => {
+    lineItems.push({
+      Description: `${item.outletName}\n${item.shiftLines.join('\n')}`,
+      Quantity: 1,
+      UnitAmount: item.payout,
+      AccountCode: '11',
+      TaxType: 'NONE'
+    });
+    if (item.taxiTotal > 0) {
+      lineItems.push({
+        Description: `Taxi Fare (${item.outletName})`,
+        Quantity: 1,
+        UnitAmount: item.taxiTotal,
+        AccountCode: 'PTC',
+        TaxType: 'NONE'
+      });
+    }
+  });
+
+  lineItems.push({
+    Description: `${d.commissionPct}% Commission Fee`,
+    Quantity: 1,
+    UnitAmount: d.commissionAmt,
+    AccountCode: '200',
+    TaxType: 'NONE'
+  });
+
   const contactId = xeroContactId || d.xeroContactId;
-  const shiftDesc = d.shiftLines.join('\n');
 
-  const lineItems = [
-    { Description: `${d.billingName}\n${shiftDesc}`, Quantity: 1, UnitAmount: d.workerPayout, AccountCode: '11', TaxType: 'NONE' }
-  ];
-  if (d.taxiTotal > 0) lineItems.push({ Description: 'Taxi Fare', Quantity: 1, UnitAmount: d.taxiTotal, AccountCode: 'PTC', TaxType: 'NONE' });
-  lineItems.push({ Description: `${d.commissionPct}% Commission Fee`, Quantity: 1, UnitAmount: d.commissionAmt, AccountCode: '200', TaxType: 'NONE' });
-
-  const payload = {
-    Type: 'ACCREC',
-    Contact: contactId ? { ContactID: contactId } : { Name: d.billingName },
-    Date: invoiceDate,
-    DueDate: dueDate,
-    Reference: reference || '',
-    Status: 'AUTHORISED',
-    CurrencyCode: 'SGD',
-    LineItems: lineItems
-  };
-
+  // Try the Supabase edge function proxy (requires xero-proxy to be deployed)
   try {
+    const payload = {
+      Type: 'ACCREC',
+      Contact: contactId ? { ContactID: contactId } : { Name: d.billingName },
+      Date: invoiceDate,
+      DueDate: dueDate,
+      Reference: reference || '',
+      Status: 'AUTHORISED',
+      CurrencyCode: 'SGD',
+      LineItems: lineItems
+    };
+
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/xero-proxy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
@@ -11567,13 +11646,75 @@ async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xer
     });
     if (resp.ok) {
       const data = await resp.json();
-      return data?.Invoices?.[0]?.InvoiceID || 'created';
+      const invId = data?.Invoices?.[0]?.InvoiceID;
+      if (invId) return invId;
     }
-    // If proxy not yet set up, fall through to manual tracking
-    return 'MANUAL-' + Date.now();
-  } catch(e) {
-    return 'MANUAL-' + Date.now();
-  }
+  } catch(e) { /* proxy not available */ }
+
+  // Fallback: open Xero new invoice URL pre-filled, mark as MANUAL in our system
+  // Build a Xero deep-link to the new invoice page
+  const xeroNewInvoiceUrl = contactId
+    ? `https://go.xero.com/AccountsReceivable/Edit.aspx?InvoiceID=new&ContactID=${contactId}`
+    : `https://go.xero.com/AccountsReceivable/Edit.aspx?InvoiceID=new`;
+
+  // Show modal with the line items to copy into Xero
+  _showXeroManualModal(d, invoiceDate, dueDate, reference, lineItems, xeroNewInvoiceUrl);
+
+  return 'MANUAL-' + Date.now();
+}
+
+function _showXeroManualModal(d, invoiceDate, dueDate, reference, lineItems, xeroUrl) {
+  // Build a formatted summary to copy into Xero
+  const linesSummary = lineItems.map(li =>
+    `${li.Description.split('\n')[0]} | Qty:1 | $${parseFloat(li.UnitAmount).toFixed(2)} | Acct:${li.AccountCode}`
+  ).join('\n');
+
+  const existing = document.getElementById('xero-manual-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'xero-manual-modal';
+  modal.className = 'modal-overlay open';
+  modal.innerHTML = `
+    <div class="modal" style="max-width:580px;width:96%;">
+      <div class="modal-header">
+        <h3 class="modal-title">📋 Create Invoice in Xero</h3>
+        <button class="modal-close" onclick="document.getElementById('xero-manual-modal').classList.remove('open')">✕</button>
+      </div>
+      <div style="padding:18px;">
+        <div class="alert alert-blue" style="margin-bottom:14px;">
+          <span class="alert-icon">ℹ️</span>
+          <span>The invoice has been marked as sent in ShiftOps. Now create it in Xero using the details below.</span>
+        </div>
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-size:12px;font-family:var(--mono);margin-bottom:14px;">
+          <div style="margin-bottom:6px;"><b>Contact:</b> ${escapeHtml(d.billingName)}</div>
+          <div style="margin-bottom:6px;"><b>Date:</b> ${invoiceDate} &nbsp;&nbsp; <b>Due:</b> ${dueDate}</div>
+          <div style="margin-bottom:6px;"><b>Reference:</b> ${escapeHtml(reference || '')}</div>
+          <div style="margin-bottom:6px;"><b>Currency:</b> SGD</div>
+          <div style="margin-bottom:4px;"><b>Line Items:</b></div>
+          ${lineItems.map(li => `
+            <div style="margin-left:12px;margin-bottom:8px;padding:6px;background:var(--bg2);border-radius:4px;">
+              <div style="color:var(--text);font-weight:600;">${escapeHtml(li.Description.split('\n')[0])}</div>
+              <div style="color:var(--text2);font-size:11px;white-space:pre-wrap;">${escapeHtml(li.Description.split('\n').slice(1).join('\n'))}</div>
+              <div style="color:var(--accent);margin-top:2px;">$${parseFloat(li.UnitAmount).toFixed(2)} | Account: ${escapeHtml(li.AccountCode)}</div>
+            </div>`).join('')}
+          <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;font-weight:700;color:var(--green);">
+            TOTAL: SGD $${d.subtotal.toFixed(2)}
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <a href="${xeroUrl}" target="_blank" class="btn btn-primary btn-sm" style="text-decoration:none;">
+            🔗 Open Xero New Invoice
+          </a>
+          <button class="btn btn-ghost btn-sm" onclick="
+            navigator.clipboard.writeText(${JSON.stringify(linesSummary)}).then(()=>toast('Line items copied!'))
+          ">📋 Copy Line Items</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('xero-manual-modal').classList.remove('open')">Close</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
 }
 
 function undoBillingSent(billingName, year, month) {
