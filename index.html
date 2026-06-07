@@ -1001,6 +1001,37 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       </div>
     </div>
 
+    <!-- XERO BILLING PAGE -->
+    <div id="page-billing" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left">
+          <h2>Xero Billing</h2>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period · 🇸🇬 Singapore only</p>
+        </div>
+        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
+          <select id="billing-year" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
+          <select id="billing-month" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--border2);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
+          <button class="btn btn-ghost btn-sm" onclick="openBillingSettingsModal()">⚙️ Client Settings</button>
+          <button class="btn btn-primary btn-sm" onclick="refreshBillingData()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="content">
+        <!-- Summary metrics -->
+        <div class="metrics" id="billing-metrics" style="margin-bottom:20px;"></div>
+        <!-- Client billing table -->
+        <div class="table-wrap">
+          <div class="table-header">
+            <span class="table-title">Client Billing Status</span>
+            <span class="table-count" id="billing-table-count"></span>
+          </div>
+          <div id="billing-table-body">
+            <div class="empty-state"><div class="spinner"></div><p style="margin-top:12px;">Loading billing data…</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
   </div>
 </div>
 
@@ -11939,35 +11970,6 @@ setInterval(async () => {
   </div>
 </div>
 
-    <!-- XERO BILLING PAGE -->
-    <div id="page-billing" style="display:none;">
-      <div class="topbar">
-        <div class="topbar-left">
-          <h2>Xero Billing</h2>
-          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period · 🇸🇬 Singapore only</p>
-        </div>
-        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
-          <select id="billing-year" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
-          <select id="billing-month" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--border2);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
-          <button class="btn btn-ghost btn-sm" onclick="openBillingSettingsModal()">⚙️ Client Settings</button>
-          <button class="btn btn-primary btn-sm" onclick="refreshBillingData()">↻ Refresh</button>
-        </div>
-      </div>
-      <div class="content">
-        <!-- Summary metrics -->
-        <div class="metrics" id="billing-metrics" style="margin-bottom:20px;"></div>
-        <!-- Client billing table -->
-        <div class="table-wrap">
-          <div class="table-header">
-            <span class="table-title">Client Billing Status</span>
-            <span class="table-count" id="billing-table-count"></span>
-          </div>
-          <div id="billing-table-body">
-            <div class="empty-state"><div class="spinner"></div><p style="margin-top:12px;">Loading billing data…</p></div>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <!-- BILLING: CLIENT SETTINGS MODAL -->
     <div class="modal-overlay" id="billing-settings-modal">
