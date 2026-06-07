@@ -74,7 +74,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .logout-pill:hover { background: rgba(232,64,64,0.20); color: #ff8a8a; }
 .sidebar-date { padding: 16px 20px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text3); font-family: var(--mono); white-space: pre-line; flex-shrink: 0; }
 
-.main { flex: 1; overflow-x: hidden; overflow-y: auto; min-width: 0; }
+.main { flex: 1; min-width: 0; height: 100vh; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: var(--bg2); }
 .topbar-left h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
 .topbar-left p { font-size: 12px; color: var(--text2); margin-top: 2px; }
@@ -2686,7 +2686,8 @@ function setAttendanceView(view) {
 // ── Page switching ────────────────────────────────────────────
 function switchPage(name, btn) {
   document.querySelectorAll('.main > div').forEach(d => d.style.display = 'none');
-  document.getElementById('page-' + name).style.display = 'block';
+  const page = document.getElementById('page-' + name);
+  page.style.display = name === 'billing' ? 'flex' : 'block';
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   if (name === 'attendance') { loadShifts().then(() => renderAttendanceActivityBanner()); }
@@ -10858,29 +10859,6 @@ function loadBillingSettings() {
   try { billingClientSettings = JSON.parse(localStorage.getItem(BILLING_SETTINGS_KEY) || '{}'); }
   catch(e) { billingClientSettings = {}; }
 }
-function saveBillingSettings() {
-  const rows = document.querySelectorAll('.billing-settings-row');
-  rows.forEach(row => {
-    const client = row.dataset.client;
-    if (!client) return;
-    const pct   = parseFloat(row.querySelector('.bs-commission')?.value) || 20;
-    const days  = parseInt(row.querySelector('.bs-terms')?.value) || 30;
-    const emailsRaw = row.querySelector('.bs-emails')?.value || '';
-    const xeroId    = row.querySelector('.bs-xeroid')?.value?.trim() || '';
-    const outletsRaw = row.querySelector('.bs-outlets')?.value || '';
-    billingClientSettings[client] = {
-      commissionPct: pct,
-      paymentTermsDays: days,
-      emails: emailsRaw.split(/[\n,]/).map(e => e.trim()).filter(Boolean),
-      xeroContactId: xeroId,
-      outlets: outletsRaw.split(/[\n,]/).map(o => o.trim()).filter(Boolean)
-    };
-  });
-  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
-  toast('Client billing settings saved');
-  document.getElementById('billing-settings-modal').classList.remove('open');
-  loadBillingPage();
-}
 
 function loadBillingSentLog() {
   try { billingSentLog = JSON.parse(localStorage.getItem(BILLING_SENT_KEY) || '{}'); }
@@ -10903,7 +10881,9 @@ function unmarkBillingSent(clientName, year, month) {
   saveBillingSentLog();
 }
 
-// ── Period selectors ───────────────────────────────────────────
+// Global lookup table for billing client names (avoids apostrophe escaping bugs in onclick)
+let _billingClientIndex = [];
+function _bcName(idx) { return _billingClientIndex[idx] || ''; }
 function billingInitPeriodSelectors() {
   const now = new Date();
   const yearSel  = document.getElementById('billing-year');
@@ -11173,7 +11153,9 @@ async function loadBillingPage() {
       <th style="text-align:right;">Actions</th>
     </tr></thead><tbody>`;
 
-  visibleData.forEach(d => {
+  _billingClientIndex = visibleData.map(d => d.billingName);
+
+  visibleData.forEach((d, idx) => {
     const sent     = isBillingSent(d.billingName, year, month);
     const sentInfo = sent ? billingSentLog[billingSentKey(d.billingName, year, month)] : null;
     const noShifts = d.shiftCount === 0;
@@ -11207,10 +11189,10 @@ async function loadBillingPage() {
       <td>${statusBadge}</td>
       <td style="text-align:right;">
         <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;">
-          ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="openSendBillingModal('${escapeAttr(d.billingName)}',${year},${month},true)">👁 Preview</button>` : ''}
-          ${!sent && !noShifts ? `<button class="btn btn-primary btn-sm" onclick="openSendBillingModal('${escapeAttr(d.billingName)}',${year},${month},false)">📤 Send Invoice</button>` : ''}
-          ${sent ? `<button class="btn btn-ghost btn-sm" style="color:var(--text3);" onclick="undoBillingSent('${escapeAttr(d.billingName)}',${year},${month})">↩ Unsend</button>` : ''}
-          ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="downloadClientExcel('${escapeAttr(d.billingName)}',${year},${month})">⬇️ Excel</button>` : ''}
+          ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('preview',${idx},${year},${month})">👁 Preview</button>` : ''}
+          ${!sent && !noShifts ? `<button class="btn btn-primary btn-sm" onclick="_billingAction('send',${idx},${year},${month})">📤 Send Invoice</button>` : ''}
+          ${sent ? `<button class="btn btn-ghost btn-sm" style="color:var(--text3);" onclick="_billingAction('unsend',${idx},${year},${month})">↩ Unsend</button>` : ''}
+          ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('excel',${idx},${year},${month})">⬇️ Excel</button>` : ''}
         </div>
       </td>
     </tr>`;
@@ -11219,6 +11201,19 @@ async function loadBillingPage() {
   html += '</tbody></table></div>';
   tableEl.innerHTML = html;
 }
+async function _billingAction(action, idx, year, month) {
+  const name = _bcName(idx);
+  if (!name) { toast('Client not found', 'error'); return; }
+  if (action === 'preview') await openSendBillingModal(name, year, month, true);
+  else if (action === 'send')   await openSendBillingModal(name, year, month, false);
+  else if (action === 'unsend') undoBillingSent(name, year, month);
+  else if (action === 'excel')  await downloadClientExcel(name, year, month);
+}
+
+// Global index for settings modal rows (avoids apostrophe issues)
+let _billingSettingsIndex = [];
+function _bsName(idx) { return _billingSettingsIndex[idx] || ''; }
+
 async function refreshBillingData() {
   clearBillingCache();
   await loadBillingPage();
@@ -11229,14 +11224,9 @@ async function refreshBillingData() {
 function openBillingSettingsModal() {
   loadBillingSettings();
 
-  // Build client list from: configured billing clients + all known outlets
   const knownOutlets = allOutlets.map(o => (o.name || '').trim()).filter(Boolean);
-  const allNames = new Set([
-    ...Object.keys(billingClientSettings),
-    ...knownOutlets
-  ]);
+  const allNames = new Set([...Object.keys(billingClientSettings), ...knownOutlets]);
 
-  // Auto-add any outlet not yet in settings (unclaimed)
   const claimedOutlets = new Set();
   Object.entries(billingClientSettings).forEach(([name, cfg]) => {
     (cfg.outlets || []).forEach(o => claimedOutlets.add(o.trim().toLowerCase()));
@@ -11250,34 +11240,35 @@ function openBillingSettingsModal() {
   });
 
   const clients = [...allNames].sort((a, b) => a.localeCompare(b));
+  _billingSettingsIndex = clients; // store for indexed access
 
   const listEl = document.getElementById('billing-settings-list');
 
   listEl.innerHTML = `
     <div class="alert alert-amber" style="margin-bottom:14px;">
       <span class="alert-icon">💡</span>
-      <span><b>Multi-outlet grouping:</b> If a client has multiple outlet names (e.g. "Ammakase Bar" and "Ammakase Kitchen"), list all outlet names in the <b>Outlets</b> field below. Their shifts will be combined into one invoice. Leave blank if the billing name matches the outlet name exactly.</span>
+      <span><b>Multi-outlet grouping:</b> If a client has multiple outlet names in ShiftOps, list them all in the Outlets field. Their shifts will be combined into one invoice. Leave blank if the billing name exactly matches the outlet name.</span>
     </div>
     <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
       <input id="new-billing-client-name" class="form-input" placeholder="Add new billing client name…" style="flex:1;">
       <button class="btn btn-primary btn-sm" onclick="addNewBillingClient()">+ Add Client</button>
     </div>
     <div id="billing-settings-rows">
-    ${clients.map(client => {
+    ${clients.map((client, idx) => {
       const cfg  = billingClientSettings[client] || {};
       const pct  = cfg.commissionPct !== undefined ? cfg.commissionPct : 20;
       const days = cfg.paymentTermsDays || 30;
-      const emails = (cfg.emails || []).join(', ');
-      const xeroId = cfg.xeroContactId || '';
+      const emails  = (cfg.emails || []).join(', ');
+      const xeroId  = cfg.xeroContactId || '';
       const outlets = (cfg.outlets || []).join(', ');
-      return `<div class="billing-settings-row" data-client="${escapeAttr(client)}" style="margin-bottom:14px;padding:14px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);">
+      return `<div class="billing-settings-row" data-idx="${idx}" style="margin-bottom:14px;padding:14px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <div style="font-weight:600;font-size:13px;color:var(--text);">🏢 ${escapeHtml(client)}</div>
-          <button class="btn btn-danger btn-sm" onclick="removeBillingClient('${escapeAttr(client)}')">Remove</button>
+          <button class="btn btn-danger btn-sm" onclick="_removeBillingClient(${idx})">Remove</button>
         </div>
         <div class="form-row" style="margin-bottom:8px;">
-          <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Outlets (comma-separated) — leave blank if outlet name = billing name</label>
-          <input class="form-input bs-outlets" type="text" placeholder="e.g. Ammakase Bar, Ammakase Kitchen, Ammakase Deli" value="${escapeHtml(outlets)}" style="font-size:12px;">
+          <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Outlets in ShiftOps (comma-separated) — leave blank if outlet name = billing name</label>
+          <input class="form-input bs-outlets" type="text" placeholder="e.g. Ammakase Bar, Ammakase Kitchen" value="${escapeHtml(outlets)}" style="font-size:12px;">
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
           <div class="form-row" style="margin:0;">
@@ -11295,17 +11286,48 @@ function openBillingSettingsModal() {
         </div>
         <div class="form-row" style="margin-bottom:8px;">
           <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Billing Emails (comma-separated)</label>
-          <input class="form-input bs-emails" type="text" placeholder="accounts@client.com, gm@client.com" value="${escapeHtml(emails)}" style="font-size:12px;">
+          <input class="form-input bs-emails" type="text" placeholder="accounts@client.com, gm@client.com" value="${escapeHtml(emails)}">
         </div>
         <div class="form-row" style="margin:0;">
           <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Xero Contact ID <span style="opacity:0.6;">(from Xero › Contacts URL)</span></label>
-          <input class="form-input bs-xeroid" type="text" placeholder="e.g. a1b2c3d4-e5f6-7890-abcd-ef1234567890" value="${escapeHtml(xeroId)}" style="font-size:12px;font-family:var(--mono);">
+          <input class="form-input bs-xeroid" type="text" placeholder="e.g. a1b2c3d4-e5f6-7890-abcd-ef1234567890" value="${escapeHtml(xeroId)}" style="font-family:var(--mono);font-size:12px;">
         </div>
       </div>`;
     }).join('')}
     </div>`;
 
   document.getElementById('billing-settings-modal').classList.add('open');
+}
+
+function saveBillingSettings() {
+  const rows = document.querySelectorAll('.billing-settings-row');
+  rows.forEach(row => {
+    const idx = parseInt(row.dataset.idx);
+    const client = _billingSettingsIndex[idx];
+    if (!client) return;
+    billingClientSettings[client] = {
+      commissionPct:    parseFloat(row.querySelector('.bs-commission')?.value) || 20,
+      paymentTermsDays: parseInt(row.querySelector('.bs-terms')?.value) || 30,
+      emails:    (row.querySelector('.bs-emails')?.value || '').split(/[\n,]/).map(e => e.trim()).filter(Boolean),
+      xeroContactId: (row.querySelector('.bs-xeroid')?.value || '').trim(),
+      outlets:   (row.querySelector('.bs-outlets')?.value || '').split(/[\n,]/).map(o => o.trim()).filter(Boolean)
+    };
+  });
+  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  toast('✅ Client billing settings saved');
+  document.getElementById('billing-settings-modal').classList.remove('open');
+  clearBillingCache();
+  loadBillingPage();
+}
+
+function _removeBillingClient(idx) {
+  const name = _billingSettingsIndex[idx];
+  if (!name) return;
+  if (!confirm(`Remove billing config for "${name}"?`)) return;
+  delete billingClientSettings[name];
+  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  openBillingSettingsModal();
+  toast(`Removed: ${name}`);
 }
 
 function addNewBillingClient() {
@@ -11316,16 +11338,8 @@ function addNewBillingClient() {
   billingClientSettings[name] = { commissionPct: 20, paymentTermsDays: 30, emails: [], xeroContactId: '', outlets: [] };
   localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
   input.value = '';
-  openBillingSettingsModal(); // re-render the modal with new client
-  toast(`Added: ${name}`);
-}
-
-function removeBillingClient(name) {
-  if (!confirm(`Remove billing config for "${name}"? The outlet's shifts will still appear independently.`)) return;
-  delete billingClientSettings[name];
-  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
   openBillingSettingsModal();
-  toast(`Removed: ${name}`);
+  toast(`Added: ${name}`);
 }
 
 // ── Send / Preview Modal ───────────────────────────────────────
@@ -11693,7 +11707,7 @@ setInterval(async () => {
 </div>
 
     <!-- XERO BILLING PAGE -->
-    <div id="page-billing" style="display:none;">
+    <div id="page-billing" style="display:none; flex-direction:column; flex:1; min-height:0;">
       <div class="topbar">
         <div class="topbar-left">
           <h2>Xero Billing</h2>
