@@ -11455,11 +11455,112 @@ async function refreshBillingData() {
 }
 
 // ── Client Settings Modal ──────────────────────────────────────
+// Build the universe of selectable outlet names for the picker:
+// real outlets from the Outlets page + any outlet name that appears in shift
+// data (catches legacy spelling variants like en-dash names) so they can be
+// grouped too. De-duplicated by canonical key, displayed by real name.
+function _billingAllSelectableOutlets() {
+  const byKey = {};
+  (allOutlets || []).forEach(o => {
+    const k = _outletKey(o.name);
+    if (k && !byKey[k]) byKey[k] = o.name;
+  });
+  (allShifts || []).forEach(s => {
+    const k = _outletKey(s.outlet);
+    if (k && !byKey[k]) byKey[k] = _normaliseOutletName(s.outlet);
+  });
+  return Object.values(byKey).sort((a, b) => a.localeCompare(b));
+}
+
+// Render the checkbox dropdown of outlets for one client row.
+function _billingOutletPickerHtml(idx, selectedOutlets) {
+  const all = _billingAllSelectableOutlets();
+  const selectedKeys = new Set((selectedOutlets || []).map(_outletKey));
+  // Which outlets are already owned by ANOTHER client (so we can flag them)
+  const opts = all.map(name => {
+    const key = _outletKey(name);
+    const checked = selectedKeys.has(key);
+    const owner = _billingOutletOwnerMap ? _billingOutletOwnerMap[key] : null;
+    const takenByOther = owner && owner !== _bsName(idx);
+    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:12px;${takenByOther ? 'opacity:0.5;' : ''}"
+              onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background='transparent'">
+        <input type="checkbox" class="bs-outlet-cb" data-outlet="${escapeAttr(name)}" ${checked ? 'checked' : ''} ${takenByOther ? 'disabled' : ''}
+               onchange="_billingOnOutletToggle(${idx})">
+        <span>${escapeHtml(name)}</span>
+        ${takenByOther ? `<span style="font-size:10px;color:var(--text3);margin-left:auto;">in ${escapeHtml(owner)}</span>` : ''}
+      </label>`;
+  }).join('');
+
+  const chips = (selectedOutlets || []).map(name =>
+    `<span class="bs-chip" data-outlet="${escapeAttr(name)}" style="display:inline-flex;align-items:center;gap:6px;background:var(--accent-dim,rgba(59,130,246,0.15));color:var(--accent,#3b82f6);padding:3px 8px;border-radius:999px;font-size:12px;">
+      ${escapeHtml(name)}
+      <span style="cursor:pointer;font-weight:700;" onclick="_billingRemoveOutletChip(${idx},'${escapeAttr(name)}')">×</span>
+    </span>`).join('');
+
+  return `
+    <div class="bs-outlet-picker" data-idx="${idx}">
+      <div class="bs-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;min-height:4px;">${chips}</div>
+      <div style="position:relative;">
+        <button type="button" class="form-input" style="text-align:left;cursor:pointer;font-size:12px;width:100%;"
+                onclick="_billingToggleOutletDropdown(${idx})">
+          + Select outlet(s)…
+        </button>
+        <div class="bs-outlet-dropdown" id="bs-dd-${idx}" style="display:none;position:absolute;z-index:50;top:calc(100% + 4px);left:0;right:0;max-height:240px;overflow-y:auto;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+          ${opts || '<div style="padding:10px;font-size:12px;color:var(--text3);">No outlets found</div>'}
+        </div>
+      </div>
+    </div>`;
+}
+
+function _billingToggleOutletDropdown(idx) {
+  const dd = document.getElementById('bs-dd-' + idx);
+  if (!dd) return;
+  const open = dd.style.display === 'block';
+  // close all others
+  document.querySelectorAll('.bs-outlet-dropdown').forEach(d => d.style.display = 'none');
+  dd.style.display = open ? 'none' : 'block';
+}
+
+// Read the current selection from a row into the in-memory config, then re-render that row.
+function _billingReadRowOutlets(idx) {
+  const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
+  if (!row) return [];
+  return [...row.querySelectorAll('.bs-outlet-cb:checked')].map(cb => cb.dataset.outlet);
+}
+
+function _billingOnOutletToggle(idx) {
+  const client = _bsName(idx);
+  if (!client) return;
+  const selected = _billingReadRowOutlets(idx);
+  billingClientSettings[client] = billingClientSettings[client] || {};
+  billingClientSettings[client].outlets = selected;
+  // refresh just the chips for this row without closing the dropdown feel
+  const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
+  const chipsEl = row?.querySelector('.bs-chips');
+  if (chipsEl) {
+    chipsEl.innerHTML = selected.map(name =>
+      `<span class="bs-chip" data-outlet="${escapeAttr(name)}" style="display:inline-flex;align-items:center;gap:6px;background:var(--accent-dim,rgba(59,130,246,0.15));color:var(--accent,#3b82f6);padding:3px 8px;border-radius:999px;font-size:12px;">
+        ${escapeHtml(name)}
+        <span style="cursor:pointer;font-weight:700;" onclick="_billingRemoveOutletChip(${idx},'${escapeAttr(name)}')">×</span>
+      </span>`).join('');
+  }
+}
+
+function _billingRemoveOutletChip(idx, name) {
+  const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
+  if (!row) return;
+  const key = _outletKey(name);
+  const cb = [...row.querySelectorAll('.bs-outlet-cb')].find(c => _outletKey(c.dataset.outlet) === key);
+  if (cb) cb.checked = false;
+  _billingOnOutletToggle(idx);
+}
+
 function openBillingSettingsModal() {
   loadBillingSettings();
+  // Ensure the ownership map reflects current config so we can flag taken outlets.
+  _billingOutletOwnerMap = buildOutletOwnershipMap();
 
   // Only show explicitly configured clients in Settings
-  // (unclaimed outlets appear in the billing table but don't need to be configured)
   const clients = Object.keys(billingClientSettings).sort((a, b) => a.localeCompare(b));
   _billingSettingsIndex = clients;
 
@@ -11468,7 +11569,7 @@ function openBillingSettingsModal() {
   listEl.innerHTML = `
     <div class="alert alert-amber" style="margin-bottom:14px;">
       <span class="alert-icon">💡</span>
-      <span><b>Multi-outlet grouping:</b> If a client has multiple outlet names in ShiftOps, list them all in the Outlets field. Their shifts will be combined into one invoice. Leave blank if the billing name exactly matches the outlet name.</span>
+      <span><b>Multi-outlet grouping:</b> Pick one or more outlets from the dropdown to group them under this client. Their shifts combine into one invoice and the individual outlets stop showing separately. An outlet already assigned to another client appears greyed out.</span>
     </div>
     <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
       <input id="new-billing-client-name" class="form-input" placeholder="Add new billing client name…" style="flex:1;">
@@ -11481,15 +11582,15 @@ function openBillingSettingsModal() {
       const days = cfg.paymentTermsDays || 30;
       const emails  = (cfg.emails || []).join(', ');
       const xeroId  = cfg.xeroContactId || '';
-      const outlets = (cfg.outlets || []).join(', ');
+      const outlets = cfg.outlets || [];
       return `<div class="billing-settings-row" data-idx="${idx}" style="margin-bottom:14px;padding:14px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <div style="font-weight:600;font-size:13px;color:var(--text);">🏢 ${escapeHtml(client)}</div>
           <button class="btn btn-danger btn-sm" onclick="_removeBillingClient(${idx})">Remove</button>
         </div>
         <div class="form-row" style="margin-bottom:8px;">
-          <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Outlets in ShiftOps (comma-separated) — leave blank if outlet name = billing name</label>
-          <input class="form-input bs-outlets" type="text" placeholder="e.g. Ammakase Bar, Ammakase Kitchen" value="${escapeHtml(outlets)}" style="font-size:12px;">
+          <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Outlets in ShiftOps — pick from the list (groups their shifts into this client)</label>
+          ${_billingOutletPickerHtml(idx, outlets)}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
           <div class="form-row" style="margin:0;">
@@ -11526,12 +11627,14 @@ function saveBillingSettings() {
     const idx = parseInt(row.dataset.idx);
     const client = _billingSettingsIndex[idx];
     if (!client) return;
+    // Outlets now come from the checkbox picker, not a free-text field.
+    const outlets = [...row.querySelectorAll('.bs-outlet-cb:checked')].map(cb => cb.dataset.outlet.trim()).filter(Boolean);
     billingClientSettings[client] = {
       commissionPct:    parseFloat(row.querySelector('.bs-commission')?.value) || 20,
       paymentTermsDays: parseInt(row.querySelector('.bs-terms')?.value) || 30,
       emails:    (row.querySelector('.bs-emails')?.value || '').split(/[\n,]/).map(e => e.trim()).filter(Boolean),
       xeroContactId: (row.querySelector('.bs-xeroid')?.value || '').trim(),
-      outlets:   (row.querySelector('.bs-outlets')?.value || '').split(/[\n,]/).map(o => o.trim()).filter(Boolean)
+      outlets:   outlets
     };
   });
   localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
@@ -11544,15 +11647,19 @@ function saveBillingSettings() {
 function _removeBillingClient(idx) {
   const name = _billingSettingsIndex[idx];
   if (!name) return;
-  if (!confirm(`Remove billing config for "${name}"?\n\nThis will also hide it from the billing table so it won't reappear.`)) return;
-  // Capture outlets before deleting
   const cfg = billingClientSettings[name] || {};
+  const hadOutlets = (cfg.outlets || []).length > 0;
+  const msg = hadOutlets
+    ? `Remove billing config for "${name}"?\n\nIts ${cfg.outlets.length} grouped outlet(s) will go back to showing individually in the billing table.`
+    : `Remove billing config for "${name}"?\n\nThis will hide it from the billing table so it won't reappear.`;
+  if (!confirm(msg)) return;
   delete billingClientSettings[name];
   localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
-  // Also hide from unclaimed outlets so it doesn't re-appear if outlet still has shifts
   loadBillingHiddenOutlets();
-  billingHiddenOutlets.add(_outletKey(name));
-  (cfg.outlets || []).forEach(o => billingHiddenOutlets.add(_outletKey(o)));
+  // Only hide the standalone client name itself (a name-based unclaimed row).
+  // Do NOT hide its grouped outlets — those should reappear individually so
+  // shifts are never silently dropped from billing.
+  if (!hadOutlets) billingHiddenOutlets.add(_outletKey(name));
   saveBillingHiddenOutlets();
   openBillingSettingsModal();
   toast(`Removed: ${name}`);
