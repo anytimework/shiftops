@@ -10893,7 +10893,11 @@ let billingCurrentClient = null;
 let billingHiddenOutlets = new Set(); // outlet names permanently hidden from billing table
 
 function loadBillingHiddenOutlets() {
-  try { billingHiddenOutlets = new Set(JSON.parse(localStorage.getItem(BILLING_HIDDEN_KEY) || '[]')); }
+  try {
+    const arr = JSON.parse(localStorage.getItem(BILLING_HIDDEN_KEY) || '[]');
+    // Re-key any legacy entries to the canonical form so old hides keep working.
+    billingHiddenOutlets = new Set((Array.isArray(arr) ? arr : []).map(_outletKey).filter(Boolean));
+  }
   catch(e) { billingHiddenOutlets = new Set(); }
 }
 function saveBillingHiddenOutlets() {
@@ -10918,7 +10922,7 @@ function hideBillingOutlet(name) {
     }
   }
 
-  billingHiddenOutlets.add(name.trim().toLowerCase());
+  billingHiddenOutlets.add(_outletKey(name));
   saveBillingHiddenOutlets();
   clearBillingCache();
   loadBillingPage();
@@ -10935,7 +10939,7 @@ async function repairCorruptOutletName(badName, goodName) {
       .eq('outlet', badName);
     if (error) throw error;
     // Also hide the bad name just in case any cached rows linger
-    billingHiddenOutlets.add(badName.trim().toLowerCase());
+    billingHiddenOutlets.add(_outletKey(badName));
     saveBillingHiddenOutlets();
     clearBillingCache();
     await loadBillingPage();
@@ -10943,7 +10947,7 @@ async function repairCorruptOutletName(badName, goodName) {
   } catch(e) {
     console.error('Repair error:', e);
     // Fall back to just hiding it
-    billingHiddenOutlets.add(badName.trim().toLowerCase());
+    billingHiddenOutlets.add(_outletKey(badName));
     saveBillingHiddenOutlets();
     clearBillingCache();
     loadBillingPage();
@@ -11030,22 +11034,65 @@ function billingPeriodEnd(y, m)   {
 // A shift belongs to billing client C if:
 //   (a) The shift outlet exactly matches one of C.outlets  (multi-outlet grouping), OR
 //   (b) C.outlets is empty/unset and the shift outlet === C (client name = outlet name)
+// Canonical key for matching outlet names: unescape apostrophes, collapse
+// whitespace, lowercase. Ensures "Five Guys VivoCity " and "Five Guys VivoCity"
+// and "Five Guys  VivoCity" all match the same configured outlet.
+function _outletKey(raw) {
+  return _normaliseOutletName(raw)
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Build a SINGLE authoritative map: outletKey -> billingClientName.
+// First configured client to claim an outlet owns it (deterministic by name).
+// This guarantees each outlet — and therefore each shift — belongs to exactly
+// ONE billing client, so shifts can never be summed into two clients at once.
+function buildOutletOwnershipMap() {
+  const map = {};
+  // Configured clients sorted for deterministic ownership when two clients
+  // accidentally list the same outlet (the alphabetically-first wins; the
+  // duplicate is logged so it surfaces in console for cleanup).
+  Object.keys(billingClientSettings).sort((a, b) => a.localeCompare(b)).forEach(name => {
+    const cfg = billingClientSettings[name] || {};
+    const outlets = (cfg.outlets && cfg.outlets.length)
+      ? cfg.outlets
+      : [name]; // no explicit outlets => client name IS the outlet name
+    outlets.forEach(o => {
+      const key = _outletKey(o);
+      if (!key) return;
+      if (map[key] && map[key] !== name) {
+        console.warn(`Billing: outlet "${o}" is claimed by both "${map[key]}" and "${name}". Keeping "${map[key]}".`);
+        return; // first claim wins — do NOT reassign (prevents double counting)
+      }
+      map[key] = name;
+    });
+  });
+  return map;
+}
+
 function outletsBelongingToClient(billingName) {
   const cfg = billingClientSettings[billingName];
-  if (cfg?.outlets?.length) return cfg.outlets.map(o => o.trim().toLowerCase());
+  if (cfg?.outlets?.length) return cfg.outlets.map(o => _outletKey(o));
   // Default: the billing name itself is the outlet name
-  return [billingName.trim().toLowerCase()];
+  return [_outletKey(billingName)];
 }
 
 function shiftBelongsToClient(shift, billingName) {
-  const shiftOutlet = String(shift.outlet || '').trim().toLowerCase();
-  return outletsBelongingToClient(billingName).includes(shiftOutlet);
+  // A shift belongs to the client that OWNS its outlet in the canonical map.
+  // Falls back to direct outlet-list match for unconfigured (unclaimed) rows.
+  const key = _outletKey(shift.outlet);
+  const owner = _billingOutletOwnerMap ? _billingOutletOwnerMap[key] : null;
+  if (owner) return owner === billingName;
+  // No configured owner: shift belongs to the unclaimed row named after the outlet.
+  return outletsBelongingToClient(billingName).includes(key);
 }
 
 // ── Get all payable shifts for a period ───────────────────────
 // Uses supabaseClient JS object directly (same as generateReport does).
 // Never uses fetch() with Authorization headers — that is blocked in some environments.
 let billingPeriodShiftsCache = {};
+let _billingOutletOwnerMap = null;
 
 async function fetchPayableShiftsForPeriod(year, month) {
   const cacheKey = `${year}-${String(month).padStart(2,'0')}`;
@@ -11222,22 +11269,23 @@ function getBillingClients(periodShifts) {
   const shifts = Array.isArray(periodShifts) ? periodShifts : [];
   loadBillingSettings();
   loadBillingHiddenOutlets();
-  const allOutletsThisPeriod = new Set(shifts.map(s => (s.outlet || '').trim()).filter(Boolean));
 
-  // Build set of outlet names already claimed by a configured client
-  const claimedOutlets = new Set();
-  Object.entries(billingClientSettings).forEach(([name, cfg]) => {
-    (cfg.outlets || []).forEach(o => claimedOutlets.add(o.trim().toLowerCase()));
-    if (!(cfg.outlets || []).length) claimedOutlets.add(name.trim().toLowerCase());
+  // Build the single authoritative outlet -> client ownership map for this render.
+  _billingOutletOwnerMap = buildOutletOwnershipMap();
+
+  // Distinct outlet KEYS present this period (canonicalised so branch-name
+  // variants don't create phantom duplicates).
+  const outletKeyToDisplay = {};
+  shifts.forEach(s => {
+    const key = _outletKey(s.outlet);
+    if (key && !outletKeyToDisplay[key]) outletKeyToDisplay[key] = _normaliseOutletName(s.outlet);
   });
 
-  // Unclaimed outlets appear in the table but are NOT saved to billingClientSettings
-  // (avoids phantom duplicates from escaped apostrophes)
-  // Also skip outlets that have been explicitly hidden by the user
-  const unclaimedOutlets = [...allOutletsThisPeriod].filter(
-    outlet => !claimedOutlets.has(outlet.trim().toLowerCase())
-               && !billingHiddenOutlets.has(outlet.trim().toLowerCase())
-  );
+  // An outlet is "claimed" if the ownership map assigns it to a configured client.
+  // Unclaimed = appears in shifts, not owned by any client, and not hidden.
+  const unclaimedOutlets = Object.keys(outletKeyToDisplay)
+    .filter(key => !_billingOutletOwnerMap[key] && !billingHiddenOutlets.has(key))
+    .map(key => outletKeyToDisplay[key]); // show the human-readable name
 
   // Return: configured clients first, then unclaimed outlets
   const configuredNames = Object.keys(billingClientSettings);
@@ -11503,8 +11551,8 @@ function _removeBillingClient(idx) {
   localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
   // Also hide from unclaimed outlets so it doesn't re-appear if outlet still has shifts
   loadBillingHiddenOutlets();
-  billingHiddenOutlets.add(name.trim().toLowerCase());
-  (cfg.outlets || []).forEach(o => billingHiddenOutlets.add(o.trim().toLowerCase()));
+  billingHiddenOutlets.add(_outletKey(name));
+  (cfg.outlets || []).forEach(o => billingHiddenOutlets.add(_outletKey(o)));
   saveBillingHiddenOutlets();
   openBillingSettingsModal();
   toast(`Removed: ${name}`);
