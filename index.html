@@ -11482,13 +11482,14 @@ function _billingOutletPickerHtml(idx, selectedOutlets) {
     const checked = selectedKeys.has(key);
     const owner = _billingOutletOwnerMap ? _billingOutletOwnerMap[key] : null;
     const takenByOther = owner && owner !== _bsName(idx);
-    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:12px;color:var(--text);${takenByOther ? 'opacity:0.5;' : ''}"
-              onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background='transparent'">
-        <input type="checkbox" class="bs-outlet-cb" data-outlet="${escapeAttr(name)}" ${checked ? 'checked' : ''} ${takenByOther ? 'disabled' : ''}
-               onchange="_billingOnOutletToggle(${idx})">
-        <span style="color:var(--text);">${escapeHtml(name)}</span>
-        ${takenByOther ? `<span style="font-size:10px;color:var(--text3);margin-left:auto;">in ${escapeHtml(owner)}</span>` : ''}
-      </label>`;
+    return `<div class="bs-outlet-opt" data-outlet="${escapeAttr(name)}" data-idx="${idx}" data-taken="${takenByOther ? '1' : '0'}"
+              onclick="${takenByOther ? '' : `_billingOptClick(${idx},this)`}"
+              style="display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:${takenByOther ? 'not-allowed' : 'pointer'};font-size:12px;text-transform:none;font-family:var(--font,inherit);color:var(--text);${takenByOther ? 'opacity:0.45;' : ''}">
+        <span class="bs-outlet-cb" data-outlet="${escapeAttr(name)}" data-checked="${checked ? '1' : '0'}"
+              style="width:15px;height:15px;flex:0 0 auto;border:1.5px solid var(--border);border-radius:3px;display:inline-flex;align-items:center;justify-content:center;background:${checked ? 'var(--accent,#3b82f6)' : 'transparent'};color:#fff;font-size:11px;line-height:1;">${checked ? '✓' : ''}</span>
+        <span style="color:var(--text);text-transform:none;flex:1;">${escapeHtml(name)}</span>
+        ${takenByOther ? `<span style="font-size:10px;color:var(--text3);text-transform:none;">in ${escapeHtml(owner)}</span>` : ''}
+      </div>`;
   }).join('');
 
   const chips = (selectedOutlets || []).map(name =>
@@ -11521,11 +11522,25 @@ function _billingToggleOutletDropdown(idx) {
   dd.style.display = open ? 'none' : 'block';
 }
 
-// Read the current selection from a row into the in-memory config, then re-render that row.
+// Read currently-selected outlet names from a row (spans with data-checked="1").
 function _billingReadRowOutlets(idx) {
   const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
   if (!row) return [];
-  return [...row.querySelectorAll('.bs-outlet-cb:checked')].map(cb => cb.dataset.outlet);
+  return [...row.querySelectorAll('.bs-outlet-opt')]
+    .filter(opt => opt.querySelector('.bs-outlet-cb')?.dataset.checked === '1')
+    .map(opt => opt.dataset.outlet);
+}
+
+// Click handler for an option row: toggle its checked state, update the visual
+// checkbox, persist to in-memory config, and refresh the chips.
+function _billingOptClick(idx, optEl) {
+  const cb = optEl.querySelector('.bs-outlet-cb');
+  if (!cb) return;
+  const nowChecked = cb.dataset.checked !== '1';
+  cb.dataset.checked = nowChecked ? '1' : '0';
+  cb.style.background = nowChecked ? 'var(--accent,#3b82f6)' : 'transparent';
+  cb.textContent = nowChecked ? '✓' : '';
+  _billingOnOutletToggle(idx);
 }
 
 function _billingOnOutletToggle(idx) {
@@ -11534,7 +11549,6 @@ function _billingOnOutletToggle(idx) {
   const selected = _billingReadRowOutlets(idx);
   billingClientSettings[client] = billingClientSettings[client] || {};
   billingClientSettings[client].outlets = selected;
-  // refresh just the chips for this row without closing the dropdown feel
   const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
   const chipsEl = row?.querySelector('.bs-chips');
   if (chipsEl) {
@@ -11550,8 +11564,11 @@ function _billingRemoveOutletChip(idx, name) {
   const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
   if (!row) return;
   const key = _outletKey(name);
-  const cb = [...row.querySelectorAll('.bs-outlet-cb')].find(c => _outletKey(c.dataset.outlet) === key);
-  if (cb) cb.checked = false;
+  const opt = [...row.querySelectorAll('.bs-outlet-opt')].find(o => _outletKey(o.dataset.outlet) === key);
+  if (opt) {
+    const cb = opt.querySelector('.bs-outlet-cb');
+    if (cb) { cb.dataset.checked = '0'; cb.style.background = 'transparent'; cb.textContent = ''; }
+  }
   _billingOnOutletToggle(idx);
 }
 
@@ -11627,8 +11644,11 @@ function saveBillingSettings() {
     const idx = parseInt(row.dataset.idx);
     const client = _billingSettingsIndex[idx];
     if (!client) return;
-    // Outlets now come from the checkbox picker, not a free-text field.
-    const outlets = [...row.querySelectorAll('.bs-outlet-cb:checked')].map(cb => cb.dataset.outlet.trim()).filter(Boolean);
+    // Outlets now come from the click-toggle picker (spans with data-checked="1").
+    const outlets = [...row.querySelectorAll('.bs-outlet-opt')]
+      .filter(opt => opt.querySelector('.bs-outlet-cb')?.dataset.checked === '1')
+      .map(opt => opt.dataset.outlet.trim())
+      .filter(Boolean);
     billingClientSettings[client] = {
       commissionPct:    parseFloat(row.querySelector('.bs-commission')?.value) || 20,
       paymentTermsDays: parseInt(row.querySelector('.bs-terms')?.value) || 30,
