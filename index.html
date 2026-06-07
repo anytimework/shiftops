@@ -11482,11 +11482,11 @@ function _billingOutletPickerHtml(idx, selectedOutlets) {
     const checked = selectedKeys.has(key);
     const owner = _billingOutletOwnerMap ? _billingOutletOwnerMap[key] : null;
     const takenByOther = owner && owner !== _bsName(idx);
-    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:12px;${takenByOther ? 'opacity:0.5;' : ''}"
+    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:12px;color:var(--text);${takenByOther ? 'opacity:0.5;' : ''}"
               onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background='transparent'">
         <input type="checkbox" class="bs-outlet-cb" data-outlet="${escapeAttr(name)}" ${checked ? 'checked' : ''} ${takenByOther ? 'disabled' : ''}
                onchange="_billingOnOutletToggle(${idx})">
-        <span>${escapeHtml(name)}</span>
+        <span style="color:var(--text);">${escapeHtml(name)}</span>
         ${takenByOther ? `<span style="font-size:10px;color:var(--text3);margin-left:auto;">in ${escapeHtml(owner)}</span>` : ''}
       </label>`;
   }).join('');
