@@ -10861,8 +10861,21 @@ let billingCurrentClient = null;
 
 // ── Load/save ──────────────────────────────────────────────────
 function loadBillingSettings() {
-  try { billingClientSettings = JSON.parse(localStorage.getItem(BILLING_SETTINGS_KEY) || '{}'); }
-  catch(e) { billingClientSettings = {}; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(BILLING_SETTINGS_KEY) || '{}');
+    billingClientSettings = {};
+    // Clean up any escaped keys (e.g. "Baggies\' Butcher" -> "Baggies' Butcher")
+    Object.entries(raw).forEach(([key, val]) => {
+      // Unescape backslash-escaped apostrophes and quotes
+      const cleanKey = key.replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      // Only keep the clean version (deduplicate if both exist, prefer the one with data)
+      if (!billingClientSettings[cleanKey] || (val.emails && val.emails.length > 0)) {
+        billingClientSettings[cleanKey] = val;
+      }
+    });
+    // Persist the cleaned version back immediately so corrupted keys don't return
+    localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  } catch(e) { billingClientSettings = {}; }
 }
 
 function loadBillingSentLog() {
@@ -11037,24 +11050,28 @@ function computeClientBilling(billingName, periodShifts) {
   const clientShifts = shifts.filter(s => shiftBelongsToClient(s, billingName));
 
   // ── Group shifts by outlet ────────────────────────────────────
-  // Each outlet gets its own line item on the invoice
-  const outletMap = {}; // { outletName: { payout, taxiTotal, shiftLines } }
+  const outletMap = {};
 
   clientShifts.forEach(s => {
     const outletName = s.outlet || billingName;
     if (!outletMap[outletName]) outletMap[outletName] = { payout: 0, taxiTotal: 0, shiftLines: [] };
-    const net  = netPaymentForShift(s);
-    outletMap[outletName].payout += net;
+
+    // Client billing uses payoutForShift (hours × client rate) — matches Reports "Client billing" column
+    // This is what the CLIENT pays, not what the worker receives
+    const clientAmt = payoutForShift(s);
+    outletMap[outletName].payout += clientAmt;
+
+    // Taxi/transport shown as a separate PTC line (pass-through)
     const taxi = parseFloat(s.transport_claim || 0);
     if (taxi > 0) outletMap[outletName].taxiTotal += taxi;
+
     const d   = new Date(s.shift_date + 'T00:00:00');
     const day = `${d.getDate()}/${d.getMonth()+1}`;
     const hrs  = parseFloat(calcShiftHours(s) || 0);
     const rate = parseFloat(s.rate || 0);
-    outletMap[outletName].shiftLines.push(`${day} - ${s.worker_name} ${hrs.toFixed(2)}hrs at SG$${rate}/hr = $${net.toFixed(2)}`);
+    outletMap[outletName].shiftLines.push(`${day} - ${s.worker_name} ${hrs.toFixed(2)}hrs at SG$${rate}/hr = $${clientAmt.toFixed(2)}`);
   });
 
-  // Build per-outlet line items array (sorted by outlet name)
   const outletLineItems = Object.entries(outletMap)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([outletName, data]) => ({
@@ -11079,8 +11096,8 @@ function computeClientBilling(billingName, periodShifts) {
     outlets: outletsSeen.filter(Boolean),
     configuredOutlets: cfg.outlets || [],
     shifts: clientShifts,
-    outletLineItems,           // NEW: per-outlet breakdown
-    workerPayout,
+    outletLineItems,
+    workerPayout,    // actually "client base amount" (hours × rate, pre-commission)
     taxiTotal,
     commissionPct,
     commissionAmt,
@@ -11106,21 +11123,16 @@ function getBillingClients(periodShifts) {
     if (!(cfg.outlets || []).length) claimedOutlets.add(name.trim().toLowerCase());
   });
 
-  // Any outlet with shifts not yet claimed becomes its own 1:1 billing entry
-  allOutletsThisPeriod.forEach(outlet => {
-    if (!claimedOutlets.has(outlet.trim().toLowerCase())) {
-      if (!billingClientSettings[outlet]) {
-        billingClientSettings[outlet] = { commissionPct: 20, paymentTermsDays: 30, emails: [], xeroContactId: '', outlets: [] };
-      }
-    }
-  });
+  // Unclaimed outlets appear in the table but are NOT saved to billingClientSettings
+  // (avoids phantom duplicates from escaped apostrophes)
+  const unclaimedOutlets = [...allOutletsThisPeriod].filter(
+    outlet => !claimedOutlets.has(outlet.trim().toLowerCase())
+  );
 
-  const names = new Set([
-    ...Object.keys(billingClientSettings),
-    ...allOutletsThisPeriod
-  ]);
-
-  return [...names].sort((a, b) => a.localeCompare(b));
+  // Return: configured clients first, then unclaimed outlets
+  const configuredNames = Object.keys(billingClientSettings);
+  const allNames = new Set([...configuredNames, ...unclaimedOutlets]);
+  return [...allNames].sort((a, b) => a.localeCompare(b));
 }
 
 // ── Main billing page render ───────────────────────────────────
@@ -11282,23 +11294,10 @@ async function refreshBillingData() {
 function openBillingSettingsModal() {
   loadBillingSettings();
 
-  const knownOutlets = allOutlets.map(o => (o.name || '').trim()).filter(Boolean);
-  const allNames = new Set([...Object.keys(billingClientSettings), ...knownOutlets]);
-
-  const claimedOutlets = new Set();
-  Object.entries(billingClientSettings).forEach(([name, cfg]) => {
-    (cfg.outlets || []).forEach(o => claimedOutlets.add(o.trim().toLowerCase()));
-    if (!(cfg.outlets || []).length) claimedOutlets.add(name.trim().toLowerCase());
-  });
-  knownOutlets.forEach(outlet => {
-    if (!claimedOutlets.has(outlet.toLowerCase()) && !billingClientSettings[outlet]) {
-      billingClientSettings[outlet] = { commissionPct: 20, paymentTermsDays: 30, emails: [], xeroContactId: '', outlets: [] };
-      allNames.add(outlet);
-    }
-  });
-
-  const clients = [...allNames].sort((a, b) => a.localeCompare(b));
-  _billingSettingsIndex = clients; // store for indexed access
+  // Only show explicitly configured clients in Settings
+  // (unclaimed outlets appear in the billing table but don't need to be configured)
+  const clients = Object.keys(billingClientSettings).sort((a, b) => a.localeCompare(b));
+  _billingSettingsIndex = clients;
 
   const listEl = document.getElementById('billing-settings-list');
 
