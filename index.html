@@ -10869,11 +10869,55 @@ function saveBillingHiddenOutlets() {
   localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([...billingHiddenOutlets]));
 }
 function hideBillingOutlet(name) {
+  // Check if this looks like a corrupt outlet name (contains backslash-escaped apostrophe)
+  // e.g. "Baggies\ Butcher & Deli" which should be "Baggies' Butcher & Deli"
+  const correctedName = name.replace(/\\'/g, "'").replace(/\\\\/g, '').replace(/\\"/g, '"').trim();
+  const isCorrupt = correctedName !== name.trim();
+
+  if (isCorrupt) {
+    const fix = confirm(
+      `"${name}" looks like a corrupted outlet name.\n\n` +
+      `Correct name should be: "${correctedName}"\n\n` +
+      `Fix it in Supabase now? This will update all shifts with the bad outlet name to use the correct name, then remove it from billing.\n\n` +
+      `Click OK to fix in Supabase, or Cancel to just hide it.`
+    );
+    if (fix) {
+      repairCorruptOutletName(name, correctedName);
+      return;
+    }
+  }
+
   billingHiddenOutlets.add(name.trim().toLowerCase());
   saveBillingHiddenOutlets();
   clearBillingCache();
   loadBillingPage();
   toast(`Hidden: ${name}`);
+}
+
+async function repairCorruptOutletName(badName, goodName) {
+  if (!supabaseClient) { toast('Supabase not ready', 'error'); return; }
+  toast(`Fixing outlet name in Supabase…`, 'info');
+  try {
+    const { error, count } = await supabaseClient
+      .from('shifts')
+      .update({ outlet: goodName })
+      .eq('outlet', badName);
+    if (error) throw error;
+    // Also hide the bad name just in case any cached rows linger
+    billingHiddenOutlets.add(badName.trim().toLowerCase());
+    saveBillingHiddenOutlets();
+    clearBillingCache();
+    await loadBillingPage();
+    toast(`✅ Fixed: "${badName}" → "${goodName}" in Supabase`);
+  } catch(e) {
+    console.error('Repair error:', e);
+    // Fall back to just hiding it
+    billingHiddenOutlets.add(badName.trim().toLowerCase());
+    saveBillingHiddenOutlets();
+    clearBillingCache();
+    loadBillingPage();
+    toast(`Supabase fix failed — hidden locally instead. Error: ${e.message || e}`, 'error');
+  }
 }
 
 // ── Load/save ──────────────────────────────────────────────────
@@ -11047,17 +11091,29 @@ async function _billingFetchViaRest(start, end, cacheKey) {
   }
 }
 
+function _normaliseOutletName(raw) {
+  // Fix backslash-escaped apostrophes that can end up in the DB
+  // e.g. "Baggies\' Butcher & Deli" → "Baggies' Butcher & Deli"
+  return String(raw || '').replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\\\/g, '').trim();
+}
+
 function _billingFilterShifts(rows) {
-  return rows.filter(s => {
-    if (s.cancelled) return false;
-    const workerName = String(s.worker_name || '').trim().toLowerCase();
-    if (!workerName || workerName === 'available') return false;
-    if (!s.outlet) return false;
-    // Only SG shifts — billing is in SGD; MY shifts use RM and would corrupt totals
-    const country = String(s.country || '').trim().toLowerCase();
-    if (country === 'malaysia') return false;
-    return !!(s.clock_in && s.clock_out);
-  });
+  return rows
+    .filter(s => {
+      if (s.cancelled) return false;
+      const workerName = String(s.worker_name || '').trim().toLowerCase();
+      if (!workerName || workerName === 'available') return false;
+      if (!s.outlet) return false;
+      // Only SG shifts — billing is in SGD; MY shifts use RM and would corrupt totals
+      const country = String(s.country || '').trim().toLowerCase();
+      if (country === 'malaysia') return false;
+      return !!(s.clock_in && s.clock_out);
+    })
+    .map(s => {
+      // Normalise outlet name in-memory so corrupt "Baggies\ Butcher" merges with "Baggies' Butcher"
+      const cleanOutlet = _normaliseOutletName(s.outlet);
+      return cleanOutlet !== s.outlet ? { ...s, outlet: cleanOutlet } : s;
+    });
 }
 
 function clearBillingCache() {
