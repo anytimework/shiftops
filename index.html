@@ -10840,6 +10840,7 @@ async function sendAIMessage() {
 // ── Billing state ─────────────────────────────────────────────
 const BILLING_SETTINGS_KEY = 'billing_client_settings_v2';
 const BILLING_SENT_KEY = 'billing_sent_log_v1';
+const BILLING_HIDDEN_KEY = 'billing_hidden_outlets_v1';
 const BILLING_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const XERO_ACCOUNT_SERVICE = '11 - Service Provider AR';
 const XERO_ACCOUNT_COMMISSION = '200 - Sales';
@@ -10858,6 +10859,22 @@ const XERO_ACCOUNT_PTC = 'PTC - Pass-through Costs';
 let billingClientSettings = {};
 let billingSentLog = {};
 let billingCurrentClient = null;
+let billingHiddenOutlets = new Set(); // outlet names permanently hidden from billing table
+
+function loadBillingHiddenOutlets() {
+  try { billingHiddenOutlets = new Set(JSON.parse(localStorage.getItem(BILLING_HIDDEN_KEY) || '[]')); }
+  catch(e) { billingHiddenOutlets = new Set(); }
+}
+function saveBillingHiddenOutlets() {
+  localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([...billingHiddenOutlets]));
+}
+function hideBillingOutlet(name) {
+  billingHiddenOutlets.add(name.trim().toLowerCase());
+  saveBillingHiddenOutlets();
+  clearBillingCache();
+  loadBillingPage();
+  toast(`Hidden: ${name}`);
+}
 
 // ── Load/save ──────────────────────────────────────────────────
 function loadBillingSettings() {
@@ -11036,6 +11053,9 @@ function _billingFilterShifts(rows) {
     const workerName = String(s.worker_name || '').trim().toLowerCase();
     if (!workerName || workerName === 'available') return false;
     if (!s.outlet) return false;
+    // Only SG shifts — billing is in SGD; MY shifts use RM and would corrupt totals
+    const country = String(s.country || '').trim().toLowerCase();
+    if (country === 'malaysia') return false;
     return !!(s.clock_in && s.clock_out);
   });
 }
@@ -11114,6 +11134,7 @@ function computeClientBilling(billingName, periodShifts) {
 function getBillingClients(periodShifts) {
   const shifts = Array.isArray(periodShifts) ? periodShifts : [];
   loadBillingSettings();
+  loadBillingHiddenOutlets();
   const allOutletsThisPeriod = new Set(shifts.map(s => (s.outlet || '').trim()).filter(Boolean));
 
   // Build set of outlet names already claimed by a configured client
@@ -11125,8 +11146,10 @@ function getBillingClients(periodShifts) {
 
   // Unclaimed outlets appear in the table but are NOT saved to billingClientSettings
   // (avoids phantom duplicates from escaped apostrophes)
+  // Also skip outlets that have been explicitly hidden by the user
   const unclaimedOutlets = [...allOutletsThisPeriod].filter(
     outlet => !claimedOutlets.has(outlet.trim().toLowerCase())
+               && !billingHiddenOutlets.has(outlet.trim().toLowerCase())
   );
 
   // Return: configured clients first, then unclaimed outlets
@@ -11174,7 +11197,7 @@ async function loadBillingPage() {
       <div class="metric-val green">$${totalRevenue.toFixed(2)}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Worker Payouts</div>
+      <div class="metric-label">Base Amount (SG only)</div>
       <div class="metric-val blue">$${totalWorkerPayout.toFixed(2)}</div>
     </div>
     <div class="metric-card">
@@ -11214,7 +11237,7 @@ async function loadBillingPage() {
       <th>Billing Client</th>
       <th>Outlets</th>
       <th>Shifts</th>
-      <th>Worker Payout</th>
+      <th>Base Amount</th>
       <th>Taxi/PTC</th>
       <th>Commission</th>
       <th>Total to Invoice</th>
@@ -11229,6 +11252,8 @@ async function loadBillingPage() {
     const sent     = isBillingSent(d.billingName, year, month);
     const sentInfo = sent ? billingSentLog[billingSentKey(d.billingName, year, month)] : null;
     const noShifts = d.shiftCount === 0;
+    // An "unclaimed" outlet is one that has shifts but no billingClientSettings entry
+    const isUnclaimed = !billingClientSettings[d.billingName];
 
     const statusBadge = sent
       ? `<span class="badge badge-green" style="font-size:11px;">✅ Sent${sentInfo?.sentAt ? `<br><span style="font-size:10px;opacity:0.8;">${new Date(sentInfo.sentAt).toLocaleDateString('en-SG')}</span>` : ''}</span>`
@@ -11238,13 +11263,15 @@ async function loadBillingPage() {
 
     const emailHint = d.emails.length
       ? `<div style="font-size:11px;color:var(--text3);">${escapeHtml(d.emails[0])}${d.emails.length > 1 ? ` +${d.emails.length-1} more` : ''}</div>`
-      : `<div style="font-size:11px;color:var(--amber);">⚠️ No email set</div>`;
+      : isUnclaimed
+        ? `<div style="font-size:11px;color:var(--text3);">⚠️ Unconfigured outlet</div>`
+        : `<div style="font-size:11px;color:var(--amber);">⚠️ No email set</div>`;
 
     const outletDisplay = d.outlets.length
       ? `<div style="font-size:11px;color:var(--text3);">${d.outlets.map(o => escapeHtml(o)).join(', ')}</div>`
       : `<div style="font-size:11px;color:var(--text3);">—</div>`;
 
-    html += `<tr>
+    html += `<tr${isUnclaimed ? ' style="opacity:0.7;"' : ''}>
       <td>
         <div class="worker-name">${escapeHtml(d.billingName)}</div>
         ${emailHint}
@@ -11260,11 +11287,13 @@ async function loadBillingPage() {
       <td style="text-align:right;">
         <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;">
           ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('preview',${idx},${year},${month})">👁 Preview</button>` : ''}
-          ${!sent && !noShifts ? `<button class="btn btn-primary btn-sm" onclick="_billingAction('send',${idx},${year},${month})">📤 Send Invoice</button>` : ''}
+          ${!sent && !noShifts && !isUnclaimed ? `<button class="btn btn-primary btn-sm" onclick="_billingAction('send',${idx},${year},${month})">📤 Send Invoice</button>` : ''}
           ${sent ? `<button class="btn btn-ghost btn-sm" style="color:var(--text3);" onclick="_billingAction('unsend',${idx},${year},${month})">↩ Unsend</button>` : ''}
-          ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('excel',${idx},${year},${month})">⬇️ Excel</button>` : ''}
+          ${!noShifts && !isUnclaimed ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('excel',${idx},${year},${month})">⬇️ Excel</button>` : ''}
+          ${isUnclaimed ? `<button class="btn btn-danger btn-sm" onclick="hideBillingOutlet(${JSON.stringify(d.billingName)})" title="Permanently hide this outlet from billing">🙈 Hide</button>` : ''}
         </div>
       </td>
+
     </tr>`;
   });
 
@@ -11380,9 +11409,16 @@ function saveBillingSettings() {
 function _removeBillingClient(idx) {
   const name = _billingSettingsIndex[idx];
   if (!name) return;
-  if (!confirm(`Remove billing config for "${name}"?`)) return;
+  if (!confirm(`Remove billing config for "${name}"?\n\nThis will also hide it from the billing table so it won't reappear.`)) return;
+  // Capture outlets before deleting
+  const cfg = billingClientSettings[name] || {};
   delete billingClientSettings[name];
   localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  // Also hide from unclaimed outlets so it doesn't re-appear if outlet still has shifts
+  loadBillingHiddenOutlets();
+  billingHiddenOutlets.add(name.trim().toLowerCase());
+  (cfg.outlets || []).forEach(o => billingHiddenOutlets.add(o.trim().toLowerCase()));
+  saveBillingHiddenOutlets();
   openBillingSettingsModal();
   toast(`Removed: ${name}`);
 }
@@ -11852,7 +11888,7 @@ setInterval(async () => {
       <div class="topbar">
         <div class="topbar-left">
           <h2>Xero Billing</h2>
-          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period</p>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period · 🇸🇬 Singapore only</p>
         </div>
         <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
           <select id="billing-year" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
