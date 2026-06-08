@@ -1855,11 +1855,21 @@ async function loadProfileMetaRemote() {
     const { data, error } = await supabaseClient
       .from('app_settings').select('value').eq('key', 'profile_meta').maybeSingle();
     if (error) { console.warn('profileMeta remote load failed:', error.message); return; }
-    if (data && data.value && (Object.keys(data.value.workers || {}).length || Object.keys(data.value.outlets || {}).length)) {
-      profileMeta = { workers: data.value.workers || {}, outlets: data.value.outlets || {} };
+    if (data && data.value) {
+      // Always overlay the shared remote copy when the row exists, even if it
+      // happens to be empty — the remote row is the single source of truth across
+      // the team. We MERGE it onto whatever local entries this device may have set
+      // just-now-but-not-yet-flushed, so we never lose an in-flight local ban.
+      profileMeta = mergeProfileMeta(profileMeta, {
+        workers: data.value.workers || {},
+        outlets: data.value.outlets || {}
+      });
       localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
     } else {
-      // Supabase has no profileMeta yet — seed it from whatever is in localStorage
+      // No remote row at all yet. Seed it from local ONLY if local actually has
+      // bans/restrictions — and even then via the merge-aware saveProfileMeta so
+      // a concurrent writer isn't clobbered. A device with an EMPTY local copy must
+      // never create/overwrite the shared row (that was wiping team-wide bans).
       const local = loadProfileMeta();
       if (Object.keys(local.workers).length || Object.keys(local.outlets).length) {
         await saveProfileMeta();
@@ -1869,19 +1879,105 @@ async function loadProfileMetaRemote() {
     console.warn('profileMeta remote load error:', e);
   }
 }
+// Deep-merge two profileMeta objects. For each worker/outlet key, the per-entry
+// fields are merged; list fields (disliked_outlets / banned_workers) are unioned
+// case-insensitively so neither side's bans are dropped. `primary` wins on scalar
+// fields (notes, commission_pct) so the freshest local edit is preserved.
+function mergeProfileMeta(primary, secondary) {
+  const out = { workers: {}, outlets: {} };
+  const unionList = (a, b) => {
+    const seen = new Set();
+    const res = [];
+    [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])].forEach(v => {
+      const k = normProfileKey(v);
+      if (k && !seen.has(k)) { seen.add(k); res.push(v); }
+    });
+    return res;
+  };
+  const mergeSection = (sectionName, listField) => {
+    const p = (primary && primary[sectionName]) || {};
+    const s = (secondary && secondary[sectionName]) || {};
+    const keys = new Set([...Object.keys(p), ...Object.keys(s)]);
+    keys.forEach(k => {
+      const pe = p[k] || {};
+      const se = s[k] || {};
+      out[sectionName][k] = {
+        ...se,            // remote/secondary defaults
+        ...pe,            // primary (local) overrides scalars like notes/commission
+        [listField]: unionList(pe[listField], se[listField])
+      };
+    });
+  };
+  mergeSection('workers', 'disliked_outlets');
+  mergeSection('outlets', 'banned_workers');
+  return out;
+}
 async function saveProfileMeta() {
-  // Write-through: localStorage immediately (instant + offline), then Supabase
-  // so bans/restrictions sync across devices and the whole ops team.
+  // Write-through with merge: localStorage immediately (instant + offline), then
+  // re-read the CURRENT shared row from Supabase and MERGE our changes onto it
+  // before writing back. This prevents a stale device from clobbering bans set by
+  // another device. Without the merge, the previous full-blob upsert meant the
+  // last writer overwrote everyone else's bans/restrictions (last-write-wins on
+  // the whole JSON blob), so a worker banned on one device kept re-appearing on
+  // others after any unrelated save.
   localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
   try {
+    let merged = profileMeta;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'profile_meta').maybeSingle();
+      if (!error && data && data.value) {
+        merged = mergeProfileMeta(profileMeta, {
+          workers: data.value.workers || {},
+          outlets: data.value.outlets || {}
+        });
+        // Adopt the merged result locally too so this device is fully consistent.
+        profileMeta = merged;
+        localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+      }
+    } catch(e) { /* if the pre-read fails, fall back to writing our own copy */ }
     const { error } = await supabaseClient
       .from('app_settings')
-      .upsert({ key: 'profile_meta', value: profileMeta, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+      .upsert({ key: 'profile_meta', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
     if (error) console.warn('profileMeta remote save failed:', error.message);
   } catch(e) {
     console.warn('profileMeta remote save error:', e);
   }
 }
+// ── Diagnostic: run `debugBans()` in the browser console on ANY device to see
+// exactly what bans/restrictions are in Supabase vs. this device's local copy.
+// This pinpoints whether a ban failed to save (missing in Supabase) or failed to
+// sync (in Supabase but not applied locally). Safe, read-only.
+async function debugBans() {
+  const localOutlets = Object.entries(profileMeta.outlets || {})
+    .filter(([k,v]) => (v.banned_workers||[]).length)
+    .map(([k,v]) => `  ${k}: banned [${(v.banned_workers||[]).join(', ')}]`);
+  const localWorkers = Object.entries(profileMeta.workers || {})
+    .filter(([k,v]) => (v.disliked_outlets||[]).length)
+    .map(([k,v]) => `  ${k}: avoids [${(v.disliked_outlets||[]).join(', ')}]`);
+  console.log('%c=== LOCAL profileMeta (this device) ===','font-weight:bold');
+  console.log('Outlet bans:\n' + (localOutlets.join('\n') || '  (none)'));
+  console.log('Worker avoid-lists:\n' + (localWorkers.join('\n') || '  (none)'));
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value, updated_at').eq('key','profile_meta').maybeSingle();
+    if (error) { console.warn('Supabase read error:', error.message); return; }
+    if (!data || !data.value) { console.warn('Supabase has NO profile_meta row.'); return; }
+    const ro = Object.entries(data.value.outlets || {})
+      .filter(([k,v]) => (v.banned_workers||[]).length)
+      .map(([k,v]) => `  ${k}: banned [${(v.banned_workers||[]).join(', ')}]`);
+    const rw = Object.entries(data.value.workers || {})
+      .filter(([k,v]) => (v.disliked_outlets||[]).length)
+      .map(([k,v]) => `  ${k}: avoids [${(v.disliked_outlets||[]).join(', ')}]`);
+    console.log('%c=== SUPABASE profileMeta (shared / team-wide) ===','font-weight:bold');
+    console.log('Last updated:', data.updated_at);
+    console.log('Outlet bans:\n' + (ro.join('\n') || '  (none)'));
+    console.log('Worker avoid-lists:\n' + (rw.join('\n') || '  (none)'));
+    console.log('%cIf a ban is LOCAL but not in SUPABASE → the save isn\'t reaching the DB (check RLS / network on the device that set it).','color:#e87');
+    console.log('%cIf a ban is in SUPABASE but not LOCAL → this device isn\'t syncing (reload, or wait 30s for the poll).','color:#e87');
+  } catch(e) { console.warn('debugBans Supabase error:', e); }
+}
+try { window.debugBans = debugBans; } catch(e){}
 function loadShiftComments() {
   try { return JSON.parse(localStorage.getItem('shift_comments_v27') || '{}'); }
   catch(e) { return {}; }
