@@ -3962,8 +3962,11 @@ function getOpenTasks() {
     const isToday = s.shift_date === todayStr;
     const start = s.scheduled_start ? s.scheduled_start.slice(0,5) : '';
     const end = s.scheduled_end ? s.scheduled_end.slice(0,5) : '';
-    // Dispute / cancellation request — needs an ops decision
-    if (r.disputed && wn && wn.toLowerCase() !== 'available' && !s.cancelled) {
+    // Dispute / cancellation request — needs an ops decision.
+    // Only relevant for today/upcoming shifts; a cancellation for a shift that
+    // already happened needs no action, so skip any past-dated shift.
+    if (r.disputed && wn && wn.toLowerCase() !== 'available' && !s.cancelled
+        && s.shift_date >= todayStr) {
       tasks.push({
         type: 'dispute',
         id: s.id,
@@ -3978,8 +3981,9 @@ function getOpenTasks() {
         done: false
       });
     }
-    // Late-arrival notice — needs acknowledge + inform outlet
-    if (r.lateNotified && !s.cancelled) {
+    // Late-arrival notice — needs acknowledge + inform outlet.
+    // Like cancellations, only meaningful for today/upcoming shifts.
+    if (r.lateNotified && !s.cancelled && s.shift_date >= todayStr) {
       const done = !!r.lateAck && !!r.outletInformed;
       // A completed late task collapses to the bottom, then disappears from the
       // panel TASK_CARD_DONE_HIDE_HOURS (18h) after it was completed. It remains
