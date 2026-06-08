@@ -748,6 +748,9 @@ tr:hover td { background: rgba(91,148,249,0.045); }
           onclick="switchPage('activity',document.querySelector('[onclick*=activity]'))">All activity →</button>
       </div>
 
+      <!-- Accepted standby-offer banner(s) — a worker said YES to an offered open slot -->
+      <div id="accepted-offers-banner"></div>
+
       <div class="content">
         <div class="metrics" id="metrics"></div>
         <div id="standby-day-panel"></div>
@@ -2073,6 +2076,7 @@ async function init() {
         updateTasksNavBadge();
         if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
         if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
+            try { renderAcceptedOffersBanner(); } catch(e){}
       }).catch(()=>{});
     }
     try {
@@ -2134,7 +2138,11 @@ async function loadReminders() {
           offerSentAt: r.offer_sent_at || '',
           offerAccepted: !!r.offer_accepted,
           offerAcceptedBy: r.offer_accepted_by || '',
-          offerAcceptedAt: r.offer_accepted_at || ''
+          offerAcceptedAt: r.offer_accepted_at || '',
+          offerOutletInformed: !!r.offer_outlet_informed,
+          // appCheckState is a local-only UI flag (no DB column) — preserve any
+          // in-flight value so the banner's app-check step survives a reload.
+          appCheckState: (shiftReminders[r.shift_id] && shiftReminders[r.shift_id].appCheckState) || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2175,6 +2183,7 @@ async function persistReminder(shiftId) {
       offer_accepted: !!r.offerAccepted,
       offer_accepted_by: r.offerAcceptedBy || null,
       offer_accepted_at: r.offerAcceptedAt || null,
+      offer_outlet_informed: !!r.offerOutletInformed,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -2227,7 +2236,14 @@ function subscribeToReminderChanges() {
             replacementAt: row.replacement_at || '',
             completedAt: row.completed_at || '',
             lastReminderAt: row.last_reminder_at || '',
-            replacedWorker: row.replaced_worker || ''
+            replacedWorker: row.replaced_worker || '',
+            offeredNames: (function(){ try { return Array.isArray(row.offered_names) ? row.offered_names : JSON.parse(row.offered_names || '[]'); } catch(e){ return []; } })(),
+            offerSentAt: row.offer_sent_at || '',
+            offerAccepted: !!row.offer_accepted,
+            offerAcceptedBy: row.offer_accepted_by || '',
+            offerAcceptedAt: row.offer_accepted_at || '',
+            offerOutletInformed: !!row.offer_outlet_informed,
+            appCheckState: (shiftReminders[row.shift_id] && shiftReminders[row.shift_id].appCheckState) || ''
           };
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2241,6 +2257,7 @@ function subscribeToReminderChanges() {
             if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
             if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
             if (document.getElementById('replacement-modal')?.classList.contains('open')) { try { renderReplacementPanel(); } catch(e){} }
+            try { renderAcceptedOffersBanner(); } catch(e){}
           }).catch(()=>{});
         }
       })
@@ -2277,7 +2294,13 @@ async function silentSyncReminders() {
         replacementAt: r.replacement_at || '',
         completedAt: r.completed_at || '',
         lastReminderAt: r.last_reminder_at || '',
-      replacedWorker: r.replaced_worker || ''
+        replacedWorker: r.replaced_worker || '',
+        offeredNames: (function(){ try { return Array.isArray(r.offered_names) ? r.offered_names : JSON.parse(r.offered_names || '[]'); } catch(e){ return []; } })(),
+        offerSentAt: r.offer_sent_at || '',
+        offerAccepted: !!r.offer_accepted,
+        offerAcceptedBy: r.offer_accepted_by || '',
+        offerAcceptedAt: r.offer_accepted_at || '',
+        offerOutletInformed: !!r.offer_outlet_informed
       };
     });
     // Find shift IDs where something changed
@@ -2291,7 +2314,9 @@ async function silentSyncReminders() {
           a.disputed !== b.disputed || (a.disputeReason||'') !== (b.disputeReason||'') ||
           a.lateNotified !== b.lateNotified || a.lateAck !== b.lateAck ||
           a.outletInformed !== b.outletInformed || (a.lateReason||'') !== (b.lateReason||'') ||
-          a.needsReplacement !== b.needsReplacement) {
+          a.needsReplacement !== b.needsReplacement ||
+          a.offerAccepted !== b.offerAccepted || (a.offerAcceptedBy||'') !== (b.offerAcceptedBy||'') ||
+          (Array.isArray(a.offeredNames)?a.offeredNames.length:0) !== (Array.isArray(b.offeredNames)?b.offeredNames.length:0)) {
         changed.push(id);
       }
     });
@@ -2310,6 +2335,7 @@ async function silentSyncReminders() {
           if (typeof renderMetrics === 'function' && document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') {
             try { renderMetrics(); } catch(e){}
           }
+          try { renderAcceptedOffersBanner(); } catch(e){}
         }).catch(()=>{});
       }
     }
@@ -2338,7 +2364,7 @@ async function markWorkerAcknowledged(shiftId) {
   toast(`✓ ${s ? (String(s.worker_name||'Worker').split(' ')[0]) : 'Worker'} marked acknowledged`);
 }
 async function undoFullAck(shiftId) {
-  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '', offeredNames: [], offerSentAt: '', offerAccepted: false, offerAcceptedBy: '', offerAcceptedAt: '' };
+  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '', offeredNames: [], offerSentAt: '', offerAccepted: false, offerAcceptedBy: '', offerAcceptedAt: '', offerOutletInformed: false };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
@@ -2977,6 +3003,7 @@ async function logActivity(action, details = '', refType = '', refId = '', extra
   // Refresh the attendance banner if visible
   if (document.getElementById('attendance-activity-banner')) {
     renderAttendanceActivityBanner();
+    try { renderAcceptedOffersBanner(); } catch(e){}
   }
 
   // Save to Supabase so other users see it
@@ -4481,6 +4508,7 @@ async function loadShifts() {
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
+  try { renderAcceptedOffersBanner(); } catch(e){}
   checkReminderAlerts();
 }
 
@@ -6178,12 +6206,36 @@ function resolveOfferableSlot(shiftId) {
 function rerenderOfferPanels() {
   try { renderReplacementPanel(); } catch(e){}
   try { if (document.getElementById('available-modal')?.classList.contains('open')) renderAvailablePanel(); } catch(e){}
+  try { renderAcceptedOffersBanner(); } catch(e){}
 }
 
 // ── Offer open slot to standby workers ───────────────────────────────────────
 // Returns the standby workers available on the slot's date who are NOT banned by
 // the outlet and have NOT marked the outlet as one they don't want to work at.
 // (Uses the same assignmentRestriction() gate as manual shift assignment.)
+//
+// We ALSO hide a standby worker whose existing assigned shift on the same date
+// time-overlaps the offered slot — e.g. a worker on 11:00–14:00 won't be offered
+// a 12:00–16:00 slot (clash), but the same worker WOULD still be offered a
+// 17:00–23:00 slot (no clash) even while on the standby list.
+function workerHasClashingShift(workerName, slot) {
+  const name = String(workerName || '').trim().toLowerCase();
+  if (!name || !slot || !slot.date) return false;
+  const sStart = toMins(slot.start);
+  const sEnd   = toMins(slot.end);
+  // If the offered slot has no usable time window, we can't judge a clash — don't hide.
+  if (sStart == null || sEnd == null) return false;
+  return (allShifts || []).some(s => {
+    if (s.cancelled) return false;
+    if (String(s.shift_date || '') !== String(slot.date)) return false;
+    if (String(s.worker_name || '').trim().toLowerCase() !== name) return false;
+    if (String(s.id) === String(slot.id)) return false; // not itself
+    const eStart = toMins(s.scheduled_start ? s.scheduled_start.slice(0,5) : '');
+    const eEnd   = toMins(s.scheduled_end   ? s.scheduled_end.slice(0,5)   : '');
+    if (eStart == null || eEnd == null) return false;
+    return sStart < eEnd && sEnd > eStart; // standard time-overlap test
+  });
+}
 function eligibleStandbyForSlot(slot) {
   if (!slot || !slot.date) return [];
   const outlet = slot.outlet || '';
@@ -6197,6 +6249,8 @@ function eligibleStandbyForSlot(slot) {
       seen.add(key);
       // Skip banned / disliked-outlet workers entirely so the option never shows.
       if (assignmentRestriction(name, outlet)) return false;
+      // Skip workers whose existing assigned shift that day clashes with this slot.
+      if (workerHasClashingShift(name, slot)) return false;
       return true;
     });
 }
@@ -6208,6 +6262,18 @@ function buildSlotOfferMessage(slot, workerName) {
   const role = slot.role || '';
   const outlet = slot.outlet || '';
   return `🆕 *Shift Available — Want it?*\n\nHi ${workerName}! A shift just opened up that matches your standby availability:\n\n📅 *${dateStr}*\n🏠 *${outlet}*${tRange ? `\n⏰ ${tRange}` : ''}${role ? `\n👔 ${role}` : ''}\n\nReply *YES* to grab it (first to confirm gets it), or ignore if you're no longer free. 🙌`;
+}
+
+// ── Shift-confirmed message builder ──────────────────────────────────────────
+// Sent to a worker the moment ops assigns them into a slot, so they know the
+// shift is locked in and will appear in their Anytime Work app.
+function buildShiftConfirmedMessage(slot, workerName) {
+  const d = new Date((slot.date || '') + 'T00:00:00');
+  const dateStr = isNaN(d) ? (slot.date || '') : d.toLocaleDateString('en-SG', { weekday:'long', day:'numeric', month:'short' });
+  const tRange = shiftTimeRange(slot.start, slot.end);
+  const role = slot.role || '';
+  const outlet = slot.outlet || '';
+  return `✅ *Shift Confirmed!*\n\nHi ${workerName}! You're confirmed for this shift:\n\n📅 *${dateStr}*\n🏠 *${outlet}*${tRange ? `\n⏰ ${tRange}` : ''}${role ? `\n👔 ${role}` : ''}\n\nThis shift now appears in your *Anytime Work app* — please check it there. See you then! 🙌`;
 }
 
 // Reusable "Offer slot to standby" block for any normalised open slot object
@@ -6379,6 +6445,12 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
   if (!slot) { toast('Slot no longer open', 'error'); return false; }
   const restriction = assignmentRestriction(worker, slot.outlet || '');
   if (restriction) { toast(restriction, 'error'); return false; }
+  // Safety net: never assign a worker into a slot that clashes with another
+  // shift they already have that day (the offer chips already hide these).
+  if (workerHasClashingShift(worker, slot)) {
+    toast(`${worker} already has an overlapping shift on ${slot.date || 'that date'} — cannot assign (time clash).`, 'error');
+    return false;
+  }
   // Make sure the worker exists in the workers table (so phone/profile resolve later).
   if (!(allWorkers || []).find(w => String(w.name).toLowerCase() === worker.toLowerCase())) {
     try { await supabaseClient.from('workers').insert({ name: worker }); await loadWorkers(); } catch(e){}
@@ -6387,6 +6459,23 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
     const { error } = await supabaseClient.from('shifts').update({ worker_name: worker, updated_at: new Date().toISOString() }).eq('id', shiftId);
     if (error) throw error;
   } catch(e) { toast('Could not assign worker to the shift', 'error'); return false; }
+  // Notify the worker via WhatsApp that the shift is confirmed and will appear
+  // in their Anytime Work app. Best-effort: never block the assignment on this.
+  try {
+    const phone = workerPhone(worker);
+    if (phone && getPeriskopeConfig()?.apikey) {
+      const full = (allShifts || []).find(x => String(x.id) === String(shiftId)) || taskShiftCache?.[String(shiftId)] || {};
+      const confSlot = {
+        date: slot.date || full.shift_date || '',
+        outlet: slot.outlet || full.outlet || '',
+        role: full.role || '',
+        start: full.scheduled_start ? full.scheduled_start.slice(0,5) : '',
+        end: full.scheduled_end ? full.scheduled_end.slice(0,5) : ''
+      };
+      const okWA = await sendPeriskopeMessage(phone, buildShiftConfirmedMessage(confSlot, worker));
+      if (okWA) toast(`📲 Shift confirmation sent to ${worker}`);
+    }
+  } catch(e) { console.warn('[Assign] confirmation WA failed:', e); }
   // Clear replacement / offer flags — slot is filled.
   if (shiftReminders[shiftId]) {
     shiftReminders[shiftId].needsReplacement = false;
@@ -6427,12 +6516,60 @@ async function assignAcceptedStandby(shiftId) {
   if (!worker) { toast('No accepting worker recorded', 'error'); return; }
   const ok = await assignWorkerToOpenSlot(shiftId, worker);
   if (ok) {
-    r.offerAccepted = false;
+    // Keep the banner alive but move it to the "added in Anytime Work app?" step.
+    // offerAccepted stays true so the offer_accepted task (and banner) persists
+    // until the app-check is resolved via answerAppCheck/resolveAppCheck.
+    if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+    shiftReminders[shiftId].appCheckState = 'ask';
     await persistReminder(shiftId);
     if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
     renderTasksPanel();
     rerenderOfferPanels();
   }
+}
+
+// Banner step 2 → answer to "Has this shift been added in the Anytime Work App?"
+async function answerAppCheck(shiftId, answer) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  if (answer === 'yes') {
+    // Added in the app → done. Clear the accepted-offer task and hide the banner.
+    r.appCheckState = '';
+    r.offerAccepted = false;
+    await persistReminder(shiftId);
+    const who = r.offerAcceptedBy || 'the worker';
+    try { await logActivity('Shift added to Anytime Work app', `${who}'s confirmed shift was added to the Anytime Work app.`, 'shift', shiftId, { worker_name: who }); } catch(e){}
+    if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+    renderTasksPanel();
+    rerenderOfferPanels();
+    toast('✓ Shift confirmed in Anytime Work app');
+  } else {
+    // Not added yet → show the reminder + Done/Dismiss options.
+    r.appCheckState = 'no';
+    await persistReminder(shiftId);
+    rerenderOfferPanels();
+    toast('⚠️ Add the shift via the Anytime Work app to clear this message', 'info');
+  }
+}
+
+// Banner step 3 → resolve the "not added yet" reminder (Done or Dismiss).
+async function resolveAppCheck(shiftId, choice) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  r.appCheckState = '';
+  r.offerAccepted = false; // clears the offer_accepted task → banner hides
+  await persistReminder(shiftId);
+  const who = r.offerAcceptedBy || 'the worker';
+  if (choice === 'done') {
+    try { await logActivity('Shift added to Anytime Work app', `${who}'s confirmed shift was added to the Anytime Work app.`, 'shift', shiftId, { worker_name: who }); } catch(e){}
+    toast('✓ Marked as added — banner cleared');
+  } else {
+    try { await logActivity('Standby accepted banner dismissed', `Reminder to add ${who}'s shift to the Anytime Work app was dismissed.`, 'shift', shiftId, { worker_name: who }); } catch(e){}
+    toast('Banner dismissed');
+  }
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+  renderTasksPanel();
+  rerenderOfferPanels();
 }
 
 function showReminderSchemaSQL() {
@@ -6456,6 +6593,7 @@ alter table public.shift_reminders
   add column if not exists offer_accepted       boolean default false, -- a standby worker replied YES to the offer
   add column if not exists offer_accepted_by    text,                  -- name of the standby worker who accepted
   add column if not exists offer_accepted_at    timestamptz,           -- when the acceptance came in
+  add column if not exists offer_outlet_informed boolean default false, -- outlet told who is covering the accepted slot
   add column if not exists last_reminder_at    timestamptz;           -- when the most recent reminder was SENT for this shift (used by the webhook to route a bare reply to the most recently-reminded shift)
 
 -- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
@@ -7237,6 +7375,92 @@ function renderMetrics() {
 // ── Attendance page activity strip ───────────────────────────
 let _bannerLogs = [];
 let _bannerIdx  = 0; // 0 = most recent
+
+// ── Accepted standby-offer banner ─────────────────────────────────────────────
+// A persistent strip at the top of Attendance showing every slot a standby worker
+// has ACCEPTED but that ops hasn't assigned yet. Mirrors the "✅ Standby accepted"
+// task, surfaced where ops will see it without opening the Tasks panel.
+function renderAcceptedOffersBanner() {
+  const host = document.getElementById('accepted-offers-banner');
+  if (!host) return;
+  // Reuse the task pipeline so the banner and the Tasks panel never disagree.
+  let accepted = [];
+  try { accepted = (getOpenTasks() || []).filter(t => t.type === 'offer_accepted' && !t.done); } catch(e) { accepted = []; }
+  if (!accepted.length) { host.innerHTML = ''; return; }
+  host.innerHTML = accepted.map(t => {
+    const tRange = shiftTimeRange(t.start, t.end);
+    const dLabel = shiftDateLabel(t.date);
+    const idAttr = escapeAttr(String(t.id));
+    const worker = escapeHtml(t.worker || 'A standby worker');
+    const outlet = escapeHtml(t.outlet || 'the outlet');
+    const informed = !!(shiftReminders[t.id] && shiftReminders[t.id].offerOutletInformed);
+    const appState = (shiftReminders[t.id] && shiftReminders[t.id].appCheckState) || ''; // '' | 'ask' | 'no'
+    const headHtml = `
+      <span class="task-tag tag-done" style="flex-shrink:0;">✅ Standby accepted</span>
+      <div style="flex:1; min-width:200px; font-size:12.5px; color:var(--text);">
+        <strong>${worker}</strong> accepted a slot offered at <strong>${outlet}</strong> · ${dLabel}${tRange ? ` · ${tRange}` : ''}${t.role ? ` · ${escapeHtml(t.role)}` : ''}
+      </div>`;
+
+    // Step 2 — after Assign, ask whether the shift was added to the Anytime Work app.
+    if (appState === 'ask') {
+      return `<div style="background:linear-gradient(90deg, rgba(96,165,250,0.12), rgba(96,165,250,0.04)); border-bottom:1px solid rgba(96,165,250,0.28); padding:8px 18px; display:flex; align-items:center; gap:12px; min-height:38px; flex-wrap:wrap;">
+        ${headHtml}
+        <div style="flex-basis:100%; font-size:12px; color:var(--text2); font-weight:600;">📱 Has this shift been added in the Anytime Work App? <span style="color:var(--red);">*</span></div>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          <button class="btn btn-primary btn-sm" onclick="answerAppCheck('${idAttr}','yes')" title="Yes — shift is in the Anytime Work app">Yes</button>
+          <button class="btn btn-amber btn-sm" onclick="answerAppCheck('${idAttr}','no')" title="No — not yet added to the app">No</button>
+        </div>
+      </div>`;
+    }
+
+    // Step 3 — they answered No: remind that the shift must be added in the app.
+    if (appState === 'no') {
+      return `<div style="background:linear-gradient(90deg, rgba(251,191,36,0.14), rgba(251,191,36,0.04)); border-bottom:1px solid rgba(251,191,36,0.30); padding:8px 18px; display:flex; align-items:center; gap:12px; min-height:38px; flex-wrap:wrap;">
+        ${headHtml}
+        <div style="flex-basis:100%; font-size:12px; color:var(--amber, #b45309); font-weight:600;">⚠️ This shift must be added via the <strong>Anytime Work App</strong> to clear this message.</div>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          <button class="btn btn-primary btn-sm" onclick="resolveAppCheck('${idAttr}','done')" title="Shift has now been added to the Anytime Work app — clear this banner">Done</button>
+          <button class="btn btn-ghost btn-sm" onclick="resolveAppCheck('${idAttr}','dismiss')" title="Dismiss this reminder and hide the banner">Dismiss</button>
+        </div>
+      </div>`;
+    }
+
+    // Step 1 — default: confirm who is covering + Assign.
+    return `<div style="background:linear-gradient(90deg, rgba(52,211,153,0.12), rgba(52,211,153,0.04)); border-bottom:1px solid rgba(52,211,153,0.28); padding:8px 18px; display:flex; align-items:center; gap:12px; min-height:38px; flex-wrap:wrap;">
+      ${headHtml}
+      <div style="display:flex; gap:6px; flex-shrink:0;">
+        <button class="btn ${informed ? 'btn-ghost' : 'btn-amber'} btn-sm" ${informed ? 'disabled' : ''} onclick="notifyOutletOfAcceptedOffer('${idAttr}')" title="Log that the outlet has been told who is covering this slot">${informed ? '✓ Outlet notified' : 'Notify outlet'}</button>
+        <button class="btn btn-primary btn-sm" onclick="assignAcceptedStandby('${idAttr}')" title="Assign ${worker} into this slot">Assign</button>
+        <button class="btn btn-ghost btn-sm" onclick="dismissAcceptedOffer('${idAttr}')" title="Dismiss this banner without assigning">Dismiss</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Mark that the outlet was told who is covering an accepted slot (banner action).
+async function notifyOutletOfAcceptedOffer(shiftId) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  shiftReminders[shiftId].offerOutletInformed = true;
+  await persistReminder(shiftId);
+  const s = (taskShiftCache[String(shiftId)]) || (allShifts || []).find(x => String(x.id) === String(shiftId));
+  const who = shiftReminders[shiftId].offerAcceptedBy || 'the standby worker';
+  if (s) {
+    try {
+      await logActivity('Outlet notified of standby cover',
+        `Outlet ${s.outlet || '—'} was informed that ${who} is covering the open slot on ${s.shift_date || ''}.`,
+        'shift', shiftId, { shift_date: s.shift_date, worker_name: who, outlet: s.outlet });
+    } catch(e){}
+  }
+  renderAcceptedOffersBanner();
+  toast(`✓ Logged: outlet notified that ${who} is covering`);
+}
+
+// Dismiss the accepted-offer banner/task without assigning (e.g. handled elsewhere).
+async function dismissAcceptedOffer(shiftId) {
+  if (!confirm('Dismiss this accepted-offer alert without assigning the worker?')) return;
+  if (typeof clearOfferAccepted === 'function') { await clearOfferAccepted(shiftId); }
+  renderAcceptedOffersBanner();
+}
 
 async function renderAttendanceActivityBanner() {
   const el = document.getElementById('attendance-activity-list');
@@ -13094,6 +13318,7 @@ initSupabase();
 setInterval(async () => {
   if (document.getElementById('attendance-activity-list')) {
     await renderAttendanceActivityBanner();
+    try { renderAcceptedOffersBanner(); } catch(e){}
   }
   const actPage = document.getElementById('page-activity');
   if (actPage && actPage.style.display !== 'none') {
