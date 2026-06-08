@@ -6230,7 +6230,7 @@ function renderOfferToStandbyBlock(slot) {
     ? `<button class="btn btn-primary btn-sm" onclick="offerSlotToAllStandby('${idAttr}')" title="Offer to all eligible standby workers; first YES gets it">\ud83d\udce3 Offer to all (${eligibleWithPhone})</button>`
     : '';
   const sentNote = offered.length ? `<div class="standby-meta" style="margin-top:6px;color:var(--text3);">Offered to: ${escapeHtml(offered.join(', '))} — first to reply YES wins. When someone says yes, tap their name:</div>
-    <div class="standby-actions" style="margin-top:5px;">${offered.map(n => `<button class="btn btn-primary btn-sm" onclick="acceptAndAssignStandby('${idAttr}','${escapeAttr(n)}')" title="${escapeHtml(n)} said yes — confirm & assign them to this slot">✓ ${escapeHtml(n)} said yes → assign</button>`).join('')}</div>` : '';
+    <div class="standby-actions" style="margin-top:5px;">${offered.map(n => `<button class="btn btn-primary btn-sm" onclick="markOfferAccepted('${idAttr}','${escapeAttr(n)}')" title="${escapeHtml(n)} said yes — adds a Standby accepted task; confirm the assignment there">✓ ${escapeHtml(n)} said yes</button>`).join('')}</div>` : '';
   return `<div style="margin-top:9px;border-top:1px dashed var(--border);padding-top:8px;">
     <div class="standby-meta" style="margin-bottom:6px;font-weight:600;color:var(--purple);">\ud83e\uddfe Offer slot to standby</div>
     <div class="standby-actions" style="margin-top:0;">${chips}${offerAll}</div>
@@ -6308,11 +6308,24 @@ async function markOfferAccepted(shiftId, workerName) {
   r.offerAccepted = true;
   r.offerAcceptedBy = workerName || (r.offeredNames && r.offeredNames[0]) || '';
   r.offerAcceptedAt = new Date().toISOString();
+  // Ensure the slot's shift is in the task pool NOW so the "✅ Standby accepted"
+  // task appears immediately — even for a future-dated Available slot that isn't
+  // in the current day view (otherwise it wouldn't show until a reload).
+  try {
+    let s = (allShifts || []).find(x => String(x.id) === String(shiftId))
+          || (typeof availableSlots !== 'undefined' && (availableSlots || []).find(x => String(x.id) === String(shiftId)));
+    if (s) {
+      taskShiftCache[String(shiftId)] = s;
+    } else {
+      const { data } = await supabaseClient.from('shifts').select('*').eq('id', shiftId).limit(1);
+      if (data && data[0]) taskShiftCache[String(shiftId)] = data[0];
+    }
+  } catch(e) {}
   await persistReminder(shiftId);
   rerenderOfferPanels();
   if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
   renderTasksPanel();
-  toast(`✓ ${r.offerAcceptedBy} marked as accepted — see Tasks`);
+  toast(`✓ ${r.offerAcceptedBy} accepted — confirm assignment in Tasks`);
 }
 
 // One-tap: mark the worker as accepted AND assign them into the slot.
