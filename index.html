@@ -3920,6 +3920,9 @@ function getReplacementNeeded() {
   const todayStr = formatDate(new Date());
   return taskShiftPool()
     .filter(needsReplacement)
+    // Only today + upcoming: a slot for a shift that already passed needs no
+    // replacement, so it must not inflate the badge count or the panel.
+    .filter(s => (s.shift_date || '') >= todayStr)
     .map(s => {
       const r = shiftReminders[s.id] || {};
       const liveName = String(s.worker_name || '').trim();
