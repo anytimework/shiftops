@@ -3369,21 +3369,36 @@ function serviceRecoveryPayment(s) {
 function transportClaim(s) {
   return parseFloat(s.transport_claim || 0);
 }
+// Compensation: a make-good payout to the worker (e.g. booking communicated as
+// confirmed before outlet accepted, then declined). Always paid to the worker.
+// compensation_billable is the portion (if any) billed to the outlet — defaults
+// to 0 (fully absorbed by Anytime Work). No commission is taken on compensation.
+function compensationPaid(s) {
+  return parseFloat(s.compensation_paid || 0);
+}
+function compensationBillable(s) {
+  // Never bill the outlet more than we paid the worker
+  return Math.min(parseFloat(s.compensation_billable || 0), compensationPaid(s));
+}
+function compensationAbsorbed(s) {
+  return Math.max(0, compensationPaid(s) - compensationBillable(s));
+}
 function overpaymentDeductionForShift(s) {
   return parseFloat(s?.overpayment_deduction || 0);
 }
 function netPaymentForShift(s) {
   const tc = transportClaim(s);
+  const comp = compensationPaid(s);
   const opDeduct = overpaymentDeductionForShift(s);
-  if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(s) - opDeduct) + tc;
+  if (s.sr_worker) return Math.max(0, serviceRecoveryPayment(s) - opDeduct) + tc + comp;
   // Special rate for own member: sr_rate set but sr_worker null
   // Worker payout = sr_rate × hours; penalty + overpayment deduction applied
   if (!s.sr_worker && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate || 0)) {
     const hours = parseFloat(calcShiftHours(s) || 0);
     const workerPay = hours * parseFloat(s.sr_rate);
-    return Math.max(0, workerPay - shiftPenaltyAmount(s) - opDeduct) + tc;
+    return Math.max(0, workerPay - shiftPenaltyAmount(s) - opDeduct) + tc + comp;
   }
-  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s) - opDeduct) + tc;
+  return Math.max(0, payoutForShift(s) - shiftPenaltyAmount(s) - opDeduct) + tc + comp;
 }
 function totalPaymentForShift(s) {
   const thirdPartyFee = s?.sr_worker ? thirdPartyPlatformFeeForShift(s) : 0;
@@ -6149,6 +6164,9 @@ function openEditRow(id) {
   ciCell.innerHTML = `<input type="time" class="time-inp" id="edit-ci-${id}" value="${s.clock_in?.slice(0,5)||''}">`;
   coCell.innerHTML = `<input type="time" class="time-inp" id="edit-co-${id}" value="${s.clock_out?.slice(0,5)||''}">`;
   const tc = parseFloat(s.transport_claim || 0);
+  const compPaid = parseFloat(s.compensation_paid || 0);
+  const compBill = parseFloat(s.compensation_billable || 0);
+  const compReason = s.compensation_reason || '';
   const existingComment = commentForShift(id);
   const commentCount = existingComment ? 1 : 0;
   brCell.innerHTML =
@@ -6157,6 +6175,26 @@ function openEditRow(id) {
        <span style="font-size:11px;color:var(--text2);">🚕 Transport $</span>
        <input type="number" min="0" step="0.50" id="edit-tc-${id}" value="${tc > 0 ? tc.toFixed(2) : ''}" placeholder="0.00"
          style="width:70px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
+     </div>
+     <div style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+       <span style="font-size:11px;color:var(--text2);">🤝 Compensation $</span>
+       <input type="number" min="0" step="0.50" id="edit-comp-${id}" value="${compPaid > 0 ? compPaid.toFixed(2) : ''}" placeholder="0.00"
+         oninput="toggleCompFields('${id}')"
+         style="width:70px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
+       <span style="font-size:10px;color:var(--text3);">paid to worker</span>
+     </div>
+     <div id="comp-extra-${id}" style="display:${compPaid > 0 ? 'flex' : 'none'};margin-top:6px;align-items:center;gap:6px;flex-wrap:wrap;">
+       <select id="edit-comp-reason-${id}" style="font-size:11px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;">
+         <option value="agent_premature_confirm"${compReason==='agent_premature_confirm'?' selected':''}>Confirmed before outlet accepted</option>
+         <option value="outlet_declined_late"${compReason==='outlet_declined_late'?' selected':''}>Outlet declined late</option>
+         <option value="outlet_cancelled_after_confirm"${compReason==='outlet_cancelled_after_confirm'?' selected':''}>Outlet cancelled after confirming</option>
+         <option value="our_error"${compReason==='our_error'?' selected':''}>Our error (other)</option>
+         <option value="other"${compReason==='other'?' selected':''}>Other</option>
+       </select>
+       <span style="font-size:11px;color:var(--text2);">Bill outlet $</span>
+       <input type="number" min="0" step="0.50" id="edit-comp-bill-${id}" value="${compBill > 0 ? compBill.toFixed(2) : ''}" placeholder="0.00"
+         style="width:64px;font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);">
+       <span style="font-size:10px;color:var(--text3);">blank = we absorb it</span>
      </div>
      <div style="margin-top:6px;">
        <button type="button" class="btn btn-ghost btn-sm" onclick="toggleCommentEditor('${id}')">Comments ${commentCount ? `<span class="nav-badge show" style="position:static;margin-left:6px;box-shadow:none;">${commentCount}</span>` : ''}</button>
@@ -6307,6 +6345,12 @@ function toggleCommentEditor(id) {
   if (!el) return;
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
   if (el.style.display === 'block') document.getElementById(`edit-notes-${id}`)?.focus();
+}
+// Show the reason + bill-outlet row only once a compensation amount is entered
+function toggleCompFields(id) {
+  const amt = parseFloat(document.getElementById(`edit-comp-${id}`)?.value || 0);
+  const extra = document.getElementById(`comp-extra-${id}`);
+  if (extra) extra.style.display = amt > 0 ? 'flex' : 'none';
 }
 
 // ── Overpayment modal ────────────────────────────────────────────────────────
@@ -6543,6 +6587,9 @@ async function saveRow(id) {
   const coInput = document.getElementById('edit-co-' + id);
   const brInput = document.getElementById('edit-break-' + id);
   const tcInput = document.getElementById('edit-tc-' + id);
+  const compInput = document.getElementById('edit-comp-' + id);
+  const compBillInput = document.getElementById('edit-comp-bill-' + id);
+  const compReasonInput = document.getElementById('edit-comp-reason-' + id);
   const notesInput = document.getElementById('edit-notes-' + id);
   const wnInput = document.getElementById('edit-wn-' + id);
   const ssInput = document.getElementById('edit-ss-' + id);
@@ -6551,6 +6598,11 @@ async function saveRow(id) {
   const co = coInput ? (coInput.value || null) : (s.clock_out?.slice(0,5) || null);
   const br = brInput ? parseInt(brInput.value || 0, 10) : breakMinsForShift(s);
   const tc = tcInput ? (parseFloat(tcInput.value) || 0) : parseFloat(s.transport_claim || 0);
+  const compPaid = compInput ? (parseFloat(compInput.value) || 0) : parseFloat(s.compensation_paid || 0);
+  // Bill-outlet portion can never exceed what we paid the worker
+  let compBill = compBillInput ? (parseFloat(compBillInput.value) || 0) : parseFloat(s.compensation_billable || 0);
+  compBill = Math.min(compBill, compPaid);
+  const compReason = compPaid > 0 ? (compReasonInput ? compReasonInput.value : (s.compensation_reason || null)) : null;
   const notes = notesInput ? notesInput.value.trim() : commentForShift(id);
   const newSchedStart = ssInput?.value || s.scheduled_start?.slice(0,5) || null;
   const newSchedEnd = seInput?.value || s.scheduled_end?.slice(0,5) || null;
@@ -6564,6 +6616,9 @@ async function saveRow(id) {
     clock_in: ci, clock_out: co, break_mins: br,
     late_penalty: lp,
     transport_claim: tc || null,
+    compensation_paid: compPaid || null,
+    compensation_billable: compPaid > 0 ? (compBill || null) : null,
+    compensation_reason: compReason,
     payroll_notes: notes || null,
     scheduled_start: newSchedStart ? newSchedStart + ':00' : s.scheduled_start,
     scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
@@ -6581,12 +6636,13 @@ async function saveRow(id) {
   if (notes) shiftComments[String(id)] = notes; else delete shiftComments[String(id)];
   saveShiftComments();
   const tcNote = tc > 0 ? `, transport $${tc.toFixed(2)}` : '';
+  const compNote = compPaid > 0 ? `, compensation $${compPaid.toFixed(2)} paid${compBill > 0 ? ` (bill outlet $${compBill.toFixed(2)})` : ' (absorbed)'}` : '';
   const notesLog = notes ? `, notes: ${notes}` : '';
   const workerLabel = resolvedWorker || s.worker_name || 'Available';
   const _dateFmt = s.shift_date ? new Date(s.shift_date+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'}) : '';
   await logActivity(
     resolvedWorker ? `Assigned ${resolvedWorker} to slot` : 'Edited shift',
-    `${workerLabel} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}${notesLog}`,
+    `${workerLabel} at ${s.outlet || '—'} on ${_dateFmt} — clock-in ${ci||'—'}, clock-out ${co||'—'}, break ${br}m${tcNote}${compNote}${notesLog}`,
     'shift', id, { shift_date: s.shift_date, worker_name: workerLabel, outlet: s.outlet }
   );
   toast('Saved!');
@@ -8176,6 +8232,7 @@ function reportRowsForMetric(rows, filter) {
   if (filter === 'malaysia') return rows.filter(s => countryForShift(s) === 'Malaysia');
   if (filter === 'sr_absorbed') return rows.filter(s => srAbsorbedForShift(s) > 0);
   if (filter === 'transport') return rows.filter(s => transportClaim(s) > 0);
+  if (filter === 'comp_absorbed') return rows.filter(s => compensationAbsorbed(s) > 0);
   if (filter === 'penalties') return rows.filter(s => reportPenaltyForShift(s) > 0);
   if (filter === 'client_billing') return rows.filter(s => payoutForShift(s) > 0);
   if (filter === 'worker_pay') return rows.filter(s => netPaymentForShift(s) > 0);
@@ -8189,6 +8246,7 @@ function metricFilterLabelForReport(filter) {
     malaysia: 'Malaysia',
     sr_absorbed: 'SR absorbed rows',
     transport: 'transport rows',
+    comp_absorbed: 'compensation absorbed rows',
     penalties: 'penalty rows',
     client_billing: 'client billing rows',
     worker_pay: 'worker pay rows',
@@ -8203,6 +8261,7 @@ function renderReport(from, to, outlet) {
   const totalHours = viewRows.reduce((a,s) => a + parseFloat(calcShiftHours(s) || 0), 0);
   const totalPayout = viewRows.reduce((a,s) => a + payoutForShift(s), 0);
   const totalTransportMetric = viewRows.reduce((a,s) => a + transportClaim(s), 0);
+  const totalCompAbsorbedMetric = viewRows.reduce((a,s) => a + compensationAbsorbed(s), 0);
   const totalSrMetric = viewRows.reduce((a,s) => a + srAbsorbedForShift(s), 0);
   const totalPenaltiesMetric = viewRows.reduce((a,s) => a + reportPenaltyForShift(s), 0);
   const totalWorkerPayMetric = viewRows.reduce((a,s) => a + netPaymentForShift(s), 0);
@@ -8216,6 +8275,7 @@ function renderReport(from, to, outlet) {
   const reportNetPayoutByCountry = splitAmountsByCountry(viewRows, netPaymentForShift);
   const reportSrByCountry = splitAmountsByCountry(viewRows, srAbsorbedForShift);
   const reportTransportByCountry = splitAmountsByCountry(viewRows, transportClaim);
+  const reportCompAbsorbedByCountry = splitAmountsByCountry(viewRows, compensationAbsorbed);
   const reportClientBillByCountry = splitAmountsByCountry(viewRows, s => payoutForShift(s) + transportClaim(s));
   const reportPenaltyByCountry = splitAmountsByCountry(viewRows, reportPenaltyForShift);
   document.getElementById('report-metrics').innerHTML = `
@@ -8226,6 +8286,7 @@ function renderReport(from, to, outlet) {
     ${reportMetricCard('sr_absorbed','SR absorbed', countrySplitMetric(reportSrByCountry, totalSrMetric > 0 ? 'amber' : 'green'))}
     ${reportMetricCard('penalties','Penalties', countrySplitMetric(reportPenaltyByCountry, totalPenaltiesMetric > 0 ? 'red' : 'green'))}
     ${reportMetricCard('transport','🚕 Transport', countrySplitMetric(reportTransportByCountry, totalTransportMetric > 0 ? 'amber' : 'green'))}
+    ${totalCompAbsorbedMetric > 0 ? reportMetricCard('comp_absorbed','🤝 Comp. absorbed', countrySplitMetric(reportCompAbsorbedByCountry, 'red')) : ''}
     ${reportMetricCard('total_billed','Total billed to client', countrySplitMetric(reportClientBillByCountry, 'green'))}
   `;
   if (!viewRows.length) {
@@ -11594,6 +11655,9 @@ function _billingFilterShifts(rows) {
       // Only SG shifts — billing is in SGD; MY shifts use RM and would corrupt totals
       const country = String(s.country || '').trim().toLowerCase();
       if (country === 'malaysia') return false;
+      // A billable compensation amount must reach the invoice even though the
+      // shift was never worked (no clock-in/out, e.g. outlet declined late).
+      if (Math.min(parseFloat(s.compensation_billable || 0), parseFloat(s.compensation_paid || 0)) > 0) return true;
       return !!(s.clock_in && s.clock_out);
     })
     .map(s => {
@@ -11617,7 +11681,7 @@ function computeClientBilling(billingName, periodShifts) {
 
   clientShifts.forEach(s => {
     const outletName = s.outlet || billingName;
-    if (!outletMap[outletName]) outletMap[outletName] = { payout: 0, taxiTotal: 0, shiftLines: [] };
+    if (!outletMap[outletName]) outletMap[outletName] = { payout: 0, taxiTotal: 0, compTotal: 0, shiftLines: [] };
 
     // Client billing uses payoutForShift (hours × client rate) — matches Reports "Client billing" column
     // This is what the CLIENT pays, not what the worker receives
@@ -11627,6 +11691,17 @@ function computeClientBilling(billingName, periodShifts) {
     // Taxi/transport shown as a separate PTC line (pass-through)
     const taxi = parseFloat(s.transport_claim || 0);
     if (taxi > 0) outletMap[outletName].taxiTotal += taxi;
+
+    // Billable compensation — pass-through, no commission applied
+    const compBill = compensationBillable(s);
+    if (compBill > 0) {
+      outletMap[outletName].compTotal += compBill;
+      const cd  = new Date(s.shift_date + 'T00:00:00');
+      const cday = `${cd.getDate()}/${cd.getMonth()+1}`;
+      outletMap[outletName].shiftLines.push(`${cday} - ${s.worker_name} compensation (booking not honoured) = $${compBill.toFixed(2)}`);
+    }
+    // A pure-compensation row (outlet declined, no hours worked) has no work line
+    if (!(s.clock_in && s.clock_out)) return;
 
     const d   = new Date(s.shift_date + 'T00:00:00');
     const day = `${d.getDate()}/${d.getMonth()+1}`;
@@ -11641,18 +11716,21 @@ function computeClientBilling(billingName, periodShifts) {
       outletName,
       payout:     parseFloat(data.payout.toFixed(2)),
       taxiTotal:  parseFloat(data.taxiTotal.toFixed(2)),
+      compTotal:  parseFloat((data.compTotal || 0).toFixed(2)),
       shiftLines: data.shiftLines,
       description: `${outletName}\n${data.shiftLines.join('\n')}`
     }));
 
   const workerPayout = parseFloat(outletLineItems.reduce((s, o) => s + o.payout, 0).toFixed(2));
   const taxiTotal    = parseFloat(outletLineItems.reduce((s, o) => s + o.taxiTotal, 0).toFixed(2));
+  const compTotal    = parseFloat(outletLineItems.reduce((s, o) => s + o.compTotal, 0).toFixed(2));
   const outletsSeen  = Object.keys(outletMap);
 
   const cfg           = billingClientSettings[billingName] || {};
   const commissionPct = cfg.commissionPct !== undefined ? cfg.commissionPct : 20;
   const commissionAmt = parseFloat((workerPayout * commissionPct / 100).toFixed(2));
-  const subtotal      = parseFloat((workerPayout + commissionAmt + taxiTotal).toFixed(2));
+  // Compensation is a pass-through make-good — added after commission, like taxi
+  const subtotal      = parseFloat((workerPayout + commissionAmt + taxiTotal + compTotal).toFixed(2));
 
   return {
     billingName,
@@ -11662,6 +11740,7 @@ function computeClientBilling(billingName, periodShifts) {
     outletLineItems,
     workerPayout,    // actually "client base amount" (hours × rate, pre-commission)
     taxiTotal,
+    compTotal,
     commissionPct,
     commissionAmt,
     subtotal,
@@ -11783,6 +11862,7 @@ async function loadBillingPage() {
       <th>Shifts</th>
       <th>Base Amount</th>
       <th>Taxi/PTC</th>
+      <th>Comp.</th>
       <th>Commission</th>
       <th>Total to Invoice</th>
       <th>Terms</th>
@@ -11824,6 +11904,7 @@ async function loadBillingPage() {
       <td><span style="font-family:var(--mono);">${d.shiftCount}</span></td>
       <td style="font-family:var(--mono);color:var(--accent);">$${d.workerPayout.toFixed(2)}</td>
       <td style="font-family:var(--mono);color:${d.taxiTotal > 0 ? 'var(--purple)' : 'var(--text3)'};">${d.taxiTotal > 0 ? '$'+d.taxiTotal.toFixed(2) : '—'}</td>
+      <td style="font-family:var(--mono);color:${d.compTotal > 0 ? 'var(--teal)' : 'var(--text3)'};">${d.compTotal > 0 ? '$'+d.compTotal.toFixed(2) : '—'}</td>
       <td style="font-family:var(--mono);color:var(--amber);">$${d.commissionAmt.toFixed(2)} <span style="font-size:10px;color:var(--text3);">(${d.commissionPct}%)</span></td>
       <td style="font-family:var(--mono);font-weight:700;color:var(--green);">$${d.subtotal.toFixed(2)}</td>
       <td style="font-size:12px;color:var(--text2);">${d.paymentTermsDays}d</td>
@@ -12147,6 +12228,11 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
       <td style="padding:6px 0;text-align:right;font-size:10px;color:var(--text3);border-bottom:1px solid var(--border);">PTC</td>
       <td style="padding:6px 0;font-family:var(--mono);color:var(--purple);text-align:right;border-bottom:1px solid var(--border);">$${item.taxiTotal.toFixed(2)}</td>
     </tr>` : ''}
+    ${item.compTotal > 0 ? `<tr>
+      <td style="padding:6px 0;border-bottom:1px solid var(--border);"><div style="font-size:12px;">↳ Compensation — booking not honoured (${escapeHtml(item.outletName)})</div></td>
+      <td style="padding:6px 0;text-align:right;font-size:10px;color:var(--text3);border-bottom:1px solid var(--border);">PTC</td>
+      <td style="padding:6px 0;font-family:var(--mono);color:var(--teal);text-align:right;border-bottom:1px solid var(--border);">$${item.compTotal.toFixed(2)}</td>
+    </tr>` : ''}
   `).join('');
 
   let previewHtml = `
@@ -12218,6 +12304,7 @@ async function downloadClientExcel(billingName, year, month) {
       ['TOTALS', '', '', ''],
       ['Worker Payouts', '', d.workerPayout, ''],
       ...(d.taxiTotal > 0 ? [['Taxi / Pass-through Costs', '', d.taxiTotal, '']] : []),
+      ...(d.compTotal > 0 ? [['Compensation (booking not honoured)', '', d.compTotal, '']] : []),
       [`Commission (${d.commissionPct}%)`, '', d.commissionAmt, ''],
       ['TOTAL TO INVOICE (SGD)', '', d.subtotal, ''],
       ['', '', '', ''],
@@ -12317,6 +12404,15 @@ async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xer
         Description: `Taxi Fare (${item.outletName})`,
         Quantity: 1,
         UnitAmount: item.taxiTotal,
+        AccountCode: 'PTC',
+        TaxType: 'NONE'
+      });
+    }
+    if (item.compTotal > 0) {
+      lineItems.push({
+        Description: `Compensation — booking not honoured (${item.outletName})`,
+        Quantity: 1,
+        UnitAmount: item.compTotal,
         AccountCode: 'PTC',
         TaxType: 'NONE'
       });
