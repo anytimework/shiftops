@@ -7054,7 +7054,30 @@ async function saveRow(id) {
     updated_at: new Date().toISOString()
   };
   if (resolvedWorker) updatePayload.worker_name = resolvedWorker;
-  const { error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id);
+  let { error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id);
+  // Graceful fallback: if Supabase rejects the update because an OPTIONAL column
+  // (compensation/transport) doesn't exist in this project's schema, retry with a
+  // core-only payload so break time, clock times and notes still save. The user is
+  // told to run the shifts SQL to enable the compensation fields.
+  if (error && /column|schema cache/i.test(error.message || '')) {
+    const optionalCols = ['compensation_paid','compensation_billable','compensation_reason','transport_claim','late_penalty'];
+    const missingOptional = optionalCols.some(c => (error.message || '').includes(`'${c}'`) || (error.message || '').includes(c));
+    if (missingOptional) {
+      const corePayload = {
+        clock_in: ci, clock_out: co, break_mins: br,
+        payroll_notes: notes || null,
+        scheduled_start: newSchedStart ? newSchedStart + ':00' : s.scheduled_start,
+        scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
+        updated_at: new Date().toISOString()
+      };
+      if (resolvedWorker) corePayload.worker_name = resolvedWorker;
+      const retry = await supabaseClient.from('shifts').update(corePayload).eq('id', id);
+      error = retry.error;
+      if (!error) {
+        toast('Saved core shift details. Compensation/transport fields need the shifts SQL run in Supabase first.', 'info');
+      }
+    }
+  }
   if (error) { toast('Failed to save: ' + error.message, 'error'); return; }
   // Auto-create worker record if not found in DB
   if (resolvedWorker && !allWorkers.find(w => w.name.toLowerCase() === resolvedWorker.toLowerCase())) {
