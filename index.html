@@ -200,6 +200,9 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .metric-card-available { border-color: rgba(247,171,46,0.28); }
 .metric-card-replacement.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .modal-wide { max-width: 640px; width: 92%; }
+.modal-available { max-width: 1080px; width: 94%; }
+.modal-available .available-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; align-items: start; }
+@media (max-width: 760px) { .modal-available .available-grid { grid-template-columns: 1fr; } }
 .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--bg2); }
 .task-card.task-dispute { border-left: 3px solid var(--red); }
 .task-card.task-late { border-left: 3px solid var(--amber); }
@@ -1226,7 +1229,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 
 <!-- AVAILABLE SLOTS MODAL (cross-date: today + all upcoming, open/no-taker slots) -->
 <div class="modal-overlay" id="available-modal">
-  <div class="modal modal-wide">
+  <div class="modal modal-wide modal-available">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
       <h3 style="margin:0;">🪑 Available slots</h3>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -2176,11 +2179,22 @@ async function persistReminder(shiftId) {
     }, { onConflict: 'shift_id' });
     if (error) {
       console.error('Reminder Supabase error:', error);
-      toast('⚠ Reminder saved locally only — Supabase sync failed. Run the shift_reminders SQL in Supabase to enable team sync.', 'error');
+      const msg = (error.message || '').toLowerCase();
+      const offerColMissing = /offered_names|offer_accepted|offer_sent_at|schema cache/.test(msg);
+      if (!window._reminderSyncWarned) {
+        window._reminderSyncWarned = true;
+        toast(offerColMissing
+          ? '⚠ Offer saved on this device. To sync offers across your team (and stop duplicate sends), run the shift_reminders SQL in Supabase once.'
+          : '⚠ Saved locally only — Supabase sync failed. Run the shift_reminders SQL in Supabase to enable team sync.',
+          'info');
+      }
     }
   } catch(e) {
     console.warn('Reminder sync exception:', e);
-    toast('⚠ Reminder saved locally only — could not reach Supabase.', 'error');
+    if (!window._reminderSyncWarned) {
+      window._reminderSyncWarned = true;
+      toast('⚠ Saved on this device only — could not reach Supabase.', 'info');
+    }
   }
 }
 function subscribeToReminderChanges() {
@@ -4742,7 +4756,7 @@ function renderAvailablePanel() {
     }).join('');
     return `<div style="margin-bottom:16px;">
       <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;margin:2px 0 8px;font-family:var(--mono);">${dLabel} · ${slots.length} open</div>
-      <div class="standby-panel-grid" style="padding:0;">${cards}</div>
+      <div class="available-grid">${cards}</div>
     </div>`;
   }).join('');
 }
@@ -6221,7 +6235,7 @@ function renderOfferToStandbyBlock(slot) {
       return `<button class="btn btn-ghost btn-sm" disabled title="No phone number on file">${label} \u00b7 no \u260e</button>`;
     }
     if (already) {
-      return `<button class="btn btn-ghost btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(name)}')" title="Re-send the offer">\u2713 ${label} \u00b7 re-send</button>`;
+      return `<button class="btn btn-ghost btn-sm" onclick="resendOfferToStandby('${idAttr}','${escapeAttr(name)}')" title="Already offered — re-send the WhatsApp message">\u2713 ${label} \u00b7 re-send</button>`;
     }
     return `<button class="btn btn-amber btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(name)}')" title="Send this slot to ${escapeHtml(name)} via WhatsApp">\ud83d\udce4 ${label}</button>`;
   }).join('');
@@ -6236,6 +6250,13 @@ function renderOfferToStandbyBlock(slot) {
     <div class="standby-actions" style="margin-top:0;">${chips}${offerAll}</div>
     ${sentNote}
   </div>`;
+}
+
+// Confirm before re-sending an offer to a worker who was already offered, so a
+// stray click (or a teammate seeing the card) doesn't fire a duplicate WhatsApp.
+async function resendOfferToStandby(shiftId, workerName) {
+  if (!confirm(`Re-send this slot offer to ${workerName}? They were already offered it.`)) return;
+  await offerSlotToStandby(shiftId, workerName);
 }
 
 // Quick-send the open slot to one standby worker (mirrors manualSendReminder).
