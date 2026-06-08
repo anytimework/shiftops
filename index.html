@@ -1633,6 +1633,13 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         <select id="wf-disliked-select" onchange="addDislikedOutlet(this.value); this.value='';"></select>
       </div>
     </div>
+    <div class="form-row" id="wf-bans-row" style="display:none;">
+      <label style="color:var(--red);">🚫 Outlets that have banned this worker</label>
+      <div class="ms-picker" id="wf-bans-picker">
+        <div class="ms-chips" id="wf-bans-chips"></div>
+      </div>
+      <div class="sub-text" style="margin-top:4px;color:var(--text3);">Set by the outlet (or by the assistant). Remove a chip to lift that outlet's ban.</div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-worker-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="worker-save-btn" onclick="saveWorker()">Add worker</button>
@@ -1822,6 +1829,9 @@ const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
 const INTERNAL_LOGIN_TTL_MS = 12 * 60 * 60 * 1000;
 
 function loadProfileMeta() {
+  // Synchronous bootstrap from localStorage so profileMeta is never undefined
+  // before the async Supabase load completes. loadProfileMetaRemote() then
+  // overlays the team-wide copy from Supabase if present.
   try {
     const parsed = JSON.parse(localStorage.getItem('profile_meta_v24') || '{}');
     return { workers: parsed.workers || {}, outlets: parsed.outlets || {} };
@@ -1829,8 +1839,42 @@ function loadProfileMeta() {
     return { workers:{}, outlets:{} };
   }
 }
-function saveProfileMeta() {
+// Pull the team-wide profileMeta from Supabase (app_settings, key='profile_meta').
+// Mirrors the shift_reminders pattern: localStorage is loaded first for instant
+// availability, then Supabase overlays it if a row exists. If Supabase is empty
+// but localStorage has data (e.g. bans set before this migration), push the local
+// copy up so it becomes the shared source of truth.
+async function loadProfileMetaRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'profile_meta').maybeSingle();
+    if (error) { console.warn('profileMeta remote load failed:', error.message); return; }
+    if (data && data.value && (Object.keys(data.value.workers || {}).length || Object.keys(data.value.outlets || {}).length)) {
+      profileMeta = { workers: data.value.workers || {}, outlets: data.value.outlets || {} };
+      localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+    } else {
+      // Supabase has no profileMeta yet — seed it from whatever is in localStorage
+      const local = loadProfileMeta();
+      if (Object.keys(local.workers).length || Object.keys(local.outlets).length) {
+        await saveProfileMeta();
+      }
+    }
+  } catch(e) {
+    console.warn('profileMeta remote load error:', e);
+  }
+}
+async function saveProfileMeta() {
+  // Write-through: localStorage immediately (instant + offline), then Supabase
+  // so bans/restrictions sync across devices and the whole ops team.
   localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+  try {
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'profile_meta', value: profileMeta, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) console.warn('profileMeta remote save failed:', error.message);
+  } catch(e) {
+    console.warn('profileMeta remote save error:', e);
+  }
 }
 function loadShiftComments() {
   try { return JSON.parse(localStorage.getItem('shift_comments_v27') || '{}'); }
@@ -2001,6 +2045,13 @@ async function init() {
   updateDateLabel();
   await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
   await loadShifts();
+  // Pull team-wide worker/outlet profile metadata (bans, restrictions, notes)
+  // from Supabase, overlaying the localStorage bootstrap. Refresh dependent
+  // views once it lands so synced bans/restrictions appear without a reload.
+  loadProfileMetaRemote().then(() => {
+    try { if (typeof loadWorkerCards === 'function' && document.getElementById('page-workers')?.style.display !== 'none') loadWorkerCards(); } catch(e){}
+    try { if (typeof loadOutletsList === 'function' && document.getElementById('page-outlets')?.style.display !== 'none') loadOutletsList(); } catch(e){}
+  }).catch(()=>{});
   await loadCompletedTasks();
   updateCompletedNavBadge();
   updateSidebarDate();
@@ -7589,6 +7640,45 @@ function removeDislikedOutlet(name) {
   wfDislikedOutlets = wfDislikedOutlets.filter(o => normProfileKey(o) !== normProfileKey(name));
   renderDislikedOutletPicker();
 }
+// Outlet-side bans: which outlets have barred THIS worker (outlet.banned_workers).
+// Distinct from disliked_outlets (worker's own avoid list). Read-only list with
+// the ability to lift a ban, which edits the outlet's profile, not the worker's.
+let wfBanWorkerName = '';
+function outletsBanningWorker(workerName) {
+  const wk = normProfileKey(workerName);
+  const result = [];
+  Object.entries(profileMeta.outlets || {}).forEach(([oKey, meta]) => {
+    const banned = (meta.banned_workers || []).map(normProfileKey);
+    if (banned.includes(wk)) {
+      const display = (allOutlets.find(o => normProfileKey(o.name) === oKey) || {}).name || oKey;
+      result.push(display);
+    }
+  });
+  return result.sort((a,b) => String(a).localeCompare(String(b)));
+}
+function renderWorkerBans() {
+  const row = document.getElementById('wf-bans-row');
+  const chips = document.getElementById('wf-bans-chips');
+  if (!row || !chips) return;
+  const bans = wfBanWorkerName ? outletsBanningWorker(wfBanWorkerName) : [];
+  if (!bans.length) { row.style.display = 'none'; chips.innerHTML = ''; return; }
+  row.style.display = 'block';
+  chips.innerHTML = bans.map(outletName =>
+    `<span class="ms-chip" style="background:rgba(239,68,68,0.15);border-color:var(--red);color:var(--red);">${escapeHtml(outletName)}<button type="button" title="Lift this ban" onclick="liftWorkerBanFromOutlet('${escapeAttr(outletName)}')">×</button></span>`
+  ).join('');
+}
+async function liftWorkerBanFromOutlet(outletName) {
+  if (!wfBanWorkerName) return;
+  const oKey = normProfileKey(outletName);
+  const existing = profileMeta.outlets[oKey];
+  if (!existing) return;
+  const wk = normProfileKey(wfBanWorkerName);
+  const list = (existing.banned_workers || []).filter(n => normProfileKey(n) !== wk);
+  profileMeta.outlets[oKey] = { ...existing, banned_workers: list };
+  saveProfileMeta();
+  renderWorkerBans();
+  toast(`Lifted ${outletName}'s ban on ${wfBanWorkerName}`);
+}
 function resetWorkerModal() {
   editingWorkerId = null;
   document.getElementById('worker-modal-title').textContent = 'Add worker';
@@ -7601,6 +7691,8 @@ function resetWorkerModal() {
   document.getElementById('wf-notes').value = '';
   wfDislikedOutlets = [];
   renderDislikedOutletPicker();
+  wfBanWorkerName = '';
+  renderWorkerBans();
 }
 function openAddWorkerModal() { resetWorkerModal(); document.getElementById('add-worker-modal').classList.add('open'); }
 function editWorker(id) {
@@ -7618,6 +7710,8 @@ function editWorker(id) {
   document.getElementById('wf-notes').value = meta.notes || '';
   wfDislikedOutlets = Array.isArray(meta.disliked_outlets) ? meta.disliked_outlets.slice() : [];
   renderDislikedOutletPicker();
+  wfBanWorkerName = w.name || '';
+  renderWorkerBans();
   document.getElementById('add-worker-modal').classList.add('open');
 }
 
@@ -7634,7 +7728,7 @@ async function saveWorker() {
     notes: document.getElementById('wf-notes').value.trim(),
     disliked_outlets: wfDislikedOutlets.slice()
   };
-  saveProfileMeta();
+  await saveProfileMeta();
   toast(editingWorkerId ? 'Worker updated!' : 'Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
   editingWorkerId = null;
@@ -7699,7 +7793,7 @@ async function saveOutlet() {
     notes: document.getElementById('of-notes').value.trim(),
     banned_workers: splitProfileList(document.getElementById('of-banned-workers').value)
   };
-  saveProfileMeta();
+  await saveProfileMeta();
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
   editingOutletId = null;
@@ -11238,7 +11332,7 @@ async function executeAIAction(actionJson) {
         if (idx > -1) list.splice(idx, 1);
       }
       profileMeta.outlets[oKey] = { ...existing, banned_workers: list };
-      saveProfileMeta();
+      await saveProfileMeta();
       // Refresh any open views that surface bans/restrictions.
       try { await loadWorkerCards(); } catch(e) {}
       try { loadOutletsList(); } catch(e) {}
