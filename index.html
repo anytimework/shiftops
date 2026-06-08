@@ -2055,8 +2055,20 @@ async function init() {
   // from Supabase, overlaying the localStorage bootstrap. Refresh dependent
   // views once it lands so synced bans/restrictions appear without a reload.
   loadProfileMetaRemote().then(() => {
+    // profileMeta (team-wide bans / disliked-outlet restrictions) has now overlaid
+    // the localStorage bootstrap. Re-render every view that filters on it so synced
+    // bans/restrictions take effect immediately on devices that didn't set them —
+    // not just the Workers/Outlets admin pages. Without this, the standby "Offer
+    // to standby" chips on the dashboard were computed with the stale local copy,
+    // so a worker banned at an outlet on one device still showed as offerable on
+    // another device until that device happened to have the ban in its own cache.
     try { if (typeof loadWorkerCards === 'function' && document.getElementById('page-workers')?.style.display !== 'none') loadWorkerCards(); } catch(e){}
     try { if (typeof loadOutletsList === 'function' && document.getElementById('page-outlets')?.style.display !== 'none') loadOutletsList(); } catch(e){}
+    // Offer-to-standby chips (Replacement-needed + Available panels) and the
+    // attendance day standby panel — these are the surfaces showing eligible
+    // standby workers per outlet, so they must respect the freshly-synced bans.
+    try { if (typeof rerenderOfferPanels === 'function') rerenderOfferPanels(); } catch(e){}
+    try { if (typeof renderStandbyDayPanel === 'function') renderStandbyDayPanel(); } catch(e){}
   }).catch(()=>{});
   await loadCompletedTasks();
   updateCompletedNavBadge();
@@ -2268,6 +2280,31 @@ function subscribeToReminderChanges() {
   } catch(e) { console.warn('Reminder real-time subscription failed:', e); }
   // Polling fallback — catches any missed real-time events every 30s
   setInterval(silentSyncReminders, 30000);
+  // Also re-pull team-wide profileMeta (bans / disliked-outlet restrictions) on the
+  // same cadence. profileMeta only loaded once at boot, so a ban set on one device
+  // mid-session never reached an already-open session on another device until a full
+  // reload. This keeps eligible-standby filtering consistent across all open sessions.
+  setInterval(silentSyncProfileMeta, 30000);
+}
+async function silentSyncProfileMeta() {
+  // Re-fetch the shared profileMeta and, only if the ban/restriction set actually
+  // changed, refresh the surfaces that filter on it. Avoids needless re-renders.
+  try {
+    const before = JSON.stringify(profileMeta);
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'profile_meta').maybeSingle();
+    if (error || !data || !data.value) return;
+    const next = { workers: data.value.workers || {}, outlets: data.value.outlets || {} };
+    const after = JSON.stringify(next);
+    if (after === before) return; // nothing changed — skip re-render
+    profileMeta = next;
+    localStorage.setItem('profile_meta_v24', after);
+    // Refresh every view that gates on bans/restrictions so synced changes apply now.
+    try { if (typeof rerenderOfferPanels === 'function') rerenderOfferPanels(); } catch(e){}
+    try { if (typeof renderStandbyDayPanel === 'function') renderStandbyDayPanel(); } catch(e){}
+    try { if (typeof loadWorkerCards === 'function' && document.getElementById('page-workers')?.style.display !== 'none') loadWorkerCards(); } catch(e){}
+    try { if (typeof loadOutletsList === 'function' && document.getElementById('page-outlets')?.style.display !== 'none') loadOutletsList(); } catch(e){}
+  } catch(e) { /* silent — next tick retries */ }
 }
 async function silentSyncReminders() {
   // Fetch latest from Supabase and update only changed panels (no scroll jump, no full re-render)
