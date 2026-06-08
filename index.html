@@ -275,6 +275,16 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .form-row textarea { min-height: 76px; resize: vertical; line-height: 1.45; }
 .form-row input:focus, .form-row select:focus, .form-row textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
 .form-row select option { background: var(--bg2); }
+/* Multi-select outlet picker (chips + dropdown) */
+.ms-picker { border: 1px solid var(--border2); background: var(--bg); border-radius: var(--radius); padding: 8px; }
+.ms-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.ms-chips:empty { display: none; }
+.ms-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 4px 6px 4px 10px; border-radius: 999px; background: var(--accent-dim); color: var(--accent); border: 1px solid rgba(91,148,249,0.3); }
+.ms-chip button { border: none; background: rgba(91,148,249,0.18); color: var(--accent); width: 16px; height: 16px; border-radius: 50%; cursor: pointer; font-size: 12px; line-height: 1; display: flex; align-items: center; justify-content: center; padding: 0; }
+.ms-chip button:hover { background: var(--accent); color: #fff; }
+.ms-picker select { width: 100%; font-size: 13px; padding: 8px 12px; border-radius: var(--radius); border: 1px solid var(--border2); background: var(--bg2); color: var(--text); font-family: var(--font); }
+.ms-picker select:focus { outline: none; border-color: var(--accent); }
+.ms-empty { font-size: 12px; color: var(--text3); padding: 2px 2px 8px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .divider { height: 1px; background: var(--border); margin: 14px 0; }
@@ -1616,7 +1626,13 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       <div class="form-row"><label>Account / PayNow no.</label><input type="text" id="wf-bank" placeholder="e.g. 9xxx xxxx"></div>
     </div>
     <div class="form-row"><label>Profile notes</label><textarea id="wf-notes" rows="4" placeholder="e.g. Watch lateness; check location 1 hour before shift"></textarea></div>
-    <div class="form-row"><label>Outlets this worker should not be assigned to</label><textarea id="wf-disliked-outlets" rows="3" placeholder="One outlet per line, e.g. Pasta Bar"></textarea></div>
+    <div class="form-row"><label>Outlets this worker should not be assigned to</label>
+      <div class="ms-picker" id="wf-disliked-picker">
+        <div class="ms-chips" id="wf-disliked-chips"></div>
+        <div class="ms-empty" id="wf-disliked-empty">No outlet restrictions. Select an outlet below to add one.</div>
+        <select id="wf-disliked-select" onchange="addDislikedOutlet(this.value); this.value='';"></select>
+      </div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-worker-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="worker-save-btn" onclick="saveWorker()">Add worker</button>
@@ -7480,6 +7496,43 @@ async function deleteWorker(id) {
   await loadWorkerCards(); await loadWorkers(); updateWorkerDatalist();
 }
 
+// ── Multi-select "disliked outlets" picker (Edit/Add worker) ──────
+// Holds the working selection while the worker modal is open. Stored as an
+// array of canonical outlet names (matching allOutlets[].name).
+let wfDislikedOutlets = [];
+function renderDislikedOutletPicker() {
+  const chips = document.getElementById('wf-disliked-chips');
+  const empty = document.getElementById('wf-disliked-empty');
+  const select = document.getElementById('wf-disliked-select');
+  if (!chips || !select) return;
+  // Chips for current selection (editable — each removable via ×).
+  chips.innerHTML = wfDislikedOutlets.map(name =>
+    `<span class="ms-chip">${escapeHtml(name)}<button type="button" title="Remove" onclick="removeDislikedOutlet('${escapeAttr(name)}')">×</button></span>`
+  ).join('');
+  if (empty) empty.style.display = wfDislikedOutlets.length ? 'none' : 'block';
+  // Dropdown lists outlets not already selected. Any stale free-text entries
+  // (from older data) that no longer match an outlet still show as chips above,
+  // so nothing is silently lost — they can be removed but not re-added.
+  const selectedKeys = wfDislikedOutlets.map(normProfileKey);
+  const opts = allOutlets
+    .filter(o => !selectedKeys.includes(normProfileKey(o.name)))
+    .sort((a,b) => String(a.name).localeCompare(String(b.name)))
+    .map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`)
+    .join('');
+  select.innerHTML = `<option value="">+ Add an outlet…</option>${opts}`;
+}
+function addDislikedOutlet(name) {
+  const n = String(name || '').trim();
+  if (!n) return;
+  if (!wfDislikedOutlets.map(normProfileKey).includes(normProfileKey(n))) {
+    wfDislikedOutlets.push(n);
+    renderDislikedOutletPicker();
+  }
+}
+function removeDislikedOutlet(name) {
+  wfDislikedOutlets = wfDislikedOutlets.filter(o => normProfileKey(o) !== normProfileKey(name));
+  renderDislikedOutletPicker();
+}
 function resetWorkerModal() {
   editingWorkerId = null;
   document.getElementById('worker-modal-title').textContent = 'Add worker';
@@ -7490,7 +7543,8 @@ function resetWorkerModal() {
   document.getElementById('wf-method').value = 'PayNow';
   document.getElementById('wf-bank').value = '';
   document.getElementById('wf-notes').value = '';
-  document.getElementById('wf-disliked-outlets').value = '';
+  wfDislikedOutlets = [];
+  renderDislikedOutletPicker();
 }
 function openAddWorkerModal() { resetWorkerModal(); document.getElementById('add-worker-modal').classList.add('open'); }
 function editWorker(id) {
@@ -7506,7 +7560,8 @@ function editWorker(id) {
   document.getElementById('wf-bank').value = w.bank_details || '';
   const meta = workerProfile(w.name);
   document.getElementById('wf-notes').value = meta.notes || '';
-  document.getElementById('wf-disliked-outlets').value = (meta.disliked_outlets || []).join('\n');
+  wfDislikedOutlets = Array.isArray(meta.disliked_outlets) ? meta.disliked_outlets.slice() : [];
+  renderDislikedOutletPicker();
   document.getElementById('add-worker-modal').classList.add('open');
 }
 
@@ -7521,7 +7576,7 @@ async function saveWorker() {
   if (oldWorker && normProfileKey(oldWorker.name) !== normProfileKey(name)) delete profileMeta.workers[normProfileKey(oldWorker.name)];
   profileMeta.workers[normProfileKey(name)] = {
     notes: document.getElementById('wf-notes').value.trim(),
-    disliked_outlets: splitProfileList(document.getElementById('wf-disliked-outlets').value)
+    disliked_outlets: wfDislikedOutlets.slice()
   };
   saveProfileMeta();
   toast(editingWorkerId ? 'Worker updated!' : 'Worker added!');
@@ -10629,6 +10684,20 @@ function buildSystemContext() {
 
   const outletList = allOutlets.map(o => `${o.name} (${normaliseCountry(o.country||'')})`).join(', ');
 
+  // Assignment restrictions (bans / do-not-assign) so the assistant can refuse
+  // a banned booking up front instead of proposing it. Pulled from profileMeta:
+  // outlet.banned_workers and worker.disliked_outlets.
+  const restrictionLines = [];
+  Object.entries(profileMeta.outlets || {}).forEach(([key, meta]) => {
+    const outletName = (allOutlets.find(o => normProfileKey(o.name) === key) || {}).name || key;
+    (meta.banned_workers || []).forEach(wn => restrictionLines.push(`${wn} — BANNED from ${outletName}`));
+  });
+  Object.entries(profileMeta.workers || {}).forEach(([key, meta]) => {
+    const wName = (allWorkers.find(w => normProfileKey(w.name) === key) || {}).name || key;
+    (meta.disliked_outlets || []).forEach(on => restrictionLines.push(`${wName} — should NOT be assigned to ${on}`));
+  });
+  const restrictionList = restrictionLines.length ? restrictionLines.join('\n') : 'None on record.';
+
   return `
 === SYSTEM CONTEXT (live data) ===
 Current user: ${currentInternalUser || 'Unknown'}
@@ -10652,6 +10721,9 @@ WORKERS (up to 60, with phone):
 ${workerList}
 
 OUTLETS: ${outletList}
+
+ASSIGNMENT RESTRICTIONS (bans / do-not-assign — NEVER create a shift that violates these):
+${restrictionList}
 
 BUSINESS KNOWLEDGE (${allKnowledge.length} entries):
 ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e.outlet+')':''} ${e.topic}: ${e.content}`).join('\n')||'No entries yet.'}
@@ -10688,6 +10760,8 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
 {"type": "searchWorker", "query": "<partial or full name to search>"}
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
+{"type": "banWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
+{"type": "unbanWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
 {"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
 \`\`\`
@@ -10735,6 +10809,8 @@ RULES:
 - If you can't find an outlet/client in the OUTLETS list, use searchOutlet to do a live lookup.
 - When a user tells you a fact, rule, policy or requirement (e.g. attire, SOPs, outlet info), AUTOMATICALLY save it using saveKnowledge WITHOUT asking for confirmation — just do it and confirm you saved it.
 - IMPORTANT: saveKnowledge is ONLY for general business knowledge (SOPs, rules, policies). For updating a specific worker's phone, payment method, country, or notes, ALWAYS use updateWorkerProfile instead — never save personal worker data to business knowledge.
+- BANNING: When the user says a worker is banned, barred, blacklisted, or "should not / cannot be assigned" to a specific outlet (e.g. "Ahn Duc is banned from Les Bouchons"), use the banWorkerFromOutlet action with the exact worker and outlet names. To lift a ban ("unban", "allow again", "remove the ban"), use unbanWorkerFromOutlet. This is NOT business knowledge — do not use saveKnowledge for bans. If either the worker or the outlet name is ambiguous or not in context, look them up first (searchWorker / searchOutlet) before banning.
+- ENFORCING BANS: NEVER create or offer to create a shift (createShift, forceCreateShift, batchCreateSlots) that assigns a worker to an outlet they're banned from or marked do-not-assign for — check ASSIGNMENT RESTRICTIONS above first. If asked to do so, refuse and explain the worker is restricted there, and offer to lift the restriction if that's what they want. The system will also hard-block it, but you should catch it before proposing the booking.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - Speak naturally, like a helpful colleague.`;
 
@@ -10860,6 +10936,17 @@ async function executeAIAction(actionJson) {
       const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
 
+      // ── Assignment restriction (ban / disliked outlet) — hard block ──
+      // Mirrors the manual Add-shift UI: a banned worker cannot be assigned to
+      // that outlet, and this is NOT overridable via "confirm override".
+      const restriction = assignmentRestriction(w.name, outlet.name);
+      if (restriction) {
+        return `🚫 **Blocked — ${restriction}** I won't create this shift. To allow it, lift the restriction first (e.g. tell me "unban ${w.name} from ${outlet.name}" or update it in the worker/outlet settings).`;
+      }
+      if (isWorkerSuspended(w.name)) {
+        return `🚫 **Blocked — ${w.name} is currently suspended** and can't be assigned shifts.`;
+      }
+
       // ── Schedule conflict check ────────────────────────────────
       const toM = t => { const [h,m] = (t||'00:00').split(':').map(Number); return h*60+m; };
       const newStart = toM(a.start), newEnd = toM(a.end) || toM(a.start) + 60;
@@ -10905,11 +10992,20 @@ async function executeAIAction(actionJson) {
     }
 
     case 'forceCreateShift': {
-      // Same as createShift but skips conflict check (user explicitly confirmed override)
+      // Same as createShift but skips the SCHEDULE-CONFLICT check (user explicitly
+      // confirmed a double-booking override). A ban/suspension is a different
+      // matter and is still hard-blocked — a conflict override must not bypass it.
       const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
       if (!w) return `❌ Worker "${a.workerName}" not found in database`;
       const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
+      const fcRestriction = assignmentRestriction(w.name, outlet.name);
+      if (fcRestriction) {
+        return `🚫 **Blocked — ${fcRestriction}** A conflict override doesn't lift a ban. Lift the restriction first if you really want to assign them here.`;
+      }
+      if (isWorkerSuspended(w.name)) {
+        return `🚫 **Blocked — ${w.name} is currently suspended** and can't be assigned shifts.`;
+      }
       const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
       const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || w.country);
@@ -10957,6 +11053,18 @@ async function executeAIAction(actionJson) {
       const outlet = allOutlets.find(o => o.name.toLowerCase() === (a.outlet||'').toLowerCase());
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
       if (!Array.isArray(a.slots) || !a.slots.length) return `❌ No slots provided in batch`;
+      // Defensive: batch slots are normally "Available" (no worker), but if any
+      // slot names a worker, enforce the same ban/suspension block as createShift.
+      for (const slot of a.slots) {
+        const wn = String(slot.workerName || '').trim();
+        if (wn && wn.toLowerCase() !== 'available') {
+          const wMatch = allWorkers.find(x => x.name.toLowerCase() === wn.toLowerCase());
+          const realName = wMatch ? wMatch.name : wn;
+          const r = assignmentRestriction(realName, outlet.name);
+          if (r) return `🚫 **Blocked — ${r}** No slots created. Lift the restriction first.`;
+          if (isWorkerSuspended(realName)) return `🚫 **Blocked — ${realName} is suspended.** No slots created.`;
+        }
+      }
       const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
       const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || 'Singapore');
@@ -11045,6 +11153,37 @@ async function executeAIAction(actionJson) {
       } catch(e) {
         return `❌ Search failed: ${e.message}`;
       }
+    }
+
+    case 'banWorkerFromOutlet':
+    case 'unbanWorkerFromOutlet': {
+      const banning = a.type === 'banWorkerFromOutlet';
+      // Resolve canonical names against the live lists so the ban matches what
+      // assignmentRestriction() checks (it normalises names the same way).
+      const worker = allWorkers.find(x => normProfileKey(x.name) === normProfileKey(a.workerName));
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!worker) return `❌ Worker "${a.workerName}" not found. Try searching first.`;
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const oKey = normProfileKey(outlet.name);
+      const existing = profileMeta.outlets[oKey] || {};
+      const list = Array.isArray(existing.banned_workers) ? existing.banned_workers.slice() : [];
+      const already = list.map(normProfileKey).includes(normProfileKey(worker.name));
+      if (banning) {
+        if (already) return `ℹ️ **${worker.name}** is already banned from **${outlet.name}**.`;
+        list.push(worker.name);
+      } else {
+        if (!already) return `ℹ️ **${worker.name}** is not currently banned from **${outlet.name}**.`;
+        const idx = list.findIndex(n => normProfileKey(n) === normProfileKey(worker.name));
+        if (idx > -1) list.splice(idx, 1);
+      }
+      profileMeta.outlets[oKey] = { ...existing, banned_workers: list };
+      saveProfileMeta();
+      // Refresh any open views that surface bans/restrictions.
+      try { await loadWorkerCards(); } catch(e) {}
+      try { loadOutletsList(); } catch(e) {}
+      return banning
+        ? `🚫 **${worker.name}** is now banned from **${outlet.name}** — they won't be suggested or assignable there (a warning shows if anyone tries).`
+        : `✅ Ban lifted — **${worker.name}** can be assigned to **${outlet.name}** again.`;
     }
 
     case 'saveKnowledge': {
