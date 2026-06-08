@@ -2126,7 +2126,12 @@ async function loadReminders() {
           replacementAt: r.replacement_at || '',
           completedAt: r.completed_at || '',
           lastReminderAt: r.last_reminder_at || '',
-        replacedWorker: r.replaced_worker || ''
+          replacedWorker: r.replaced_worker || '',
+          offeredNames: (function(){ try { return Array.isArray(r.offered_names) ? r.offered_names : JSON.parse(r.offered_names || '[]'); } catch(e){ return []; } })(),
+          offerSentAt: r.offer_sent_at || '',
+          offerAccepted: !!r.offer_accepted,
+          offerAcceptedBy: r.offer_accepted_by || '',
+          offerAcceptedAt: r.offer_accepted_at || ''
         };
       });
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -2162,6 +2167,11 @@ async function persistReminder(shiftId) {
       replaced_worker: r.replacedWorker || null,
       completed_at: r.completedAt || null,
       last_reminder_at: r.lastReminderAt || null,
+      offered_names: Array.isArray(r.offeredNames) ? r.offeredNames : [],
+      offer_sent_at: r.offerSentAt || null,
+      offer_accepted: !!r.offerAccepted,
+      offer_accepted_by: r.offerAcceptedBy || null,
+      offer_accepted_at: r.offerAcceptedAt || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -2314,7 +2324,7 @@ async function markWorkerAcknowledged(shiftId) {
   toast(`✓ ${s ? (String(s.worker_name||'Worker').split(' ')[0]) : 'Worker'} marked acknowledged`);
 }
 async function undoFullAck(shiftId) {
-  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '' };
+  shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '', offeredNames: [], offerSentAt: '', offerAccepted: false, offerAcceptedBy: '', offerAcceptedAt: '' };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
@@ -3809,13 +3819,36 @@ function resetOutletJobRates() {
 
 
 async function loadStandbyList() {
-  // Uses Supabase table "standby_workers" when available. If the SQL table has not been created yet,
-  // it falls back to browser storage so the feature still works in the preview build.
+  // Uses Supabase table "standby_workers". Falls back to browser storage only if
+  // the table genuinely can't be reached (missing table / RLS / network), and
+  // logs why so a silent local-only state is never mistaken for a synced one.
   try {
     const { data, error } = await supabaseClient.from('standby_workers').select('*').order('available_date', { ascending:true }).order('created_at', { ascending:false });
     if (error) throw error;
     allStandby = data || [];
+    // One-time migration: push any local-only standby entries (saved while the
+    // table was missing) up to Supabase, then clear the local cache so they
+    // aren't re-uploaded. Matches on id to avoid duplicates.
+    try {
+      const local = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
+      if (local.length) {
+        const dbIds = new Set((data || []).map(r => String(r.id)));
+        const toMigrate = local.filter(r => !dbIds.has(String(r.id)));
+        if (toMigrate.length) {
+          const { error: migErr } = await supabaseClient.from('standby_workers').insert(toMigrate);
+          if (!migErr) {
+            localStorage.removeItem('standby_workers_local');
+            const { data: refreshed } = await supabaseClient.from('standby_workers').select('*').order('available_date', { ascending:true }).order('created_at', { ascending:false });
+            allStandby = refreshed || allStandby;
+            console.info(`Migrated ${toMigrate.length} local standby entr${toMigrate.length===1?'y':'ies'} to Supabase.`);
+          } else {
+            console.warn('Standby migration failed:', migErr.message);
+          }
+        }
+      }
+    } catch(me) { console.warn('Standby migration error:', me); }
   } catch (e) {
+    console.warn('Standby list: could not load from Supabase, using this device only:', e?.message || e);
     allStandby = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
   }
 }
@@ -3829,19 +3862,27 @@ function saveStandbyLocal(record) {
 
 async function deleteStandbyWorker(id) {
   if (!confirm('Remove this worker from standby?')) return;
+  await removeStandbyWorker(id);
+}
+
+// Silent removal (no confirm) — used when auto-assigning an accepted standby worker.
+async function removeStandbyWorker(id) {
   let removed = false;
+  let localOnly = false;
   try {
     const { error } = await supabaseClient.from('standby_workers').delete().eq('id', id);
     if (error) throw error;
     removed = true;
   } catch (e) {
+    console.warn('Standby DB delete failed, removing from this device only:', e?.message || e);
     const rows = JSON.parse(localStorage.getItem('standby_workers_local') || '[]').filter(x => String(x.id) !== String(id));
     localStorage.setItem('standby_workers_local', JSON.stringify(rows));
     allStandby = rows;
     removed = true;
+    localOnly = true;
   }
   if (removed) {
-    toast('Standby worker removed');
+    toast(localOnly ? '⚠️ Removed on this device only — not synced to team.' : 'Standby worker removed', localOnly ? 'error' : 'success');
     await loadStandbyList();
     renderTable();
     renderStandbyPage();
@@ -3914,17 +3955,23 @@ async function saveStandbyWorker() {
     created_by: currentInternalUser || 'Jon',
     created_at: new Date().toISOString()
   };
+  let syncedToDb = false;
   try {
     const { error } = await supabaseClient.from('standby_workers').insert(record);
     if (error) throw error;
+    syncedToDb = true;
   } catch (e) {
+    console.warn('Standby DB insert failed, saving to this device only:', e?.message || e);
     saveStandbyLocal(record);
   }
   if (!allWorkers.find(x => String(x.name).toLowerCase() === workerName.toLowerCase())) {
     try { await supabaseClient.from('workers').insert({ name: workerName }); await loadWorkers(); } catch(e) {}
   }
   closeStandbyModal();
-  toast('Standby worker added');
+  toast(syncedToDb
+    ? 'Standby worker added'
+    : '⚠️ Saved on this device only — not synced to team. Check the standby_workers table / RLS.',
+    syncedToDb ? 'success' : 'error');
   await loadStandbyList();
   renderTable();
   renderStandbyPage();
@@ -4099,6 +4146,22 @@ function getOpenTasks() {
         completedAt
       });
     }
+    // Standby worker accepted an offered slot — needs ops to confirm the assignment.
+    // Stays relevant for today/upcoming shifts only.
+    if (r.offerAccepted && r.offerAcceptedBy && !s.cancelled && s.shift_date >= todayStr) {
+      tasks.push({
+        type: 'offer_accepted',
+        id: s.id,
+        worker: r.offerAcceptedBy,
+        outlet: s.outlet || '',
+        role: s.role || '',
+        date: s.shift_date,
+        start, end,
+        isToday,
+        at: r.offerAcceptedAt || '',
+        done: false
+      });
+    }
       });
   // Sort:
   //  1) incomplete tasks always on top; completed (collapsed) tasks at the bottom.
@@ -4181,6 +4244,7 @@ function renderReplacementPanel() {
       const tRange = shiftTimeRange(r.start, r.end);
       const whoTxt = r.worker ? `${escapeHtml(r.worker)} dropped out` : 'Worker dropped out';
       const when = r.at ? `<span class="task-when">${relTime(r.at)}</span>` : '';
+      const offerBlock = renderOfferToStandbyBlock(r);
       return `<div class="task-card task-replacement">
         <div class="task-head">
           <span class="task-tag tag-replacement">🔁 Replacement needed</span>
@@ -4191,6 +4255,7 @@ function renderReplacementPanel() {
           <div class="task-title">${whoTxt} — slot open${r.role ? ' · '+escapeHtml(r.role) : ''}</div>
           <div class="task-shift">📅 <strong>${shiftDateLabel(r.date)}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>
           <div class="task-meta">${escapeHtml(r.outlet)} · slot returned to Available</div>
+          ${offerBlock}
         </div>
         <div class="task-actions">
           <button class="btn btn-primary btn-sm" onclick="jumpToShiftFromReplacement('${escapeAttr(String(r.id))}','${escapeAttr(String(r.date||''))}')">Assign / re-fill</button>
@@ -4265,6 +4330,25 @@ function renderTasksPanel() {
   }).join('');
 }
 function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
+    if (t.type === 'offer_accepted') {
+      return `<div class="task-card task-replacement" style="border-color:rgba(52,211,153,0.4);">
+        <div class="task-head">
+          <span class="task-tag tag-done">✅ Standby accepted</span>
+          ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+          ${when}
+        </div>
+        <div class="task-body">
+          <div class="task-title">${escapeHtml(t.worker)} accepted the open slot${t.role ? ' · '+escapeHtml(t.role) : ''}</div>
+          ${shiftLine}
+          <div class="task-meta">👤 <strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)}</div>
+        </div>
+        <div class="task-actions">
+          <button class="btn btn-primary btn-sm" onclick="assignAcceptedStandby('${escapeAttr(String(t.id))}')" title="Assign this worker into the open slot and clear it from Replacement needed">Assign ${escapeHtml(t.worker)}</button>
+          <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearOfferAccepted('${escapeAttr(String(t.id))}')">Dismiss</button>
+        </div>
+      </div>`;
+    }
     if (t.type === 'dispute') {
       const kindTxt = t.kind === 'cancel' ? 'wants to cancel'
         : (t.kind === 'cantmake' ? "can't make this shift" : 'flagged an issue');
@@ -4412,7 +4496,7 @@ async function loadTaskShiftCache() {
   const ids = [];
   for (const [id, r] of Object.entries(shiftReminders || {})) {
     if (!r) continue;
-    if (r.disputed || r.lateNotified || r.needsReplacement) ids.push(String(id));
+    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) ids.push(String(id));
   }
   taskShiftCache = {};
   // Always fold in the currently-loaded shifts (so same-day items work even
@@ -4632,6 +4716,15 @@ function renderAvailablePanel() {
       const sym = currencySymbolForOutlet(s.outlet);
       const rate = (s.rate != null && s.rate !== '') ? `${sym}${parseFloat(s.rate || 0).toFixed(2)}/hr` : '';
       const role = s.role ? escapeHtml(s.role) : 'Any role';
+      const offerSlot = {
+        id: s.id,
+        outlet: s.outlet || '',
+        role: s.role || '',
+        date: s.shift_date || d,
+        start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+        end: s.scheduled_end ? s.scheduled_end.slice(0,5) : ''
+      };
+      const offerBlock = renderOfferToStandbyBlock(offerSlot);
       return `<div class="task-card" id="avail-card-${escapeAttr(String(id))}">
         <div class="task-head">
           <span class="task-tag" style="background:var(--amber-dim);color:var(--amber);">🪑 Open slot</span>
@@ -4640,6 +4733,7 @@ function renderAvailablePanel() {
         <div class="task-body">
           <div class="task-title">${escapeHtml(s.outlet || '—')}${role ? ' · ' + role : ''}</div>
           <div class="task-meta" style="margin-top:3px;">${rate}</div>
+          ${offerBlock}
           <div id="avail-assign-${escapeAttr(String(id))}" style="margin-top:10px;">
             <button class="btn btn-primary btn-sm" onclick="openAvailableAssign('${escapeAttr(String(id))}')">+ Assign worker</button>
           </div>
@@ -6046,6 +6140,267 @@ async function manualSendReminder(shiftId, type) {
   }
 }
 
+// Resolve an offerable open slot by id from EITHER source:
+//  • Replacement-needed slots (worker dropped out), or
+//  • Available slots (never-filled open shifts).
+// Returns a normalised {id, outlet, role, date, start, end} object or null.
+function resolveOfferableSlot(shiftId) {
+  const fromRepl = getReplacementNeeded().find(r => String(r.id) === String(shiftId));
+  if (fromRepl) return fromRepl;
+  const s = (availableSlots || []).find(x => String(x.id) === String(shiftId))
+         || (allShifts || []).find(x => String(x.id) === String(shiftId));
+  if (s && isOpenSlot(s)) {
+    return {
+      id: s.id,
+      outlet: s.outlet || '',
+      role: s.role || '',
+      date: s.shift_date || '',
+      start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+      end: s.scheduled_end ? s.scheduled_end.slice(0,5) : ''
+    };
+  }
+  return null;
+}
+function rerenderOfferPanels() {
+  try { renderReplacementPanel(); } catch(e){}
+  try { if (document.getElementById('available-modal')?.classList.contains('open')) renderAvailablePanel(); } catch(e){}
+}
+
+// ── Offer open slot to standby workers ───────────────────────────────────────
+// Returns the standby workers available on the slot's date who are NOT banned by
+// the outlet and have NOT marked the outlet as one they don't want to work at.
+// (Uses the same assignmentRestriction() gate as manual shift assignment.)
+function eligibleStandbyForSlot(slot) {
+  if (!slot || !slot.date) return [];
+  const outlet = slot.outlet || '';
+  const seen = new Set();
+  return standbyForDay(slot.date)
+    .filter(x => {
+      const name = String(x.worker_name || '').trim();
+      if (!name) return false;
+      const key = name.toLowerCase();
+      if (seen.has(key)) return false;       // de-dupe same worker listed twice
+      seen.add(key);
+      // Skip banned / disliked-outlet workers entirely so the option never shows.
+      if (assignmentRestriction(name, outlet)) return false;
+      return true;
+    });
+}
+
+function buildSlotOfferMessage(slot, workerName) {
+  const d = new Date((slot.date || '') + 'T00:00:00');
+  const dateStr = isNaN(d) ? (slot.date || '') : d.toLocaleDateString('en-SG', { weekday:'long', day:'numeric', month:'short' });
+  const tRange = shiftTimeRange(slot.start, slot.end);
+  const role = slot.role || '';
+  const outlet = slot.outlet || '';
+  return `🆕 *Shift Available — Want it?*\n\nHi ${workerName}! A shift just opened up that matches your standby availability:\n\n📅 *${dateStr}*\n🏠 *${outlet}*${tRange ? `\n⏰ ${tRange}` : ''}${role ? `\n👔 ${role}` : ''}\n\nReply *YES* to grab it (first to confirm gets it), or ignore if you're no longer free. 🙌`;
+}
+
+// Reusable "Offer slot to standby" block for any normalised open slot object
+// {id, outlet, role, date, start, end}. Used by BOTH the Replacement-needed
+// panel and the Available-slots panel. Banned / disliked-outlet workers are
+// excluded by eligibleStandbyForSlot so they never appear here.
+function renderOfferToStandbyBlock(slot) {
+  const rem = shiftReminders[slot.id] || {};
+  const offered = Array.isArray(rem.offeredNames) ? rem.offeredNames : [];
+  const offeredKeys = offered.map(n => String(n).toLowerCase());
+  const idAttr = escapeAttr(String(slot.id));
+  if (rem.offerAccepted && rem.offerAcceptedBy) {
+    return `<div class="alert alert-green" style="margin-top:8px;padding:8px 10px;font-size:11px;"><span class="alert-icon">\u2705</span><span><strong>${escapeHtml(rem.offerAcceptedBy)}</strong> accepted this slot \u2014 confirm in the Tasks panel.</span></div>`;
+  }
+  const eligible = eligibleStandbyForSlot(slot);
+  if (!eligible.length) {
+    return `<div class="standby-meta" style="margin-top:8px;color:var(--text3);">No standby workers available for this date${slot.outlet ? ' / outlet' : ''}.</div>`;
+  }
+  const chips = eligible.map(x => {
+    const name = x.worker_name;
+    const hasPhone = !!workerPhone(name);
+    const already = offeredKeys.includes(String(name).toLowerCase());
+    const label = escapeHtml(name) + (x.preferred_time && x.preferred_time !== 'Any time' ? ` \u00b7 ${escapeHtml(x.preferred_time)}` : '');
+    if (!hasPhone) {
+      return `<button class="btn btn-ghost btn-sm" disabled title="No phone number on file">${label} \u00b7 no \u260e</button>`;
+    }
+    if (already) {
+      return `<button class="btn btn-ghost btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(name)}')" title="Re-send the offer">\u2713 ${label} \u00b7 re-send</button>`;
+    }
+    return `<button class="btn btn-amber btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(name)}')" title="Send this slot to ${escapeHtml(name)} via WhatsApp">\ud83d\udce4 ${label}</button>`;
+  }).join('');
+  const eligibleWithPhone = eligible.filter(x => workerPhone(x.worker_name)).length;
+  const offerAll = eligibleWithPhone > 1
+    ? `<button class="btn btn-primary btn-sm" onclick="offerSlotToAllStandby('${idAttr}')" title="Offer to all eligible standby workers; first YES gets it">\ud83d\udce3 Offer to all (${eligibleWithPhone})</button>`
+    : '';
+  const sentNote = offered.length ? `<div class="standby-meta" style="margin-top:6px;color:var(--text3);">Offered to: ${escapeHtml(offered.join(', '))} — first to reply YES wins. When someone says yes, tap their name:</div>
+    <div class="standby-actions" style="margin-top:5px;">${offered.map(n => `<button class="btn btn-primary btn-sm" onclick="acceptAndAssignStandby('${idAttr}','${escapeAttr(n)}')" title="${escapeHtml(n)} said yes — confirm & assign them to this slot">✓ ${escapeHtml(n)} said yes → assign</button>`).join('')}</div>` : '';
+  return `<div style="margin-top:9px;border-top:1px dashed var(--border);padding-top:8px;">
+    <div class="standby-meta" style="margin-bottom:6px;font-weight:600;color:var(--purple);">\ud83e\uddfe Offer slot to standby</div>
+    <div class="standby-actions" style="margin-top:0;">${chips}${offerAll}</div>
+    ${sentNote}
+  </div>`;
+}
+
+// Quick-send the open slot to one standby worker (mirrors manualSendReminder).
+async function offerSlotToStandby(shiftId, workerName) {
+  const slot = resolveOfferableSlot(shiftId);
+  if (!slot) { toast('Slot no longer open', 'error'); return; }
+  const restriction = assignmentRestriction(workerName, slot.outlet || '');
+  if (restriction) { toast(restriction, 'error'); return; }
+  const phone = workerPhone(workerName);
+  // Try to send via Periskope, but record the offer regardless so the manual
+  // "accepted" path still works when Periskope isn't configured / no phone on file.
+  let sent = false;
+  if (phone) {
+    try { sent = await sendPeriskopeMessage(phone, buildSlotOfferMessage(slot, workerName)); } catch(e) { sent = false; }
+  }
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  r.offeredNames = Array.isArray(r.offeredNames) ? r.offeredNames : [];
+  if (!r.offeredNames.some(n => String(n).toLowerCase() === workerName.toLowerCase())) {
+    r.offeredNames.push(workerName);
+  }
+  r.offerSentAt = new Date().toISOString();
+  r.lastReminderAt = r.offerSentAt; // so a bare "YES" reply routes to this slot
+  await persistReminder(shiftId);
+  if (sent) {
+    toast(`✓ Slot offered to ${workerName} via WhatsApp`);
+  } else if (!phone) {
+    toast(`Logged offer to ${workerName} — no phone on file, so send them the slot manually, then tap "accepted"`, 'info');
+  } else {
+    toast(`Logged offer to ${workerName} — WhatsApp send failed (check Periskope). Message them manually, then tap "accepted"`, 'info');
+  }
+  rerenderOfferPanels();
+}
+
+// Offer to every eligible standby worker for the slot's date in one tap.
+async function offerSlotToAllStandby(shiftId) {
+  const slot = resolveOfferableSlot(shiftId);
+  if (!slot) { toast('Slot no longer open', 'error'); return; }
+  const eligible = eligibleStandbyForSlot(slot);
+  if (!eligible.length) { toast('No eligible standby workers for this date / outlet', 'error'); return; }
+  if (!confirm(`Offer this slot to ${eligible.length} standby worker${eligible.length!==1?'s':''}? First to reply YES gets it.`)) return;
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  r.offeredNames = Array.isArray(r.offeredNames) ? r.offeredNames : [];
+  let sent = 0, logged = 0;
+  for (const x of eligible) {
+    const phone = workerPhone(x.worker_name);
+    let ok = false;
+    if (phone) { try { ok = await sendPeriskopeMessage(phone, buildSlotOfferMessage(slot, x.worker_name)); } catch(e) { ok = false; } }
+    if (ok) sent++;
+    // Record the offer for everyone eligible, so the manual accept path works
+    // even when Periskope isn't configured or a worker has no phone on file.
+    if (!r.offeredNames.some(n => String(n).toLowerCase() === x.worker_name.toLowerCase())) r.offeredNames.push(x.worker_name);
+    logged++;
+  }
+  r.offerSentAt = new Date().toISOString();
+  r.lastReminderAt = r.offerSentAt;
+  await persistReminder(shiftId);
+  if (sent === logged) toast(`✓ Slot offered to ${sent} standby worker${sent!==1?'s':''} via WhatsApp`);
+  else if (sent > 0) toast(`Offered to ${logged} (sent ${sent} via WhatsApp; rest need a manual message)`, 'info');
+  else toast(`Logged offer to ${logged} worker${logged!==1?'s':''} — WhatsApp not sent (check Periskope). Message them, then tap "accepted"`, 'info');
+  rerenderOfferPanels();
+}
+
+// Manually flag that a standby worker accepted the offer (when ops hears it
+// verbally / outside Periskope). The webhook does this automatically on a YES reply.
+async function markOfferAccepted(shiftId, workerName) {
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  r.offerAccepted = true;
+  r.offerAcceptedBy = workerName || (r.offeredNames && r.offeredNames[0]) || '';
+  r.offerAcceptedAt = new Date().toISOString();
+  await persistReminder(shiftId);
+  rerenderOfferPanels();
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+  renderTasksPanel();
+  toast(`✓ ${r.offerAcceptedBy} marked as accepted — see Tasks`);
+}
+
+// One-tap: mark the worker as accepted AND assign them into the slot.
+// Used by the "accepted ✓" button on the offer card — when ops hears a YES they
+// usually want the worker in the slot immediately, no second step.
+async function acceptAndAssignStandby(shiftId, workerName) {
+  const name = workerName || (shiftReminders[shiftId]?.offeredNames || [])[0] || '';
+  if (!name) { toast('No worker to accept', 'error'); return; }
+  if (!confirm(`Confirm ${name} for this slot and assign them now?`)) return;
+  const ok = await assignWorkerToOpenSlot(shiftId, name);
+  if (ok) {
+    if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+    const r = shiftReminders[shiftId];
+    r.offerAcceptedBy = name;
+    r.offerAcceptedAt = new Date().toISOString();
+    r.offerAccepted = false; // already resolved into the slot
+    await persistReminder(shiftId);
+    if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+    renderTasksPanel();
+    rerenderOfferPanels();
+  }
+}
+
+// Core assignment used by both the Tasks "Assign" button and the offer-card
+// "accepted" button. Works for ANY open slot (replacement or available),
+// whether or not its shift is in the current day view.
+async function assignWorkerToOpenSlot(shiftId, worker) {
+  const slot = resolveOfferableSlot(shiftId)
+    || (function(){ const s = (allShifts||[]).find(x=>String(x.id)===String(shiftId)) || taskShiftCache?.[String(shiftId)]; return s ? { id:s.id, outlet:s.outlet||'', date:s.shift_date||'' } : null; })();
+  if (!slot) { toast('Slot no longer open', 'error'); return false; }
+  const restriction = assignmentRestriction(worker, slot.outlet || '');
+  if (restriction) { toast(restriction, 'error'); return false; }
+  // Make sure the worker exists in the workers table (so phone/profile resolve later).
+  if (!(allWorkers || []).find(w => String(w.name).toLowerCase() === worker.toLowerCase())) {
+    try { await supabaseClient.from('workers').insert({ name: worker }); await loadWorkers(); } catch(e){}
+  }
+  try {
+    const { error } = await supabaseClient.from('shifts').update({ worker_name: worker, updated_at: new Date().toISOString() }).eq('id', shiftId);
+    if (error) throw error;
+  } catch(e) { toast('Could not assign worker to the shift', 'error'); return false; }
+  // Clear replacement / offer flags — slot is filled.
+  if (shiftReminders[shiftId]) {
+    shiftReminders[shiftId].needsReplacement = false;
+    shiftReminders[shiftId].disputed = false;
+    try { await persistReminder(shiftId); } catch(e){}
+  }
+  // Remove the assigned worker from the standby list for that date.
+  try {
+    const match = (allStandby || []).find(x => x.available_date === slot.date && String(x.worker_name||'').toLowerCase() === worker.toLowerCase());
+    if (match) await removeStandbyWorker(match.id);
+  } catch(e){}
+  try { await logActivity('Assigned standby worker to slot', `${worker} assigned to open slot at ${slot.outlet||'—'} on ${slot.date||''}`, 'shift', shiftId, { worker_name: worker, outlet: slot.outlet, shift_date: slot.date }); } catch(e){}
+  await loadShifts();
+  try { await loadAvailableSlots(); } catch(e){}
+  toast(`✓ ${worker} assigned to the slot`);
+  return true;
+}
+
+// Clear an offer-acceptance (e.g. false alarm / worker backed out) without
+// re-filling the slot, so it returns to the Replacement-needed list.
+async function clearOfferAccepted(shiftId) {
+  if (!shiftReminders[shiftId]) return;
+  const r = shiftReminders[shiftId];
+  r.offerAccepted = false;
+  r.offerAcceptedBy = '';
+  r.offerAcceptedAt = '';
+  await persistReminder(shiftId);
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+  renderTasksPanel();
+  rerenderOfferPanels();
+}
+
+// Assign the accepting standby worker into the open slot, clearing the
+// replacement + offer flags and removing them from the standby list.
+async function assignAcceptedStandby(shiftId) {
+  const r = shiftReminders[shiftId] || {};
+  const worker = r.offerAcceptedBy || '';
+  if (!worker) { toast('No accepting worker recorded', 'error'); return; }
+  const ok = await assignWorkerToOpenSlot(shiftId, worker);
+  if (ok) {
+    r.offerAccepted = false;
+    await persistReminder(shiftId);
+    if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+    renderTasksPanel();
+    rerenderOfferPanels();
+  }
+}
+
 function showReminderSchemaSQL() {
   const sql = `-- 1) Add dispute + late-arrival tracking columns to shift_reminders
 alter table public.shift_reminders
@@ -6062,6 +6417,11 @@ alter table public.shift_reminders
   add column if not exists replacement_at    timestamptz,            -- when the slot became replacement-needed
   add column if not exists completed_at       timestamptz,           -- when a late task was fully handled (drives 18h collapse)
   add column if not exists replaced_worker     text,                  -- name of the worker who dropped out (shown on the Replacement-needed slot, synced team-wide)
+  add column if not exists offered_names        jsonb default '[]'::jsonb, -- standby workers this open slot has been offered to
+  add column if not exists offer_sent_at        timestamptz,           -- when the slot was last offered to standby workers
+  add column if not exists offer_accepted       boolean default false, -- a standby worker replied YES to the offer
+  add column if not exists offer_accepted_by    text,                  -- name of the standby worker who accepted
+  add column if not exists offer_accepted_at    timestamptz,           -- when the acceptance came in
   add column if not exists last_reminder_at    timestamptz;           -- when the most recent reminder was SENT for this shift (used by the webhook to route a bare reply to the most recently-reminded shift)
 
 -- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
@@ -6119,6 +6479,24 @@ create index if not exists completed_tasks_completed_at_idx on public.completed_
 --      // tick acknowledgement on the matched shift
 --      update shift_reminders set night_acked = true, clockin_responded = true
 --      where shift_id = <matched shift>;
+--    }
+--
+--  STANDBY SLOT OFFERS: when ops offers an open slot to standby workers, each
+--  offered worker's name is stored in shift_reminders.offered_names (jsonb array)
+--  and offer_sent_at/last_reminder_at are stamped. If an inbound YES-type reply
+--  comes from a worker whose name is in offered_names of an OPEN slot
+--  (needs_replacement = true, offer_accepted = false), flag the acceptance —
+--  first reply wins:
+--    if (ACK.test(body)) {
+--      // find the most-recently-offered open slot that listed this worker
+--      const slot = (select * from shift_reminders
+--                    where needs_replacement = true and offer_accepted = false
+--                      and offered_names ? <worker_name>
+--                    order by offer_sent_at desc limit 1);
+--      if (slot) update shift_reminders set offer_accepted = true,
+--        offer_accepted_by = <worker_name>, offer_accepted_at = now()
+--        where shift_id = slot.shift_id;
+--      // → surfaces in the ShiftOps Tasks panel as "✅ Standby accepted"
 --    }
 --
 --  NOTE: ShiftOps reads shift_reminders across ALL dates, so a late/dispute flag set
