@@ -7385,7 +7385,7 @@ alter table public.shift_reminders
 --     the name to internal_messages.acknowledged_by) when that phone replies ACK.
 create table if not exists public.announcement_acks (
   id            bigint generated always as identity primary key,
-  message_id    bigint not null,
+  message_id    text not null,
   phone         text not null,
   name          text,
   acknowledged  boolean default false,
@@ -9578,14 +9578,17 @@ async function sendAnnouncementWhatsApp(msg, recipient) {
 async function registerAnnouncementAcks(messageId, recipients) {
   if (messageId == null) return;
   const rows = recipients.map(r => ({
-    message_id: messageId,
+    message_id: String(messageId),
     phone: r.phone,
     name: r.name,
     acknowledged: false,
     created_at: new Date().toISOString()
   }));
   const { error } = await supabaseClient.from('announcement_acks').upsert(rows, { onConflict: 'message_id,phone' });
-  if (error) console.warn('[announcement_acks] table may not exist yet:', error.message);
+  if (error) {
+    console.warn('[announcement_acks] write failed:', error.message);
+    toast('⚠️ Sent on WhatsApp, but acknowledgements won’t record until the announcement_acks table is created in Supabase (run the schema SQL).', 'error');
+  }
 }
 async function loadMessages() {
   const { data, error } = await supabaseClient.from('internal_messages').select('*').order('created_at', { ascending:false }).limit(100);
