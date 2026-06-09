@@ -9256,9 +9256,9 @@ function renderGroupOutletChecklist() {
   const selectedKeys = editingGroupOutlets.map(n => String(n).toLowerCase());
   cl.innerHTML = list.map(o => {
     const checked = selectedKeys.includes(String(o.name).toLowerCase()) ? 'checked' : '';
-    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 4px;cursor:pointer;font-size:13px;">
-      <input type="checkbox" ${checked} onchange="toggleGroupOutlet('${escapeAttr(o.name)}', this.checked)">
-      <span>${escapeHtml(o.name)} <span class="sub-text" style="color:var(--text3);">· ${normaliseCountry(o.country)}</span></span>
+    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;font-size:13px;text-transform:none;font-family:var(--font);font-weight:400;color:var(--text);letter-spacing:normal;margin:0;">
+      <input type="checkbox" ${checked} onchange="toggleGroupOutlet('${escapeAttr(o.name)}', this.checked)" style="width:16px;height:16px;flex:0 0 auto;margin:0;padding:0;accent-color:var(--accent);cursor:pointer;">
+      <span style="flex:1;text-transform:none;">${escapeHtml(o.name)} <span style="color:var(--text3);font-size:12px;">· ${normaliseCountry(o.country)}</span></span>
     </label>`;
   }).join('');
 }
