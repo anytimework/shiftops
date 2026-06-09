@@ -1444,9 +1444,11 @@ tr:hover td { background: rgba(91,148,249,0.045); }
           <label style="margin-bottom:0;flex:1;">Send clock-out alerts to this group</label>
           <input type="checkbox" id="pk-payroll-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
         </div>
-        <div style="display:flex;justify-content:flex-end;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchPeriskopeGroups()">🔍 Fetch my groups</button>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="testPayrollGroupMessage()">Test group message</button>
         </div>
+        <div id="pk-groups-list" style="margin-top:6px;"></div>
         <div id="pk-payroll-test-result" style="font-size:11.5px;margin-top:6px;min-height:16px;"></div>
       </div>
       <div style="background:rgba(79,142,247,0.06);border:1px solid rgba(79,142,247,0.2);border-radius:10px;padding:12px;margin:12px 0;font-size:11px;color:var(--text2);line-height:1.7;">
@@ -6529,6 +6531,7 @@ function openWhatsAppSettings() {
   document.getElementById('pk-payroll-group').value = pk?.payrollGroupId || '';
   document.getElementById('pk-payroll-enabled').checked = pk?.payrollEnabled === true;
   const _pgResult = document.getElementById('pk-payroll-test-result'); if (_pgResult) _pgResult.textContent = '';
+  const _pgList = document.getElementById('pk-groups-list'); if (_pgList) _pgList.innerHTML = '';
   document.getElementById('pk-test-result').textContent = '';
   // Default to Periskope tab if configured
   switchWaTab(pk?.apikey ? 'periskope' : 'periskope');
@@ -6621,25 +6624,129 @@ async function notifyPayrollClockOut(message) {
   return ok;
 }
 
-// Test the payroll group from the settings modal (uses the unsaved field values)
+// Test the payroll group from the settings modal (uses the unsaved field values).
+// A 200 from /message/send only means QUEUED — it does NOT mean delivered, and an
+// invalid chat_id is accepted then silently dropped. So we poll the message status
+// endpoint to confirm it actually reaches WhatsApp before reporting success.
 async function testPayrollGroupMessage() {
   const resultEl = document.getElementById('pk-payroll-test-result');
   const apikey = document.getElementById('pk-apikey').value.trim();
   const phone  = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
   const group  = document.getElementById('pk-payroll-group').value.trim();
   if (!apikey || !phone) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter Periskope API key + org phone first.'; return; }
-  if (!group) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Paste the group chat ID first (e.g. xxx@g.us).'; return; }
-  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Sending test to group…';
-  let chatId = group.includes('@') ? group : `${group.replace(/\D/g,'')}@g.us`;
+  if (!group) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Paste a group chat ID, or use “Fetch my groups” below.'; return; }
+  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Queuing test message…';
+  const chatId = group.includes('@') ? group : `${group.replace(/\D/g,'')}@g.us`;
+  if (!/@g\.us$/.test(chatId)) {
+    resultEl.style.color='var(--amber, #f59e0b)';
+    resultEl.textContent = '⚠ That doesn’t look like a group ID — group IDs end in @g.us. Use “Fetch my groups”.';
+    return;
+  }
+  const headers = { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' };
   try {
     const res = await fetch('https://api.periskope.app/v1/message/send', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' },
+      method: 'POST', headers,
       body: JSON.stringify({ chat_id: chatId, message: '✅ ShiftOps test — payroll clock-out alerts will post here.' })
     });
-    if (res.ok) { resultEl.style.color = 'var(--green)'; resultEl.textContent = '✓ Sent — check the payroll group.'; }
-    else { const j = await res.json().catch(()=>({})); resultEl.style.color='var(--red)'; resultEl.textContent = '✗ Failed (' + (res.status) + ') ' + (j.message || j.error || 'check chat ID & key'); }
-  } catch(e) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Network error — ' + (e.message || 'could not reach Periskope'); }
+    const j = await res.json().catch(()=>({}));
+    if (!res.ok) {
+      resultEl.style.color='var(--red)';
+      resultEl.textContent = '✗ Rejected (' + res.status + ') ' + (j.message || j.error || 'check chat ID & key');
+      return;
+    }
+    // Queued OK — now verify it actually sends. Periskope returns a unique_id we can poll.
+    const uniqueId = j.unique_id || j.track_by?.unique_id || '';
+    if (!uniqueId) {
+      resultEl.style.color='var(--amber, #f59e0b)';
+      resultEl.textContent = '⏳ Queued, but no tracking id returned. Check the group in ~10s — if nothing arrives, the chat ID is wrong.';
+      return;
+    }
+    resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Queued ✓ — confirming delivery…';
+    // Poll status a few times (queued → sending → sent / failed)
+    const statusId = String(uniqueId).replace(/^.*\//,'').trim();
+    for (let i = 0; i < 6; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        const sres = await fetch(`https://api.periskope.app/v1/message/${encodeURIComponent(statusId)}/status`, { headers });
+        const sj = await sres.json().catch(()=>({}));
+        const st = (sj.status || sj.data?.status || '').toLowerCase();
+        if (st === 'sent' || st === 'delivered' || st === 'read') {
+          resultEl.style.color = 'var(--green)'; resultEl.textContent = '✓ Delivered to the group — clock-out alerts will post here.';
+          return;
+        }
+        if (st === 'failed') {
+          resultEl.style.color='var(--red)';
+          resultEl.textContent = '✗ Failed to send — ' + (sj.status_description || 'usually an invalid group chat ID. Use “Fetch my groups”.');
+          return;
+        }
+      } catch(e) { /* keep polling */ }
+    }
+    resultEl.style.color='var(--amber, #f59e0b)';
+    resultEl.textContent = '⏳ Still queued after a few seconds. Check the group — if empty, re-pick the ID via “Fetch my groups”.';
+  } catch(e) {
+    resultEl.style.color='var(--red)';
+    resultEl.textContent = 'Network error — ' + (e.message || 'could not reach Periskope') + ' (browser may be blocking the call — CORS).';
+  }
+}
+
+// Fetch the org's group chats from Periskope and render a pick-list so the user
+// selects the real @g.us chat_id instead of hand-typing it (the #1 cause of
+// "queued but never delivered").
+async function fetchPeriskopeGroups() {
+  const resultEl = document.getElementById('pk-payroll-test-result');
+  const listEl = document.getElementById('pk-groups-list');
+  const apikey = document.getElementById('pk-apikey').value.trim();
+  const phone  = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
+  if (!apikey || !phone) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter Periskope API key + org phone first.'; return; }
+  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Fetching your groups…';
+  if (listEl) listEl.innerHTML = '';
+  const headers = { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' };
+  // Try a couple of known query shapes; Periskope returns chats with a chat_id field.
+  const urls = [
+    'https://api.periskope.app/v1/chats?chat_type=group&limit=200',
+    'https://api.periskope.app/v1/chats?limit=200'
+  ];
+  let chats = null, lastErr = '';
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers });
+      if (!res.ok) { lastErr = 'HTTP ' + res.status; continue; }
+      const j = await res.json().catch(()=>({}));
+      chats = j.chats || j.data || j.results || (Array.isArray(j) ? j : null);
+      if (Array.isArray(chats)) break;
+    } catch(e) { lastErr = e.message || 'network error'; }
+  }
+  if (!Array.isArray(chats)) {
+    resultEl.style.color='var(--red)';
+    resultEl.textContent = '✗ Could not fetch groups (' + (lastErr || 'unexpected response') + '). You can still paste the @g.us ID manually.';
+    return;
+  }
+  // Keep only group chats (chat_id ends with @g.us)
+  const groups = chats.filter(c => /@g\.us$/.test(String(c.chat_id || c.id || c.chatId || '')))
+    .map(c => ({
+      id: String(c.chat_id || c.id || c.chatId),
+      name: c.chat_name || c.name || c.subject || c.group_name || '(unnamed group)'
+    }));
+  if (!groups.length) {
+    resultEl.style.color='var(--amber, #f59e0b)';
+    resultEl.textContent = '⚠ No groups found on this number. Make sure the org phone is in the payroll group.';
+    return;
+  }
+  resultEl.style.color='var(--text3)'; resultEl.textContent = `Found ${groups.length} group(s) — pick the payroll one:`;
+  if (listEl) {
+    listEl.innerHTML = groups.map(g =>
+      `<button type="button" class="btn btn-ghost btn-sm" style="display:block;width:100%;text-align:left;margin-top:4px;font-size:11.5px;"
+        onclick="selectPayrollGroup('${g.id.replace(/'/g,"\\'")}','${String(g.name).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">
+        ${g.name.replace(/</g,'&lt;')} <span style="color:var(--text3);font-family:var(--mono);">${g.id}</span>
+      </button>`
+    ).join('');
+  }
+}
+function selectPayrollGroup(id, name) {
+  const field = document.getElementById('pk-payroll-group');
+  if (field) field.value = id;
+  const resultEl = document.getElementById('pk-payroll-test-result');
+  if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Selected “${name}”. Hit Save, then Test group message.`; }
 }
 
 // ── Night reminder message builder ───────────────────────────────────────────
