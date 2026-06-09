@@ -9280,18 +9280,38 @@ function renderGroupOutletChecklist() {
   const cl = document.getElementById('group-outlet-checklist');
   if (!cl) return;
   const q = (document.getElementById('group-outlet-search')?.value || '').trim().toLowerCase();
+  // Map each outlet key → the OTHER group that already owns it, so we can prevent
+  // double-tagging the same outlet across groups. The group currently being edited
+  // is excluded from this map so its own outlets stay selectable.
+  const editingId = document.getElementById('group-edit-id')?.value || '';
+  const ownerByKey = {};
+  (outletGroups || []).forEach(g => {
+    if (String(g.id) === String(editingId)) return; // skip the group we're editing
+    (g.outlets || []).forEach(n => { ownerByKey[String(n).toLowerCase()] = g.name; });
+  });
   const list = allOutlets
     .filter(o => !q || [o.name, normaliseCountry(o.country)].some(v => String(v||'').toLowerCase().includes(q)))
     .sort((a,b) => String(a.name).localeCompare(String(b.name)));
   if (!list.length) { cl.innerHTML = '<div class="sub-text" style="color:var(--text3);padding:6px;">No outlets match.</div>'; return; }
   const selectedKeys = editingGroupOutlets.map(n => String(n).toLowerCase());
-  cl.innerHTML = list.map(o => {
-    const checked = selectedKeys.includes(String(o.name).toLowerCase()) ? 'checked' : '';
+  const rows = list.map(o => {
+    const key = String(o.name).toLowerCase();
+    const ownedByOther = ownerByKey[key];
+    if (ownedByOther) {
+      // Already in another group — show greyed out and non-selectable so it can't be double-tagged.
+      return `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:13px;text-transform:none;font-family:var(--font);font-weight:400;color:var(--text3);letter-spacing:normal;margin:0;opacity:0.55;cursor:not-allowed;">
+        <input type="checkbox" disabled style="width:16px;height:16px;flex:0 0 auto;margin:0;padding:0;cursor:not-allowed;">
+        <span style="flex:1;text-transform:none;">${escapeHtml(o.name)} <span style="color:var(--text3);font-size:12px;">· ${normaliseCountry(o.country)}</span></span>
+        <span style="font-size:10px;color:var(--text3);text-transform:none;white-space:nowrap;">in ${escapeHtml(ownedByOther)}</span>
+      </label>`;
+    }
+    const checked = selectedKeys.includes(key) ? 'checked' : '';
     return `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;font-size:13px;text-transform:none;font-family:var(--font);font-weight:400;color:var(--text);letter-spacing:normal;margin:0;">
       <input type="checkbox" ${checked} onchange="toggleGroupOutlet('${escapeAttr(o.name)}', this.checked)" style="width:16px;height:16px;flex:0 0 auto;margin:0;padding:0;accent-color:var(--accent);cursor:pointer;">
       <span style="flex:1;text-transform:none;">${escapeHtml(o.name)} <span style="color:var(--text3);font-size:12px;">· ${normaliseCountry(o.country)}</span></span>
     </label>`;
   }).join('');
+  cl.innerHTML = rows;
 }
 function toggleGroupOutlet(name, on) {
   const key = String(name).toLowerCase();
@@ -9304,13 +9324,26 @@ function toggleGroupOutlet(name, on) {
 async function saveOutletGroup() {
   const name = document.getElementById('group-name').value.trim();
   if (!name) { toast('Please enter a group name', 'error'); return; }
-  if (!editingGroupOutlets.length) { toast('Select at least one outlet for the group', 'error'); return; }
   const id = document.getElementById('group-edit-id').value;
+  // Final guard: drop any outlet already claimed by ANOTHER group, so the same
+  // outlet can never end up in two groups (which would double-count it in reports).
+  const ownerByKey = {};
+  (outletGroups || []).forEach(g => {
+    if (String(g.id) === String(id)) return;
+    (g.outlets || []).forEach(n => { ownerByKey[String(n).toLowerCase()] = g.name; });
+  });
+  const dropped = [];
+  const cleanOutlets = editingGroupOutlets.filter(n => {
+    if (ownerByKey[String(n).toLowerCase()]) { dropped.push(n); return false; }
+    return true;
+  });
+  if (dropped.length) toast(`Skipped ${dropped.length} outlet${dropped.length!==1?'s':''} already in another group`, 'error');
+  if (!cleanOutlets.length) { toast('Select at least one outlet that isn\'t already in another group', 'error'); return; }
   if (id) {
     const g = outletGroups.find(x => String(x.id) === String(id));
-    if (g) { g.name = name; g.outlets = editingGroupOutlets.slice(); }
+    if (g) { g.name = name; g.outlets = cleanOutlets.slice(); }
   } else {
-    outletGroups.push({ id: 'grp_' + Date.now() + '_' + Math.random().toString(36).slice(2,7), name, outlets: editingGroupOutlets.slice() });
+    outletGroups.push({ id: 'grp_' + Date.now() + '_' + Math.random().toString(36).slice(2,7), name, outlets: cleanOutlets.slice() });
   }
   const synced = await saveOutletGroups();
   closeModal('group-modal');
