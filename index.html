@@ -359,6 +359,13 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .standby-actions .btn { padding:4px 7px; font-size:10px; }
 .standby-panel { margin-bottom:16px; }
 .standby-panel-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; padding:14px 18px; }
+/* Collapsed standby banner — compact comma-free pills of names + a toggle */
+.standby-toggle-btn { display:inline-flex; align-items:center; gap:5px; background:var(--purple-dim); border:1px solid rgba(167,139,250,0.35); color:var(--purple); font-size:11px; font-weight:600; padding:5px 10px; border-radius:999px; cursor:pointer; white-space:nowrap; transition:background 0.15s, border-color 0.15s; }
+.standby-toggle-btn:hover { background:rgba(167,139,250,0.18); border-color:rgba(167,139,250,0.55); }
+.standby-collapsed-names { display:flex; flex-wrap:wrap; gap:6px; padding:12px 18px; }
+.standby-name-pill { display:inline-flex; align-items:center; background:rgba(167,139,250,0.10); border:1px solid rgba(167,139,250,0.30); color:var(--purple); font-size:11px; font-weight:600; padding:4px 9px; border-radius:999px; }
+.standby-header-right { display:flex; align-items:center; gap:10px; }
+@media (max-width: 760px) { .standby-name-pill { font-size:10px; padding:3px 7px; } }
 
 
 .week-head.today, .week-cell.today { background: rgba(79,142,247,0.10); box-shadow: inset 0 0 0 1px rgba(79,142,247,0.35); }
@@ -1812,6 +1819,8 @@ const TASK_CARD_DONE_HIDE_HOURS = 18;        // hide a completed late task from 
 const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt, lateNotified, lateReason, lateAt, lateAck, outletInformed }
 let attendanceView = 'day';
+// Standby day panel starts collapsed (compact banner). Toggled per-session.
+let standbyPanelExpanded = false;
 let activeMetricFilter = 'all';
 let collapsedView = false;
 const expandedRows = new Set();
@@ -2374,6 +2383,31 @@ function subscribeToReminderChanges() {
         if (status === 'CHANNEL_ERROR') console.warn('⚠ Reminder real-time channel error — polling fallback active');
       });
   } catch(e) { console.warn('Reminder real-time subscription failed:', e); }
+  // Real-time subscription on app_settings so team-wide bans / restrictions
+  // (profile_meta) propagate to every open session within ~1s — not only on the
+  // 30s poll and not only at boot. This is the primary fix for "my staff banned a
+  // worker but it never showed on my screen": now any change to the shared
+  // profile_meta row pushes to all connected devices immediately.
+  try {
+    supabaseClient
+      .channel('app_settings_live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, (payload) => {
+        const row = payload.new || payload.old;
+        if (!row || row.key !== 'profile_meta') return; // only care about profile_meta
+        const val = (payload.new && payload.new.value) || null;
+        if (!val) return;
+        const next = { workers: val.workers || {}, outlets: val.outlets || {} };
+        if (canonicalJSON(next) === canonicalJSON(profileMeta)) return;
+        profileMeta = next;                       // remote is authoritative
+        localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+        refreshBanDependentViews();
+        console.log('🔄 profileMeta (bans/restrictions) synced from another device');
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('✅ app_settings real-time active (bans sync live)');
+        if (status === 'CHANNEL_ERROR') console.warn('⚠ app_settings real-time channel error — 30s poll fallback active');
+      });
+  } catch(e) { console.warn('app_settings real-time subscription failed:', e); }
   // Polling fallback — catches any missed real-time events every 30s
   setInterval(silentSyncReminders, 30000);
   // Also re-pull team-wide profileMeta (bans / disliked-outlet restrictions) on the
@@ -2383,24 +2417,44 @@ function subscribeToReminderChanges() {
   setInterval(silentSyncProfileMeta, 30000);
 }
 async function silentSyncProfileMeta() {
-  // Re-fetch the shared profileMeta and, only if the ban/restriction set actually
-  // changed, refresh the surfaces that filter on it. Avoids needless re-renders.
+  // Re-fetch the shared profileMeta from Supabase and adopt it as the source of
+  // truth (remote always wins on the poll). This guarantees a ban/restriction set
+  // on ANY device propagates to every other open session within the poll window,
+  // including REMOVALS — a merge-only approach could never drop a stale local ban.
   try {
-    const before = JSON.stringify(profileMeta);
     const { data, error } = await supabaseClient
       .from('app_settings').select('value').eq('key', 'profile_meta').maybeSingle();
     if (error || !data || !data.value) return;
     const next = { workers: data.value.workers || {}, outlets: data.value.outlets || {} };
-    const after = JSON.stringify(next);
-    if (after === before) return; // nothing changed — skip re-render
+    // Canonical compare so key-order noise doesn't cause false "changed"/"same".
+    if (canonicalJSON(next) === canonicalJSON(profileMeta)) return;
     profileMeta = next;
-    localStorage.setItem('profile_meta_v24', after);
-    // Refresh every view that gates on bans/restrictions so synced changes apply now.
-    try { if (typeof rerenderOfferPanels === 'function') rerenderOfferPanels(); } catch(e){}
-    try { if (typeof renderStandbyDayPanel === 'function') renderStandbyDayPanel(); } catch(e){}
-    try { if (typeof loadWorkerCards === 'function' && document.getElementById('page-workers')?.style.display !== 'none') loadWorkerCards(); } catch(e){}
-    try { if (typeof loadOutletsList === 'function' && document.getElementById('page-outlets')?.style.display !== 'none') loadOutletsList(); } catch(e){}
+    localStorage.setItem('profile_meta_v24', JSON.stringify(profileMeta));
+    refreshBanDependentViews();
   } catch(e) { /* silent — next tick retries */ }
+}
+// Re-render every surface whose contents depend on bans / disliked-outlet
+// restrictions, so a synced change applies immediately everywhere it matters.
+function refreshBanDependentViews() {
+  try { if (typeof rerenderOfferPanels === 'function') rerenderOfferPanels(); } catch(e){}
+  try { if (typeof renderStandbyDayPanel === 'function') renderStandbyDayPanel(); } catch(e){}
+  try { if (typeof loadWorkerCards === 'function' && document.getElementById('page-workers')?.style.display !== 'none') loadWorkerCards(); } catch(e){}
+  try { if (typeof loadOutletsList === 'function' && document.getElementById('page-outlets')?.style.display !== 'none') loadOutletsList(); } catch(e){}
+}
+// Stable stringify with sorted keys so two structurally-identical profileMeta
+// objects compare equal regardless of property insertion order.
+function canonicalJSON(obj) {
+  const seen = new WeakSet();
+  const sort = (v) => {
+    if (v && typeof v === 'object') {
+      if (seen.has(v)) return null;
+      seen.add(v);
+      if (Array.isArray(v)) return v.map(sort);
+      return Object.keys(v).sort().reduce((acc,k) => { acc[k] = sort(v[k]); return acc; }, {});
+    }
+    return v;
+  };
+  try { return JSON.stringify(sort(obj)); } catch(e) { return JSON.stringify(obj); }
 }
 async function silentSyncReminders() {
   // Fetch latest from Supabase and update only changed panels (no scroll jump, no full re-render)
@@ -4091,7 +4145,28 @@ function renderStandbyDayPanel() {
   const dayStr = formatDate(currentDate);
   const rows = standbyForDay(dayStr);
   if (!rows.length) { panel.innerHTML = ''; return; }
-  panel.innerHTML = `<div class="table-wrap standby-panel"><div class="table-header"><span class="table-title">Standby list for ${formatDisplayDate(dayStr)}</span><span class="table-count">${rows.length} worker${rows.length!==1?'s':''}</span></div><div class="standby-panel-grid">${rows.map(x => standbyCard(x)).join('')}</div></div>`;
+  const count = rows.length;
+  const countLabel = `${count} worker${count !== 1 ? 's' : ''} on standby`;
+  const toggleBtn = `<button class="standby-toggle-btn" onclick="toggleStandbyPanel()">${standbyPanelExpanded ? '▲ Collapse' : '▼ Expand'}</button>`;
+  const header = `<div class="table-header">
+      <span class="table-title">Standby list for ${formatDisplayDate(dayStr)}</span>
+      <span class="standby-header-right"><span class="table-count">${countLabel}</span>${toggleBtn}</span>
+    </div>`;
+  let body;
+  if (standbyPanelExpanded) {
+    // Full detail — the original card grid.
+    body = `<div class="standby-panel-grid">${rows.map(x => standbyCard(x)).join('')}</div>`;
+  } else {
+    // Compact banner — just the names as pills, click Expand for full cards.
+    const pills = rows.map(x => `<span class="standby-name-pill">${escapeHtml(x.worker_name || 'Unnamed')}</span>`).join('');
+    body = `<div class="standby-collapsed-names">${pills}</div>`;
+  }
+  panel.innerHTML = `<div class="table-wrap standby-panel">${header}${body}</div>`;
+}
+// Expand / collapse the standby day banner. Persists for the session.
+function toggleStandbyPanel() {
+  standbyPanelExpanded = !standbyPanelExpanded;
+  renderStandbyDayPanel();
 }
 
 function renderStandbyPage() {
