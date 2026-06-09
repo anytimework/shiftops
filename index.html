@@ -990,6 +990,10 @@ tr:hover td { background: rgba(91,148,249,0.045); }
               <div class="form-row"><label>Regarding incident</label><select id="msg-incident"><option value="">None</option></select></div>
             </div>
             <div class="form-row"><label>Announcement</label><input type="text" id="msg-body" placeholder="Type your announcement..."></div>
+            <div class="form-row" style="flex-direction:row;align-items:center;gap:8px;margin-bottom:10px;">
+              <input type="checkbox" id="msg-wa" checked style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;">
+              <label for="msg-wa" style="margin-bottom:0;font-weight:400;font-size:12.5px;color:var(--text2);cursor:pointer;">Also send via WhatsApp (each person individually) — they can reply <strong>ACK</strong> to acknowledge</label>
+            </div>
             <button class="btn btn-primary btn-sm" onclick="sendInternalMessage()">Send announcement</button>
           </div>
         </div>
@@ -1914,6 +1918,16 @@ const INTERNAL_USER_ACCOUNTS = [
   { username:'Niro', passcode:'6839172045' }
 ];
 const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
+// WhatsApp numbers for the internal team (country code + number, no +/spaces).
+// Used to send announcements individually via Periskope and to map an inbound
+// "ACK" reply back to the right team member for the announcement ack flow.
+const TEAM_WHATSAPP = {
+  'Niro':    '639215711067',
+  'McBilly': '639666696236',
+  'Jayden':  '6598242977',
+  'Yra':     '639454803292',
+  'Jon':     '6583416027'
+};
 const INTERNAL_LOGIN_TTL_MS = 12 * 60 * 60 * 1000;
 
 function loadProfileMeta() {
@@ -2416,6 +2430,7 @@ async function loadReminders() {
           offerAcceptedBy: r.offer_accepted_by || '',
           offerAcceptedAt: r.offer_accepted_at || '',
           offerOutletInformed: !!r.offer_outlet_informed,
+          payFollowupSentAt: r.pay_followup_sent_at || '',
           // appCheckState is a local-only UI flag (no DB column) — preserve any
           // in-flight value so the banner's app-check step survives a reload.
           appCheckState: (shiftReminders[r.shift_id] && shiftReminders[r.shift_id].appCheckState) || ''
@@ -2460,6 +2475,7 @@ async function persistReminder(shiftId) {
       offer_accepted_by: r.offerAcceptedBy || null,
       offer_accepted_at: r.offerAcceptedAt || null,
       offer_outlet_informed: !!r.offerOutletInformed,
+      pay_followup_sent_at: r.payFollowupSentAt || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'shift_id' });
     if (error) {
@@ -2519,6 +2535,7 @@ function subscribeToReminderChanges() {
             offerAcceptedBy: row.offer_accepted_by || '',
             offerAcceptedAt: row.offer_accepted_at || '',
             offerOutletInformed: !!row.offer_outlet_informed,
+            payFollowupSentAt: row.pay_followup_sent_at || '',
             appCheckState: (shiftReminders[row.shift_id] && shiftReminders[row.shift_id].appCheckState) || ''
           };
         }
@@ -6819,7 +6836,68 @@ async function autoSendShiftReminders() {
   }
 }
 
-// ── Manual send from reminder panel ──────────────────────────────────────────
+// ── Payment follow-up reminder ───────────────────────────────────────────────
+// 25 min after a worker's clock-out time, if their shift still isn't marked paid,
+// post a follow-up nudge to the same payroll group chat. One nudge per shift,
+// deduped team-wide via shift_reminders.pay_followup_sent_at (synced column).
+let _lastPayFollowupCheck = 0;
+async function checkPaymentFollowups() {
+  const pk = getPeriskopeConfig();
+  if (!pk?.payrollEnabled || !pk?.payrollGroupId || !pk?.apikey || !pk?.phone) return;
+  const now = Date.now();
+  if (now - _lastPayFollowupCheck < 60000) return; // throttle to once per minute
+  _lastPayFollowupCheck = now;
+
+  const todayStr = new Date().toISOString().slice(0,10);
+  for (const s of (allShifts || [])) {
+    if (!isPayableShift(s) || s.cancelled) continue;
+    if (!s.clock_out || s.is_paid) continue;            // must be clocked out and still unpaid
+    if (!s.shift_date || s.shift_date !== todayStr) continue; // only chase same-day clock-outs
+    const r = shiftReminders[s.id] || {};
+    if (r.payFollowupSentAt) continue;                  // already nudged (synced flag)
+
+    // Compute 25 min after the clock-out moment (shift_date + clock_out time).
+    const co = String(s.clock_out).slice(0,5);
+    const [ch, cm] = co.split(':').map(Number);
+    if (isNaN(ch) || isNaN(cm)) continue;
+    const coDate = new Date(s.shift_date + 'T00:00:00');
+    coDate.setHours(ch, cm, 0, 0);
+    const dueAt = coDate.getTime() + 25 * 60000;
+    if (now < dueAt) continue;                          // not yet 25 min past clock-out
+    if (now > dueAt + 6 * 3600000) continue;            // don't fire on stale/backfilled rows (>6h late)
+
+    const ok = await sendPeriskopeGroupMessage(pk.payrollGroupId, buildPayFollowupMessage(s, co));
+    if (ok) {
+      if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
+      shiftReminders[s.id].payFollowupSentAt = new Date().toISOString();
+      await persistReminder(s.id);
+      console.log('[Payroll] follow-up nudge sent for', s.worker_name, s.id);
+    }
+  }
+}
+
+function buildPayFollowupMessage(s, co) {
+  try {
+    const worker = String(s.worker_name || '').trim() || 'Unknown';
+    const outlet = String(s.outlet || '').trim();
+    const sym = currencySymbolForOutlet(outlet) || '$';
+    let net = 0; try { net = parseFloat(netPaymentForShift(s) || 0); } catch(e) {}
+    const w = allWorkers.find(x => String(x.name||'').toLowerCase() === worker.toLowerCase());
+    const payInfo = w ? `${w.bank_method || 'PayNow'} ${w.bank_details || ''}`.trim() : '—';
+    const lines = [
+      '⏰ *PAYMENT FOLLOW-UP*',
+      `${worker} clocked out at ${co} and is still *unpaid* (25 min elapsed).`,
+      `Outlet: ${outlet}`,
+      `Net payout: ${sym}${net.toFixed(2)}`,
+      `Pay to: ${payInfo}`,
+      '',
+      'Please process payment and mark as paid in ShiftOps.'
+    ];
+    return lines.join('\n');
+  } catch(e) {
+    return `⏰ PAYMENT FOLLOW-UP: ${String(s.worker_name||'').trim()} clocked out ${co}, still unpaid after 25 min. Please pay & mark paid.`;
+  }
+}
 async function manualSendReminder(shiftId, type) {
   const s = allShifts.find(x => String(x.id) === String(shiftId));
   if (!s) return;
@@ -7251,7 +7329,25 @@ alter table public.shift_reminders
   add column if not exists offer_accepted_by    text,                  -- name of the standby worker who accepted
   add column if not exists offer_accepted_at    timestamptz,           -- when the acceptance came in
   add column if not exists offer_outlet_informed boolean default false, -- outlet told who is covering the accepted slot
+  add column if not exists pay_followup_sent_at  timestamptz,           -- when the 25-min unpaid follow-up nudge was posted to the payroll group (dedupe)
   add column if not exists last_reminder_at    timestamptz;           -- when the most recent reminder was SENT for this shift (used by the webhook to route a bare reply to the most recently-reminded shift)
+
+-- 1c) Announcement acknowledgements over WhatsApp.
+--     When an announcement is sent individually via WhatsApp, one row per
+--     recipient is written here. The webhook flips acknowledged=true (and appends
+--     the name to internal_messages.acknowledged_by) when that phone replies ACK.
+create table if not exists public.announcement_acks (
+  id            bigint generated always as identity primary key,
+  message_id    bigint not null,
+  phone         text not null,
+  name          text,
+  acknowledged  boolean default false,
+  acknowledged_at timestamptz,
+  created_at    timestamptz not null default now(),
+  unique (message_id, phone)
+);
+create index if not exists announcement_acks_phone_idx on public.announcement_acks (phone) where acknowledged = false;
+alter table public.internal_messages add column if not exists acknowledged_by jsonb default '[]'::jsonb;
 
 -- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
 --     Entries older than 60 days are auto-deleted by the app, but you can also
@@ -9341,18 +9437,64 @@ async function loadMessagesPage() {
 async function sendInternalMessage() {
   const body = document.getElementById('msg-body').value.trim();
   if (!body) { toast('Type an announcement first', 'error'); return; }
+  const recipient = document.getElementById('msg-to').value;
+  const alsoWA = document.getElementById('msg-wa')?.checked;
   const payload = {
     sender: currentInternalUser || 'Jon',
-    recipient: document.getElementById('msg-to').value,
+    recipient,
     incident_id: document.getElementById('msg-incident').value || null,
     body,
     seen_by: [currentInternalUser || 'Jon']
   };
-  const { error } = await supabaseClient.from('internal_messages').insert(payload);
+  const { data: inserted, error } = await supabaseClient.from('internal_messages').insert(payload).select().single();
   if (error) { toast('Failed to send message: ' + error.message, 'error'); return; }
   document.getElementById('msg-body').value = '';
   toast('Announcement sent');
+  if (alsoWA) { try { await sendAnnouncementWhatsApp(inserted || payload, recipient); } catch(e) { console.warn('[Announce WA]', e); } }
   await loadMessages();
+}
+
+// Send an announcement to each internal team member individually over WhatsApp
+// (via Periskope), and register a pending-ack row so that when they reply "ACK"
+// the webhook can flip their acknowledgement in internal_messages.acknowledged_by.
+async function sendAnnouncementWhatsApp(msg, recipient) {
+  const pk = getPeriskopeConfig();
+  if (!pk?.apikey || !pk?.phone) { toast('WhatsApp send skipped — set up Periskope in Settings first', 'info'); return; }
+  const sender = currentInternalUser || 'Jon';
+  // Who receives it: GROUP → everyone except the sender; otherwise the single recipient.
+  const targets = (recipient === 'GROUP')
+    ? INTERNAL_USERS.filter(u => u !== sender)
+    : INTERNAL_USERS.filter(u => u === recipient);
+  const waText = (name) =>
+    `📢 *Announcement from ${sender}*\n\n${msg.body}\n\n— \nReply *ACK* (or *acknowledge*) to confirm you've seen this. It'll show as acknowledged in ShiftOps.`;
+  let sent = 0, skipped = [];
+  const pending = [];
+  for (const name of targets) {
+    const phone = (TEAM_WHATSAPP[name] || '').replace(/\D/g,'');
+    if (!phone) { skipped.push(name); continue; }
+    const ok = await sendPeriskopeMessage(phone, waText(name));
+    if (ok) { sent++; pending.push({ phone, name }); }
+    else skipped.push(name);
+  }
+  // Register pending acks so the webhook can match an inbound "ACK" to this message.
+  if (pending.length) { try { await registerAnnouncementAcks(msg.id, pending); } catch(e) { console.warn('[Announce ack register]', e); } }
+  toast(sent ? `Sent on WhatsApp to ${sent} ${sent===1?'person':'people'}${skipped.length?` (no number: ${skipped.join(', ')})`:''}` : 'WhatsApp send failed for everyone — check Periskope settings', sent ? 'success' : 'error');
+}
+
+// Write one pending-ack row per recipient. The webhook looks these up by phone:
+// when that phone replies ACK, it appends the person's name to the message's
+// acknowledged_by array and marks the pending row resolved.
+async function registerAnnouncementAcks(messageId, recipients) {
+  if (messageId == null) return;
+  const rows = recipients.map(r => ({
+    message_id: messageId,
+    phone: r.phone,
+    name: r.name,
+    acknowledged: false,
+    created_at: new Date().toISOString()
+  }));
+  const { error } = await supabaseClient.from('announcement_acks').upsert(rows, { onConflict: 'message_id,phone' });
+  if (error) console.warn('[announcement_acks] table may not exist yet:', error.message);
 }
 async function loadMessages() {
   const { data, error } = await supabaseClient.from('internal_messages').select('*').order('created_at', { ascending:false }).limit(100);
@@ -9453,6 +9595,8 @@ function startMessagePolling() {
     else await refreshAnnouncementBadge();
     // Auto-send Periskope reminders on every poll tick (internally throttled to 1/min)
     autoSendShiftReminders().catch(e => console.warn('[Periskope auto-remind]', e));
+    // Payment follow-up nudges to the payroll group (also throttled to 1/min)
+    checkPaymentFollowups().catch(e => console.warn('[Payroll follow-up]', e));
   }, 15000);
 }
 
