@@ -2018,13 +2018,26 @@ async function loadOutletGroupsRemote() {
 async function saveOutletGroups() {
   // Groups are a simple admin-managed list; last-write-wins is acceptable here
   // (unlike bans, concurrent group edits are rare). localStorage first, then Supabase.
+  // Returns true only if the Supabase write succeeded, so callers can warn the user
+  // when a group was saved on THIS device but never reached the shared DB (the
+  // exact failure that makes groups appear on one screen but not a teammate's).
   localStorage.setItem('outlet_groups_v1', JSON.stringify(outletGroups));
+  if (!supabaseClient) { toast('Not connected to the database — group saved on this device only.', 'error'); return false; }
   try {
     const { error } = await supabaseClient
       .from('app_settings')
       .upsert({ key: 'outlet_groups', value: outletGroups, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-    if (error) console.warn('outletGroups remote save failed:', error.message);
-  } catch(e) { console.warn('outletGroups remote save error:', e); }
+    if (error) {
+      console.warn('outletGroups remote save failed:', error.message);
+      toast('⚠️ Group saved on this device but NOT synced to your team: ' + error.message, 'error');
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.warn('outletGroups remote save error:', e);
+    toast('⚠️ Group saved locally but the team sync failed: ' + (e?.message || e), 'error');
+    return false;
+  }
 }
 async function silentSyncOutletGroups() {
   // Poll the shared groups list and adopt remote as authoritative if it changed.
@@ -2073,6 +2086,24 @@ async function debugBans() {
   } catch(e) { console.warn('debugBans Supabase error:', e); }
 }
 try { window.debugBans = debugBans; } catch(e){}
+// Run `debugGroups()` in the console on ANY device to see local vs Supabase
+// outlet groups — tells you instantly if the save reached the DB or not.
+async function debugGroups() {
+  console.log('%c=== LOCAL outlet groups (this device) ===','font-weight:bold');
+  console.log((outletGroups||[]).map(g => `  ${g.name}: [${(g.outlets||[]).join(', ')}]`).join('\n') || '  (none)');
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value, updated_at').eq('key','outlet_groups').maybeSingle();
+    if (error) { console.warn('Supabase read error:', error.message); return; }
+    if (!data) { console.warn('Supabase has NO outlet_groups row — nothing was ever saved to the DB. The save is being blocked (likely RLS on app_settings).'); return; }
+    console.log('%c=== SUPABASE outlet groups (shared / team-wide) ===','font-weight:bold');
+    console.log('Last updated:', data.updated_at);
+    console.log((Array.isArray(data.value) ? data.value : []).map(g => `  ${g.name}: [${(g.outlets||[]).join(', ')}]`).join('\n') || '  (none)');
+    console.log('%cLOCAL but not SUPABASE → save is blocked (RLS/permissions on app_settings writes).','color:#e87');
+    console.log('%cSUPABASE but not LOCAL → this device isn\'t syncing (reload / wait 30s / enable Realtime).','color:#e87');
+  } catch(e) { console.warn('debugGroups Supabase error:', e); }
+}
+try { window.debugGroups = debugGroups; } catch(e){}
 function loadShiftComments() {
   try { return JSON.parse(localStorage.getItem('shift_comments_v27') || '{}'); }
   catch(e) { return {}; }
@@ -9281,21 +9312,22 @@ async function saveOutletGroup() {
   } else {
     outletGroups.push({ id: 'grp_' + Date.now() + '_' + Math.random().toString(36).slice(2,7), name, outlets: editingGroupOutlets.slice() });
   }
-  await saveOutletGroups();
+  const synced = await saveOutletGroups();
   closeModal('group-modal');
   populateReportOutletSelect();
   renderGroupManager();
-  toast(id ? 'Group updated' : 'Group created');
+  if (synced) toast(id ? '✓ Group updated & synced to team' : '✓ Group created & synced to team');
+  // (if not synced, saveOutletGroups already showed an error toast explaining why)
 }
 async function deleteOutletGroup(id) {
   const g = outletGroups.find(x => String(x.id) === String(id));
   if (!g) return;
   if (!confirm(`Delete the group “${g.name}”? This won't delete any outlets or data.`)) return;
   outletGroups = outletGroups.filter(x => String(x.id) !== String(id));
-  await saveOutletGroups();
+  const synced = await saveOutletGroups();
   populateReportOutletSelect();
   renderGroupManager();
-  toast('Group deleted');
+  if (synced) toast('✓ Group deleted & synced to team');
 }
 
 function setReportThisMonth(autoGenerate = true) {
