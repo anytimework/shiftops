@@ -2348,6 +2348,9 @@ async function init() {
   loadOutletGroupsRemote().then(() => {
     try { if (document.getElementById('page-reports')?.style.display !== 'none') { populateReportOutletSelect(); renderGroupManager(); } } catch(e){}
   }).catch(()=>{});
+  // Team-wide Periskope config so every device can send WhatsApp (not just the one
+  // where the API key was first entered).
+  loadPeriskopeConfigShared().catch(()=>{});
   await loadCompletedTasks();
   updateCompletedNavBadge();
   updateSidebarDate();
@@ -6523,8 +6526,47 @@ function switchWaTab(tab) {
   document.getElementById('wa-tab-periskope').style.color = tab === 'periskope' ? 'var(--accent)' : 'var(--text-muted)';
   document.getElementById('wa-tab-callmebot').style.color  = tab === 'callmebot' ? 'var(--accent)' : 'var(--text-muted)';
 }
+// Shared Periskope config cache, hydrated from app_settings (key='pk_config')
+// so EVERY team member's device can send — the API key/org phone are no longer
+// trapped in one browser's localStorage.
+let _pkConfigShared = null;
 function getPeriskopeConfig() {
-  try { return JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) { return null; }
+  let local = null;
+  try { local = JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) { local = null; }
+  // If this device has a usable local config, prefer it. Otherwise use the shared
+  // team config pulled from Supabase. Merge so a device-local payroll group choice
+  // still works even when the key/phone come from the shared record.
+  if (local?.apikey && local?.phone) return local;
+  if (_pkConfigShared?.apikey && _pkConfigShared?.phone) {
+    return { ..._pkConfigShared, ...(local || {}) , apikey: _pkConfigShared.apikey, phone: _pkConfigShared.phone };
+  }
+  return local || _pkConfigShared || null;
+}
+async function loadPeriskopeConfigShared() {
+  if (!supabaseClient) return;
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'pk_config').maybeSingle();
+    if (error) { console.warn('[pk_config] remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object') {
+      _pkConfigShared = data.value;
+      // If this device has no local config at all, adopt the shared one locally too
+      // so synchronous reads work immediately.
+      let local = null; try { local = JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) {}
+      if (!local?.apikey) localStorage.setItem('pk_config', JSON.stringify(_pkConfigShared));
+    }
+  } catch(e) { console.warn('[pk_config] remote load error:', e); }
+}
+async function savePeriskopeConfigShared(cfg) {
+  if (!supabaseClient) return false;
+  try {
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'pk_config', value: cfg, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('[pk_config] remote save failed:', error.message); return false; }
+    _pkConfigShared = cfg;
+    return true;
+  } catch(e) { console.warn('[pk_config] remote save error:', e); return false; }
 }
 function openWhatsAppSettings() {
   // Populate CallMeBot fields
@@ -6569,7 +6611,12 @@ function saveWhatsAppSettings() {
   const pkEnabled = document.getElementById('pk-enabled').checked;
   const pkPayrollGroupId = document.getElementById('pk-payroll-group').value.trim();
   const pkPayrollEnabled = document.getElementById('pk-payroll-enabled').checked;
-  localStorage.setItem('pk_config', JSON.stringify({ apikey: pkKey, phone: pkPhone, enabled: pkEnabled, payrollGroupId: pkPayrollGroupId, payrollEnabled: pkPayrollEnabled }));
+  const pkConfig = { apikey: pkKey, phone: pkPhone, enabled: pkEnabled, payrollGroupId: pkPayrollGroupId, payrollEnabled: pkPayrollEnabled };
+  localStorage.setItem('pk_config', JSON.stringify(pkConfig));
+  // Also push to the shared team config so every device can send (not just this one).
+  savePeriskopeConfigShared(pkConfig).then(ok => {
+    if (!ok) toast('⚠️ Periskope settings saved on this device, but team sync failed — other devices won’t be able to send. Run the app_settings SQL / check permissions.', 'error');
+  });
   const statusEl = document.getElementById('wa-origin-status');
   if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Settings saved'; }
   closeWhatsAppSettings();
@@ -9460,7 +9507,7 @@ async function sendInternalMessage() {
 // so that when they reply "ACK" the webhook flips their acknowledgement.
 async function sendAnnouncementWhatsApp(msg, recipient) {
   const pk = getPeriskopeConfig();
-  if (!pk?.apikey || !pk?.phone) { toast('WhatsApp send skipped — set up Periskope in Settings first', 'info'); return; }
+  if (!pk?.apikey || !pk?.phone) { toast('⚠️ WhatsApp not sent — Periskope isn’t configured on this device yet. Open WhatsApp settings once so it can sync the team key.', 'error'); return; }
   const sender = currentInternalUser || 'Jon';
   // Who receives it: GROUP → everyone except the sender; otherwise the single recipient.
   const targets = (recipient === 'GROUP')
