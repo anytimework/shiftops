@@ -1429,6 +1429,26 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         <label style="margin-bottom:0;flex:1;">Enable Periskope auto-reminders</label>
         <input type="checkbox" id="pk-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
       </div>
+      <div style="background:rgba(245,166,35,0.07);border:1px solid rgba(245,166,35,0.25);border-radius:10px;padding:12px;margin:12px 0;">
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px;">💸 Payroll clock-out alerts</div>
+        <p style="font-size:11.5px;color:var(--text2);line-height:1.6;margin-bottom:10px;">
+          When a worker is clocked out, ShiftOps posts the pay breakdown to your dedicated payroll WhatsApp group via Periskope.
+          Paste the <strong>group chat ID</strong> below (looks like <code style="color:var(--accent);">1203...@g.us</code>).
+          Find it in Periskope under the group's chat info / details, or use <em>Test group message</em> after pasting.
+        </p>
+        <div class="form-row">
+          <label>Payroll group chat ID <span style="font-weight:400;color:var(--text3);">(e.g. 120363xxxxxxxx@g.us)</span></label>
+          <input type="text" id="pk-payroll-group" placeholder="120363xxxxxxxxxx@g.us" style="font-family:var(--mono);">
+        </div>
+        <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
+          <label style="margin-bottom:0;flex:1;">Send clock-out alerts to this group</label>
+          <input type="checkbox" id="pk-payroll-enabled" style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer;">
+        </div>
+        <div style="display:flex;justify-content:flex-end;">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="testPayrollGroupMessage()">Test group message</button>
+        </div>
+        <div id="pk-payroll-test-result" style="font-size:11.5px;margin-top:6px;min-height:16px;"></div>
+      </div>
       <div style="background:rgba(79,142,247,0.06);border:1px solid rgba(79,142,247,0.2);border-radius:10px;padding:12px;margin:12px 0;font-size:11px;color:var(--text2);line-height:1.7;">
         <strong>Webhook URL</strong> (paste this into Periskope → Settings → Webhooks → message.created):<br>
         <code id="pk-webhook-url" style="display:block;margin-top:4px;font-size:11px;word-break:break-all;color:var(--accent);">https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/periskope-webhook</code>
@@ -6409,7 +6429,7 @@ async function proceedClockOut() {
   );
   closeModal('clock-out-modal');
   toast(`${s.worker_name} clocked out at ${co}`);
-  sendWhatsAppNotification(buildClockOutMessage({ ...s, break_mins: breakMins }, co));
+  notifyPayrollClockOut(buildClockOutMessage({ ...s, break_mins: breakMins }, co));
   await loadShifts();
 }
 
@@ -6506,6 +6526,9 @@ function openWhatsAppSettings() {
   document.getElementById('pk-apikey').value = pk?.apikey || '';
   document.getElementById('pk-phone').value  = pk?.phone  || '';
   document.getElementById('pk-enabled').checked = pk?.enabled === true;
+  document.getElementById('pk-payroll-group').value = pk?.payrollGroupId || '';
+  document.getElementById('pk-payroll-enabled').checked = pk?.payrollEnabled === true;
+  const _pgResult = document.getElementById('pk-payroll-test-result'); if (_pgResult) _pgResult.textContent = '';
   document.getElementById('pk-test-result').textContent = '';
   // Default to Periskope tab if configured
   switchWaTab(pk?.apikey ? 'periskope' : 'periskope');
@@ -6524,11 +6547,13 @@ function saveWhatsAppSettings() {
   const pkKey     = document.getElementById('pk-apikey').value.trim();
   const pkPhone   = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
   const pkEnabled = document.getElementById('pk-enabled').checked;
-  localStorage.setItem('pk_config', JSON.stringify({ apikey: pkKey, phone: pkPhone, enabled: pkEnabled }));
+  const pkPayrollGroupId = document.getElementById('pk-payroll-group').value.trim();
+  const pkPayrollEnabled = document.getElementById('pk-payroll-enabled').checked;
+  localStorage.setItem('pk_config', JSON.stringify({ apikey: pkKey, phone: pkPhone, enabled: pkEnabled, payrollGroupId: pkPayrollGroupId, payrollEnabled: pkPayrollEnabled }));
   const statusEl = document.getElementById('wa-origin-status');
   if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Settings saved'; }
   closeWhatsAppSettings();
-  toast('Settings saved' + (pkEnabled ? ' — Periskope reminders ON ✓' : ''));
+  toast('Settings saved' + (pkEnabled ? ' — Periskope reminders ON ✓' : '') + (pkPayrollEnabled && pkPayrollGroupId ? ' — Payroll group alerts ON ✓' : ''));
 }
 
 // ── Periskope: send a 1-1 WA message to a worker ─────────────────────────────
@@ -6552,6 +6577,69 @@ async function sendPeriskopeMessage(workerPhone, message) {
     console.log('[Periskope] sent to', phone, json.status || res.status);
     return res.ok;
   } catch(e) { console.warn('[Periskope] send error:', e); return false; }
+}
+
+// ── Periskope: send a message to a group chat (by full chat_id, e.g. xxx@g.us) ─
+async function sendPeriskopeGroupMessage(groupChatId, message) {
+  const pk = getPeriskopeConfig();
+  if (!pk?.apikey || !pk?.phone) return false;
+  let chatId = String(groupChatId || '').trim();
+  if (!chatId) return false;
+  // Group chat IDs end in @g.us. If the user pasted just the numeric id, append it.
+  if (!chatId.includes('@')) chatId = `${chatId.replace(/\D/g,'')}@g.us`;
+  try {
+    const res = await fetch('https://api.periskope.app/v1/message/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${pk.apikey}`,
+        'x-phone': pk.phone,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ chat_id: chatId, message })
+    });
+    const json = await res.json().catch(() => ({}));
+    console.log('[Periskope] group sent to', chatId, json.status || res.status);
+    return res.ok;
+  } catch(e) { console.warn('[Periskope] group send error:', e); return false; }
+}
+
+// ── Clock-out payroll alert → dedicated Periskope group chat ──────────────────
+// Replaces the old CallMeBot clock-out notification. Posts the pay breakdown to
+// the "Payroll (for attendance and clock-out)" group so payroll sees ended shifts.
+async function notifyPayrollClockOut(message) {
+  const pk = getPeriskopeConfig();
+  if (!pk?.payrollEnabled || !pk?.payrollGroupId) {
+    console.log('[Payroll] group alert skipped — not configured/enabled');
+    return false;
+  }
+  if (!pk?.apikey || !pk?.phone) {
+    console.warn('[Payroll] group alert skipped — Periskope API key/phone not set');
+    return false;
+  }
+  const ok = await sendPeriskopeGroupMessage(pk.payrollGroupId, message);
+  if (!ok) console.warn('[Payroll] group alert failed to send');
+  return ok;
+}
+
+// Test the payroll group from the settings modal (uses the unsaved field values)
+async function testPayrollGroupMessage() {
+  const resultEl = document.getElementById('pk-payroll-test-result');
+  const apikey = document.getElementById('pk-apikey').value.trim();
+  const phone  = document.getElementById('pk-phone').value.trim().replace(/\D/g,'');
+  const group  = document.getElementById('pk-payroll-group').value.trim();
+  if (!apikey || !phone) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Enter Periskope API key + org phone first.'; return; }
+  if (!group) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Paste the group chat ID first (e.g. xxx@g.us).'; return; }
+  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Sending test to group…';
+  let chatId = group.includes('@') ? group : `${group.replace(/\D/g,'')}@g.us`;
+  try {
+    const res = await fetch('https://api.periskope.app/v1/message/send', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message: '✅ ShiftOps test — payroll clock-out alerts will post here.' })
+    });
+    if (res.ok) { resultEl.style.color = 'var(--green)'; resultEl.textContent = '✓ Sent — check the payroll group.'; }
+    else { const j = await res.json().catch(()=>({})); resultEl.style.color='var(--red)'; resultEl.textContent = '✗ Failed (' + (res.status) + ') ' + (j.message || j.error || 'check chat ID & key'); }
+  } catch(e) { resultEl.style.color='var(--red)'; resultEl.textContent = 'Network error — ' + (e.message || 'could not reach Periskope'); }
 }
 
 // ── Night reminder message builder ───────────────────────────────────────────
@@ -7732,10 +7820,10 @@ async function saveRow(id) {
     'shift', id, { shift_date: s.shift_date, worker_name: workerLabel, outlet: s.outlet }
   );
   toast('Saved!');
-  // WhatsApp notification — only if clock_out was newly added via this edit
+  // Payroll clock-out alert → Periskope group — only if clock_out was newly added via this edit
   if (co && !s.clock_out) {
     const _notifShift = { ...s, clock_out: co, break_mins: br, worker_name: resolvedWorker || s.worker_name };
-    sendWhatsAppNotification(buildClockOutMessage(_notifShift, co));
+    notifyPayrollClockOut(buildClockOutMessage(_notifShift, co));
   }
   await loadShifts();
 }
