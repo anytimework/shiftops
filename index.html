@@ -198,6 +198,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .metric-card-tasks.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .metric-card-replacement { border-color: rgba(43,179,163,0.3); }
 .metric-card-available { border-color: rgba(247,171,46,0.28); }
+.metric-card-cancellations { border-color: rgba(232,64,64,0.28); }
 .metric-card-replacement.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .modal-wide { max-width: 640px; width: 92%; }
 .modal-available { max-width: 1080px; width: 94%; }
@@ -1286,6 +1287,21 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     </div>
     <div class="sub-text" style="margin-bottom:12px;">Shifts created but with <strong>no worker yet</strong> — <strong>today and all upcoming dates</strong>, grouped by day. These are the slots you still need to fill. Assign a worker directly from here.</div>
     <div id="available-list"></div>
+  </div>
+</div>
+
+<!-- CANCELLATIONS MODAL (today + recent history, cross-date) -->
+<div class="modal-overlay" id="cancellations-modal">
+  <div class="modal modal-wide">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+      <h3 style="margin:0;">🚫 Cancellations</h3>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="refreshCancellations()">↻ Refresh</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeCancellationsPanel()">Close</button>
+      </div>
+    </div>
+    <div class="sub-text" style="margin-bottom:12px;">Every processed worker cancellation, synced across devices. <strong>Today's cancellations</strong> show first, then the <strong>most recent cancellations from earlier dates</strong>. Good-will and outlet/client cancellations are not counted here.</div>
+    <div id="cancellations-list"></div>
   </div>
 </div>
 
@@ -4393,6 +4409,25 @@ async function loadCancellationLogsForCurrentView() {
   }
 }
 
+// Cross-date recent cancellations — independent of the viewed day. Powers the
+// Cancellations card + panel: today's cancellations first, then recent past ones.
+// Loaded from cancellation_log (the same table confirmCancel writes to), joined
+// in-memory with shift details for outlet/role/timing where available.
+let allCancellationsRecent = [];
+async function loadRecentCancellations() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('cancellation_log')
+      .select('worker_name, shift_id, cancelled_at, has_mc')
+      .order('cancelled_at', { ascending: false })
+      .limit(200);
+    if (error) throw error;
+    allCancellationsRecent = data || [];
+  } catch (e) {
+    allCancellationsRecent = [];
+  }
+}
+
 function cancellationCountForLoadedShifts() {
   const shiftIds = new Set((allShifts || []).map(s => String(s.id)));
   const workerCancellationLogs = (allCancellations || []).filter(c => {
@@ -4602,6 +4637,90 @@ function closeReplacementPanel() {
   const m = document.getElementById('replacement-modal');
   if (m) m.classList.remove('open');
 }
+
+// ── Cancellations panel (today + recent history, synced cross-device) ──────────
+// Today's cancellations shown first, then the most recent cancellations from
+// earlier dates. Reads allCancellationsRecent (cross-date) so it never depends on
+// which day the dashboard is currently showing.
+function cancellationsTodayCount() {
+  const todayStr = formatDate(new Date());
+  return (allCancellationsRecent || []).filter(c => c && c.cancelled_at === todayStr).length;
+}
+async function openCancellationsPanel() {
+  try { await loadRecentCancellations(); } catch(e){}
+  renderCancellationsPanel();
+  const m = document.getElementById('cancellations-modal');
+  if (m) m.classList.add('open');
+}
+function closeCancellationsPanel() {
+  const m = document.getElementById('cancellations-modal');
+  if (m) m.classList.remove('open');
+}
+async function refreshCancellations() {
+  try { await loadRecentCancellations(); } catch(e){}
+  renderCancellationsPanel();
+  toast('Cancellations refreshed');
+}
+function cancellationShiftDetails(shiftId) {
+  if (!shiftId) return null;
+  const fromLoaded = (allShifts || []).find(s => String(s.id) === String(shiftId));
+  if (fromLoaded) return fromLoaded;
+  if (taskShiftCache && taskShiftCache[String(shiftId)]) return taskShiftCache[String(shiftId)];
+  return null;
+}
+function renderCancellationsPanel() {
+  const el = document.getElementById('cancellations-list');
+  if (!el) return;
+  const todayStr = formatDate(new Date());
+  const all = (allCancellationsRecent || []).filter(c => c && c.cancelled_at);
+  if (!all.length) {
+    el.innerHTML = `<div style="text-align:center;padding:30px 12px;color:var(--text3);">
+      <div style="font-size:28px;margin-bottom:8px;">✓</div>
+      <div style="font-weight:600;color:var(--green);">No cancellations recorded</div>
+      <div class="sub-text" style="margin-top:4px;">When a worker cancellation is processed with a penalty or MC waiver, it is logged here and synced across all devices.</div>
+    </div>`;
+    return;
+  }
+  const today = all.filter(c => c.cancelled_at === todayStr);
+  const past = all.filter(c => c.cancelled_at < todayStr).slice(0, 60);
+
+  const cardFor = (c) => {
+    const s = cancellationShiftDetails(c.shift_id);
+    const outlet = s && s.outlet ? s.outlet : '';
+    const role = s && s.role ? s.role : '';
+    const start = s && s.scheduled_start ? s.scheduled_start.slice(0,5) : '';
+    const end = s && s.scheduled_end ? s.scheduled_end.slice(0,5) : '';
+    const tRange = shiftTimeRange(start, end);
+    const mcTag = c.has_mc
+      ? '<span class="task-tag tag-done">MC — penalty waived</span>'
+      : '<span class="task-tag tag-dispute">$15 penalty</span>';
+    const meta = [outlet, role].filter(Boolean).map(escapeHtml).join(' · ');
+    return `<div class="task-card">
+      <div class="task-head">
+        <span class="task-tag tag-dispute">🚫 Cancelled</span>
+        ${mcTag}
+      </div>
+      <div class="task-body">
+        <div class="task-title">${escapeHtml(c.worker_name || 'Worker')} cancelled</div>
+        <div class="task-shift">📅 <strong>${shiftDateLabel(c.cancelled_at)}</strong>${tRange ? ` · 🕒 ${tRange}` : ''}</div>
+        ${meta ? `<div class="task-meta">${meta}</div>` : ''}
+      </div>
+    </div>`;
+  };
+
+  let html = '';
+  html += `<div class="task-completed-divider" style="color:var(--red);border-top-style:solid;">Today, ${new Date(todayStr+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short'})} · ${today.length} cancellation${today.length!==1?'s':''}</div>`;
+  html += today.length
+    ? today.map(cardFor).join('')
+    : '<div class="sub-text" style="padding:6px 2px 10px;color:var(--text3);">No cancellations today.</div>';
+
+  if (past.length) {
+    html += `<div class="task-completed-divider">Recent — earlier dates</div>`;
+    html += past.map(cardFor).join('');
+  }
+  el.innerHTML = html;
+}
+
 function renderReplacementPanel() {
   const el = document.getElementById('replacement-list');
   if (!el) return;
@@ -4845,6 +4964,7 @@ async function loadShifts() {
   await loadOverpaymentCache();
   await loadTaskShiftCache();
   await loadCancellationLogsForCurrentView();
+  await loadRecentCancellations();
   await loadStandbyList();
   await loadAvailableSlots();
   renderTable();
@@ -7425,7 +7545,7 @@ async function confirmOverpayment() {
       .from('shifts')
       .select('id, shift_date, scheduled_start, outlet, overpayment_deduction')
       .eq('worker_name', workerName)
-      .eq('cancelled', false)
+      .not('cancelled', 'is', true)
       .or(`shift_date.gt.${overpaidDate},and(shift_date.eq.${overpaidDate},scheduled_start.gt.${overpaidStart})`)
       .is('clock_out', null)
       .order('shift_date')
@@ -7710,6 +7830,7 @@ function renderMetrics() {
     ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
     ${card('late','Late', late, late>0?'red':'green')}
     ${card('penalties','Penalties', countrySplitMetric(penaltyByCountry, totalPenalties>0?'red':'green'), '')}
+    ${`<div class="metric-card clickable metric-card-cancellations" onclick="openCancellationsPanel()"><div class="metric-label">🚫 Cancellations</div><div class="metric-val ${cancellationsTodayCount()>0?'red':'green'}">${cancellationsTodayCount()}</div><div class="metric-sub">Today · tap for history</div></div>`}
     ${card('sr_absorbed','SR absorbed', countrySplitMetric(srAbsorbedByCountry, srAbsorbedTotal>0?'amber':'green'), '')}
   `;
 }
@@ -7889,7 +8010,7 @@ async function applyPenaltyToNextShift(workerName, amount) {
     .from('shifts')
     .select('id, shift_date, outlet, scheduled_start, cancellation_penalty')
     .eq('worker_name', workerName)
-    .eq('cancelled', false)
+    .not('cancelled', 'is', true)
     .gte('shift_date', today)
     .order('shift_date', { ascending: true })
     .order('scheduled_start', { ascending: true })
@@ -11117,7 +11238,7 @@ async function confirmImportBookings() {
       const { data: dayShifts } = await supabaseClient
         .from('shifts').select('scheduled_start,scheduled_end,outlet')
         .eq('shift_date', r.shift_date)
-        .eq('cancelled', false)
+        .not('cancelled', 'is', true)
         .ilike('worker_name', r.worker_name.trim());
       const newStart = timeToMins(r.scheduled_start);
       const newEnd   = timeToMins(r.scheduled_end);
