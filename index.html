@@ -889,9 +889,9 @@ tr:hover td { background: rgba(91,148,249,0.045); }
             <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr 1fr auto;align-items:end;gap:12px;">
               <div class="form-row"><label>From</label><input type="date" id="report-from"></div>
               <div class="form-row"><label>To</label><input type="date" id="report-to"></div>
-              <!-- Outlet filter (payroll/client/cancellation) -->
+              <!-- Outlet filter (payroll/client/cancellation) — includes saved groups -->
               <div class="form-row" id="report-outlet-wrap">
-                <label>Outlet / client</label>
+                <label>Outlet / client / group</label>
                 <select id="report-outlet"><option value="">All outlets</option></select>
               </div>
               <!-- Worker search (worker tab) -->
@@ -915,10 +915,22 @@ tr:hover td { background: rgba(91,148,249,0.045); }
               </div>
               <button class="btn btn-primary btn-sm" onclick="generateReport()">Generate</button>
             </div>
-            <div style="display:flex;gap:8px;margin-top:8px;">
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
               <button class="btn btn-ghost btn-sm" onclick="setReportThisMonth()">This month</button>
               <button class="btn btn-ghost btn-sm" onclick="exportReportCsv()">Export CSV</button>
+              <button class="btn btn-ghost btn-sm" onclick="toggleGroupManager()">👥 Manage outlet groups</button>
             </div>
+          </div>
+        </div>
+        <!-- Outlet groups manager (collapsed by default) -->
+        <div class="table-wrap" id="group-manager-wrap" style="margin-bottom:16px;display:none;">
+          <div class="table-header">
+            <span class="table-title">Outlet groups</span>
+            <button class="btn btn-primary btn-sm" onclick="openGroupEditor()">+ New group</button>
+          </div>
+          <div style="padding:14px 18px;">
+            <p style="font-size:12px;color:var(--text2);margin-bottom:12px;">Bundle outlets a single client/group operates (even under different names) so you can report across all of them at once. Selecting a group in the filter above generates a combined report.</p>
+            <div id="group-manager-body"></div>
           </div>
         </div>
         <div class="metrics" id="report-metrics"></div>
@@ -1091,6 +1103,28 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div id="audit-modal-shift-info" style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--text2);"></div>
     <div id="audit-modal-body" style="min-height:80px;">
       <div style="text-align:center;padding:24px;"><div class="spinner"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- OUTLET GROUP EDITOR MODAL -->
+<div class="modal-overlay" id="group-modal">
+  <div class="modal" style="max-width:540px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;" id="group-modal-title">New outlet group</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('group-modal')">✕</button>
+    </div>
+    <input type="hidden" id="group-edit-id">
+    <div class="form-row"><label>Group name</label><input id="group-name" class="form-input" placeholder="e.g. Cotti Coffee Group"></div>
+    <div class="form-row">
+      <label>Outlets in this group</label>
+      <input id="group-outlet-search" class="form-input" placeholder="Filter outlets…" oninput="renderGroupOutletChecklist()" autocomplete="off" style="margin-bottom:8px;">
+      <div id="group-outlet-checklist" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:8px;"></div>
+      <div class="sub-text" style="margin-top:6px;color:var(--text3);">Tick every outlet this group operates — even if the names differ.</div>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('group-modal')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveOutletGroup()">Save group</button>
     </div>
   </div>
 </div>
@@ -1832,6 +1866,7 @@ let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount =
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 let editingWorkerId = null, editingOutletId = null;
 let profileMeta = loadProfileMeta();
+let outletGroups = loadOutletGroups(); // [{ id, name, outlets:[outletName,...] }]
 let shiftComments = loadShiftComments();
 const INTERNAL_USER_ACCOUNTS = [
   { username:'Jon', passcode:'8472915630' },
@@ -1953,7 +1988,58 @@ async function saveProfileMeta() {
     console.warn('profileMeta remote save error:', e);
   }
 }
-// ── Diagnostic: run `debugBans()` in the browser console on ANY device to see
+
+// ── Outlet groups ────────────────────────────────────────────────────────────
+// A group bundles several outlet names (which may differ in naming) under one
+// label, so a report can be generated across all outlets a client/group runs in
+// one go. Stored team-wide in app_settings (key='outlet_groups') so every device
+// shares the same groups, synced live like profileMeta.
+function loadOutletGroups() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('outlet_groups_v1') || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(e) { return []; }
+}
+async function loadOutletGroupsRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'outlet_groups').maybeSingle();
+    if (error) { console.warn('outletGroups remote load failed:', error.message); return; }
+    if (data && Array.isArray(data.value)) {
+      outletGroups = data.value;
+      localStorage.setItem('outlet_groups_v1', JSON.stringify(outletGroups));
+    } else {
+      // No remote row yet — seed from local only if this device actually has groups.
+      const local = loadOutletGroups();
+      if (local.length) { outletGroups = local; await saveOutletGroups(); }
+    }
+  } catch(e) { console.warn('outletGroups remote load error:', e); }
+}
+async function saveOutletGroups() {
+  // Groups are a simple admin-managed list; last-write-wins is acceptable here
+  // (unlike bans, concurrent group edits are rare). localStorage first, then Supabase.
+  localStorage.setItem('outlet_groups_v1', JSON.stringify(outletGroups));
+  try {
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'outlet_groups', value: outletGroups, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) console.warn('outletGroups remote save failed:', error.message);
+  } catch(e) { console.warn('outletGroups remote save error:', e); }
+}
+async function silentSyncOutletGroups() {
+  // Poll the shared groups list and adopt remote as authoritative if it changed.
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'outlet_groups').maybeSingle();
+    if (error || !data || !Array.isArray(data.value)) return;
+    if (canonicalJSON(data.value) === canonicalJSON(outletGroups)) return;
+    outletGroups = data.value;
+    localStorage.setItem('outlet_groups_v1', JSON.stringify(outletGroups));
+    // Refresh the reports outlet picker + group manager if the Reports page is open.
+    try { if (document.getElementById('page-reports')?.style.display !== 'none') { populateReportOutletSelect(); renderGroupManager(); } } catch(e){}
+  } catch(e) { /* silent */ }
+}
+
 // exactly what bans/restrictions are in Supabase vs. this device's local copy.
 // This pinpoints whether a ban failed to save (missing in Supabase) or failed to
 // sync (in Supabase but not applied locally). Safe, read-only.
@@ -2175,6 +2261,10 @@ async function init() {
     try { if (typeof rerenderOfferPanels === 'function') rerenderOfferPanels(); } catch(e){}
     try { if (typeof renderStandbyDayPanel === 'function') renderStandbyDayPanel(); } catch(e){}
   }).catch(()=>{});
+  // Team-wide outlet groups (for multi-outlet report generation), synced like bans.
+  loadOutletGroupsRemote().then(() => {
+    try { if (document.getElementById('page-reports')?.style.display !== 'none') { populateReportOutletSelect(); renderGroupManager(); } } catch(e){}
+  }).catch(()=>{});
   await loadCompletedTasks();
   updateCompletedNavBadge();
   updateSidebarDate();
@@ -2393,7 +2483,19 @@ function subscribeToReminderChanges() {
       .channel('app_settings_live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, (payload) => {
         const row = payload.new || payload.old;
-        if (!row || row.key !== 'profile_meta') return; // only care about profile_meta
+        if (!row) return;
+        // Outlet groups (multi-outlet report grouping) — sync live too.
+        if (row.key === 'outlet_groups') {
+          const gv = (payload.new && payload.new.value) || null;
+          if (!Array.isArray(gv)) return;
+          if (canonicalJSON(gv) === canonicalJSON(outletGroups)) return;
+          outletGroups = gv;
+          localStorage.setItem('outlet_groups_v1', JSON.stringify(outletGroups));
+          try { if (document.getElementById('page-reports')?.style.display !== 'none') { populateReportOutletSelect(); renderGroupManager(); } } catch(e){}
+          console.log('🔄 outlet groups synced from another device');
+          return;
+        }
+        if (row.key !== 'profile_meta') return; // only care about profile_meta
         const val = (payload.new && payload.new.value) || null;
         if (!val) return;
         const next = { workers: val.workers || {}, outlets: val.outlets || {} };
@@ -2415,6 +2517,7 @@ function subscribeToReminderChanges() {
   // mid-session never reached an already-open session on another device until a full
   // reload. This keeps eligible-standby filtering consistent across all open sessions.
   setInterval(silentSyncProfileMeta, 30000);
+  setInterval(silentSyncOutletGroups, 30000);
 }
 async function silentSyncProfileMeta() {
   // Re-fetch the shared profileMeta from Supabase and adopt it as the source of
@@ -9011,6 +9114,7 @@ let currentReportRows = [];
 let currentReportAllRows = [];
 let currentReportMetricFilter = 'all';
 let currentReportLabel = '';
+let currentReportSingleOutlet = ''; // real outlet name only when exactly one selected (for currency)
 let currentReportFrom = '';
 let currentReportTo = '';
 
@@ -9043,13 +9147,155 @@ function setReportTab(tab) {
 }
 
 function initReportsPage() {
-  const reportSel = document.getElementById('report-outlet');
-  if (reportSel) reportSel.innerHTML = '<option value="">All outlets</option>' + allOutlets.map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`).join('');
+  populateReportOutletSelect();
+  renderGroupManager();
   // Populate worker datalist
   const dl = document.getElementById('report-worker-datalist');
   if (dl) dl.innerHTML = allWorkers.map(w => `<option value="${escapeAttr(w.name)}">`).join('');
   if (!document.getElementById('report-from').value || !document.getElementById('report-to').value) setReportThisMonth(false);
   setReportTab(currentReportTab);
+}
+
+// Builds the Reports outlet/group dropdown: All outlets, saved groups (prefixed
+// group:ID), then individual outlets. Group options let one report span many outlets.
+function populateReportOutletSelect() {
+  const sel = document.getElementById('report-outlet');
+  if (!sel) return;
+  const prev = sel.value;
+  let html = '<option value="">All outlets</option>';
+  if (outletGroups.length) {
+    html += '<optgroup label="Groups">' + outletGroups
+      .slice()
+      .sort((a,b) => String(a.name).localeCompare(String(b.name)))
+      .map(g => `<option value="group:${escapeAttr(g.id)}">👥 ${escapeHtml(g.name)} (${(g.outlets||[]).length})</option>`)
+      .join('') + '</optgroup>';
+  }
+  html += '<optgroup label="Outlets">' + allOutlets
+    .map(o => `<option value="${escapeAttr(o.name)}">${escapeHtml(o.name)} · ${normaliseCountry(o.country)}</option>`)
+    .join('') + '</optgroup>';
+  sel.innerHTML = html;
+  // Restore previous selection if still valid.
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+}
+
+// Resolve the report-outlet select value into a list of outlet names to include.
+// '' → null (all outlets); 'group:ID' → that group's outlets; otherwise [single outlet].
+function resolveReportOutlets(selectValue) {
+  if (!selectValue) return null; // All outlets
+  if (selectValue.startsWith('group:')) {
+    const id = selectValue.slice(6);
+    const g = outletGroups.find(x => String(x.id) === String(id));
+    return g ? (g.outlets || []).slice() : [];
+  }
+  return [selectValue];
+}
+
+// Human label for the current report-outlet selection (group name, outlet, or All).
+function reportSelectionLabel(selectValue) {
+  if (!selectValue) return 'All outlets';
+  if (selectValue.startsWith('group:')) {
+    const g = outletGroups.find(x => String(x.id) === String(selectValue.slice(6)));
+    return g ? `${g.name} (group)` : 'Group';
+  }
+  return selectValue;
+}
+
+// ── Outlet group manager UI ──────────────────────────────────────────────────
+let editingGroupOutlets = []; // working selection while group modal is open
+function toggleGroupManager() {
+  const wrap = document.getElementById('group-manager-wrap');
+  if (!wrap) return;
+  wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
+  if (wrap.style.display === 'block') renderGroupManager();
+}
+function renderGroupManager() {
+  const body = document.getElementById('group-manager-body');
+  if (!body) return;
+  if (!outletGroups.length) {
+    body.innerHTML = '<div class="empty-state" style="padding:18px;"><div class="empty-icon">👥</div><p>No groups yet. Click “+ New group” to bundle outlets together.</p></div>';
+    return;
+  }
+  body.innerHTML = outletGroups
+    .slice()
+    .sort((a,b) => String(a.name).localeCompare(String(b.name)))
+    .map(g => {
+      const outlets = (g.outlets || []);
+      const chips = outlets.length
+        ? outlets.map(n => `<span class="badge badge-blue" style="margin:2px 4px 2px 0;">${escapeHtml(n)}</span>`).join('')
+        : '<span class="sub-text" style="color:var(--text3);">No outlets in this group yet.</span>';
+      return `<div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+          <div style="font-weight:600;">${escapeHtml(g.name)} <span class="sub-text" style="color:var(--text3);font-weight:400;">· ${outlets.length} outlet${outlets.length!==1?'s':''}</span></div>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            <button class="btn btn-ghost btn-sm" onclick="openGroupEditor('${escapeAttr(g.id)}')">Edit</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteOutletGroup('${escapeAttr(g.id)}')">Delete</button>
+          </div>
+        </div>
+        <div style="margin-top:8px;">${chips}</div>
+      </div>`;
+    }).join('');
+}
+function openGroupEditor(id) {
+  const editing = id ? outletGroups.find(g => String(g.id) === String(id)) : null;
+  document.getElementById('group-edit-id').value = editing ? editing.id : '';
+  document.getElementById('group-modal-title').textContent = editing ? 'Edit outlet group' : 'New outlet group';
+  document.getElementById('group-name').value = editing ? (editing.name || '') : '';
+  document.getElementById('group-outlet-search').value = '';
+  editingGroupOutlets = editing ? (editing.outlets || []).slice() : [];
+  renderGroupOutletChecklist();
+  document.getElementById('group-modal').classList.add('open');
+}
+function renderGroupOutletChecklist() {
+  const cl = document.getElementById('group-outlet-checklist');
+  if (!cl) return;
+  const q = (document.getElementById('group-outlet-search')?.value || '').trim().toLowerCase();
+  const list = allOutlets
+    .filter(o => !q || [o.name, normaliseCountry(o.country)].some(v => String(v||'').toLowerCase().includes(q)))
+    .sort((a,b) => String(a.name).localeCompare(String(b.name)));
+  if (!list.length) { cl.innerHTML = '<div class="sub-text" style="color:var(--text3);padding:6px;">No outlets match.</div>'; return; }
+  const selectedKeys = editingGroupOutlets.map(n => String(n).toLowerCase());
+  cl.innerHTML = list.map(o => {
+    const checked = selectedKeys.includes(String(o.name).toLowerCase()) ? 'checked' : '';
+    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 4px;cursor:pointer;font-size:13px;">
+      <input type="checkbox" ${checked} onchange="toggleGroupOutlet('${escapeAttr(o.name)}', this.checked)">
+      <span>${escapeHtml(o.name)} <span class="sub-text" style="color:var(--text3);">· ${normaliseCountry(o.country)}</span></span>
+    </label>`;
+  }).join('');
+}
+function toggleGroupOutlet(name, on) {
+  const key = String(name).toLowerCase();
+  if (on) {
+    if (!editingGroupOutlets.map(n => String(n).toLowerCase()).includes(key)) editingGroupOutlets.push(name);
+  } else {
+    editingGroupOutlets = editingGroupOutlets.filter(n => String(n).toLowerCase() !== key);
+  }
+}
+async function saveOutletGroup() {
+  const name = document.getElementById('group-name').value.trim();
+  if (!name) { toast('Please enter a group name', 'error'); return; }
+  if (!editingGroupOutlets.length) { toast('Select at least one outlet for the group', 'error'); return; }
+  const id = document.getElementById('group-edit-id').value;
+  if (id) {
+    const g = outletGroups.find(x => String(x.id) === String(id));
+    if (g) { g.name = name; g.outlets = editingGroupOutlets.slice(); }
+  } else {
+    outletGroups.push({ id: 'grp_' + Date.now() + '_' + Math.random().toString(36).slice(2,7), name, outlets: editingGroupOutlets.slice() });
+  }
+  await saveOutletGroups();
+  closeModal('group-modal');
+  populateReportOutletSelect();
+  renderGroupManager();
+  toast(id ? 'Group updated' : 'Group created');
+}
+async function deleteOutletGroup(id) {
+  const g = outletGroups.find(x => String(x.id) === String(id));
+  if (!g) return;
+  if (!confirm(`Delete the group “${g.name}”? This won't delete any outlets or data.`)) return;
+  outletGroups = outletGroups.filter(x => String(x.id) !== String(id));
+  await saveOutletGroups();
+  populateReportOutletSelect();
+  renderGroupManager();
+  toast('Group deleted');
 }
 
 function setReportThisMonth(autoGenerate = true) {
@@ -9064,36 +9310,62 @@ function setReportThisMonth(autoGenerate = true) {
 async function generateReport() {
   const from   = document.getElementById('report-from').value;
   const to     = document.getElementById('report-to').value;
-  const outlet = document.getElementById('report-outlet')?.value || '';
+  const outletSel = document.getElementById('report-outlet')?.value || '';
   const worker = document.getElementById('report-worker-search')?.value?.trim() || '';
   const cancelType = document.getElementById('report-cancel-type')?.value || '';
   if (!from || !to) { toast('Please select date range', 'error'); return; }
 
-  if (currentReportTab === 'cancellation') {
-    await generateCancellationReport(from, to, outlet, cancelType);
+  // Resolve the selection: null = all outlets, [..] = explicit set (single or group).
+  const outletList = resolveReportOutlets(outletSel);
+  const selLabel = reportSelectionLabel(outletSel);
+  if (outletList && outletList.length === 0) {
+    toast('That group has no outlets. Add outlets to it first.', 'error');
     return;
   }
 
+  if (currentReportTab === 'cancellation') {
+    await generateCancellationReport(from, to, outletList, cancelType, selLabel);
+    return;
+  }
+
+  // Server-side .eq only works for a single outlet; for groups (multiple outlets)
+  // we fetch the full date range and filter membership client-side.
   let q = supabaseClient.from('shifts').select('*').gte('shift_date', from).lte('shift_date', to).order('shift_date').order('scheduled_start');
-  if (outlet && currentReportTab !== 'worker') q = q.eq('outlet', outlet);
+  if (outletList && outletList.length === 1 && currentReportTab !== 'worker') q = q.eq('outlet', outletList[0]);
   if (worker && currentReportTab === 'worker') q = q.ilike('worker_name', `%${worker}%`);
   const { data, error } = await q;
   if (error) { toast('Failed to generate report: ' + error.message, 'error'); return; }
-  currentReportAllRows = (data || []).filter(s => !s.cancelled && s.clock_in && s.clock_out);
+  let rows = data || [];
+  // Apply multi-outlet (group) membership filter client-side.
+  if (outletList && outletList.length > 1 && currentReportTab !== 'worker') {
+    const set = new Set(outletList.map(n => String(n).toLowerCase()));
+    rows = rows.filter(s => set.has(String(s.outlet || '').toLowerCase()));
+  }
+  currentReportAllRows = rows.filter(s => !s.cancelled && s.clock_in && s.clock_out);
   currentReportRows = currentReportAllRows.slice();
   currentReportMetricFilter = 'all';
   currentReportFrom = from;
   currentReportTo = to;
-  currentReportLabel = outlet || worker || 'All outlets';
-  renderReport(from, to, outlet || worker);
+  // For money formatting: only a SINGLE outlet pins currency to one country.
+  // Groups (multi-outlet) and All outlets use the per-country split, since a group
+  // may span Singapore + Malaysia.
+  const singleOutlet = (outletList && outletList.length === 1) ? outletList[0] : '';
+  currentReportLabel = (outletList ? selLabel : '') || worker || 'All outlets';
+  currentReportSingleOutlet = singleOutlet;
+  renderReport(from, to, outletList ? selLabel : (worker || ''), singleOutlet);
 }
 
-async function generateCancellationReport(from, to, outlet, cancelType) {
+async function generateCancellationReport(from, to, outletList, cancelType, selLabel) {
   let q = supabaseClient.from('shifts').select('*').gte('shift_date', from).lte('shift_date', to).order('shift_date').order('scheduled_start');
-  if (outlet) q = q.eq('outlet', outlet);
+  if (outletList && outletList.length === 1) q = q.eq('outlet', outletList[0]);
   const { data, error } = await q;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   let rows = data || [];
+  // Group (multi-outlet) membership filter client-side.
+  if (outletList && outletList.length > 1) {
+    const set = new Set(outletList.map(n => String(n).toLowerCase()));
+    rows = rows.filter(s => set.has(String(s.outlet || '').toLowerCase()));
+  }
 
   if (cancelType === 'penalty')      rows = rows.filter(s => s.cancelled && !s.mc_url);
   else if (cancelType === 'mc')      rows = rows.filter(s => s.cancelled && s.mc_url);
@@ -9185,7 +9457,7 @@ function reportMetricCard(filter, label, value, active = currentReportMetricFilt
 }
 function setReportMetricFilter(filter) {
   currentReportMetricFilter = currentReportMetricFilter === filter ? 'all' : filter;
-  renderReport(currentReportFrom, currentReportTo, currentReportLabel);
+  renderReport(currentReportFrom, currentReportTo, currentReportLabel, currentReportSingleOutlet);
 }
 function reportRowsForMetric(rows, filter) {
   if (!filter || filter === 'all') return rows;
@@ -9214,7 +9486,10 @@ function metricFilterLabelForReport(filter) {
     total_billed: 'total billed rows'
   })[filter] || 'filtered rows';
 }
-function renderReport(from, to, outlet) {
+function renderReport(from, to, outlet, moneyOutlet) {
+  // `outlet` is the DISPLAY label (may be a group name); `moneyOutlet` is a real
+  // single outlet name used to pin currency, or '' to use the per-country split.
+  if (moneyOutlet === undefined) moneyOutlet = currentReportSingleOutlet || '';
   const body = document.getElementById('report-body');
   const sourceRows = currentReportAllRows.length ? currentReportAllRows : currentReportRows;
   const viewRows = reportRowsForMetric(sourceRows, currentReportMetricFilter);
@@ -9310,12 +9585,12 @@ function renderReport(from, to, outlet) {
         <td>TOTAL</td><td></td><td></td>
         <td style="font-family:var(--mono);">${totalHours.toFixed(2).replace(/\.00$/, '')}</td>
         <td></td>
-        <td style="font-family:var(--mono);">${reportMoney(totalPayout, outlet)}</td>
-        ${isClientTab ? '' : `<td style="font-family:var(--mono);">${reportMoney(totalWorkerPay, outlet)}</td>`}
-        ${showSrCol ? `<td style="font-family:var(--mono);color:var(--amber);">${reportMoney(totalSrAbsorbed, outlet)}</td>` : ''}
-        ${showPenaltyCol ? `<td style="font-family:var(--mono);color:var(--red);">-${reportMoney(totalPenalties, outlet)}</td>` : ''}
-        <td style="font-family:var(--mono);color:var(--teal);">${totalTransport > 0 ? reportMoney(totalTransport, outlet) : '—'}</td>
-        <td style="font-family:var(--mono);">${reportMoney(totalClientBill, outlet)}</td>
+        <td style="font-family:var(--mono);">${reportMoney(totalPayout, moneyOutlet)}</td>
+        ${isClientTab ? '' : `<td style="font-family:var(--mono);">${reportMoney(totalWorkerPay, moneyOutlet)}</td>`}
+        ${showSrCol ? `<td style="font-family:var(--mono);color:var(--amber);">${reportMoney(totalSrAbsorbed, moneyOutlet)}</td>` : ''}
+        ${showPenaltyCol ? `<td style="font-family:var(--mono);color:var(--red);">-${reportMoney(totalPenalties, moneyOutlet)}</td>` : ''}
+        <td style="font-family:var(--mono);color:var(--teal);">${totalTransport > 0 ? reportMoney(totalTransport, moneyOutlet) : '—'}</td>
+        <td style="font-family:var(--mono);">${reportMoney(totalClientBill, moneyOutlet)}</td>
         <td></td><td></td><td></td><td></td><td></td>
       </tr>
     </tbody>
@@ -13023,6 +13298,39 @@ function _billingRemoveOutletChip(idx, name) {
   _billingOnOutletToggle(idx);
 }
 
+// Import all outlets from a saved outlet group into this client's picker in one
+// click. Outlets owned by ANOTHER billing client are skipped (can't double-assign)
+// and reported back. This reuses the groups defined in Reports — no re-entry.
+function _billingImportGroup(idx, groupId) {
+  if (!groupId) return;
+  const group = outletGroups.find(g => String(g.id) === String(groupId));
+  if (!group) { toast('Group not found', 'error'); return; }
+  const row = document.querySelector(`.billing-settings-row[data-idx="${idx}"]`);
+  if (!row) return;
+  const thisClient = _bsName(idx);
+  let added = 0, skipped = [];
+  (group.outlets || []).forEach(name => {
+    const key = _outletKey(name);
+    const owner = _billingOutletOwnerMap ? _billingOutletOwnerMap[key] : null;
+    if (owner && owner !== thisClient) { skipped.push(name); return; } // owned by another client
+    // Find the matching option in this row's dropdown and tick it.
+    const opt = [...row.querySelectorAll('.bs-outlet-opt')].find(o => _outletKey(o.dataset.outlet) === key);
+    if (opt) {
+      const cb = opt.querySelector('.bs-outlet-cb');
+      if (cb && cb.dataset.checked !== '1') {
+        cb.dataset.checked = '1';
+        cb.style.background = 'var(--accent,#3b82f6)';
+        cb.textContent = '✓';
+        added++;
+      }
+    }
+  });
+  _billingOnOutletToggle(idx);
+  let msg = `Imported ${added} outlet${added !== 1 ? 's' : ''} from “${group.name}”`;
+  if (skipped.length) msg += ` · skipped ${skipped.length} already assigned to another client`;
+  toast(msg, 'success');
+}
+
 function openBillingSettingsModal() {
   loadBillingSettings();
   // Ensure the ownership map reflects current config so we can flag taken outlets.
@@ -13059,6 +13367,13 @@ function openBillingSettingsModal() {
         <div class="form-row" style="margin-bottom:8px;">
           <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Outlets in ShiftOps — pick from the list (groups their shifts into this client)</label>
           ${_billingOutletPickerHtml(idx, outlets)}
+          ${outletGroups.length ? `<div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+            <span style="font-size:11px;color:var(--text3);">📥 Import from group:</span>
+            <select class="form-input" style="flex:1;max-width:260px;font-size:12px;" onchange="_billingImportGroup(${idx}, this.value); this.value='';">
+              <option value="">Choose a saved group…</option>
+              ${outletGroups.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name))).map(g => `<option value="${escapeAttr(g.id)}">👥 ${escapeHtml(g.name)} (${(g.outlets||[]).length})</option>`).join('')}
+            </select>
+          </div>` : `<div style="font-size:11px;color:var(--text3);margin-top:8px;">Tip: create reusable outlet groups in Reports → “Manage outlet groups”, then import them here in one click.</div>`}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
           <div class="form-row" style="margin:0;">
