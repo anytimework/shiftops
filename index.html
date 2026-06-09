@@ -7348,6 +7348,7 @@ create table if not exists public.announcement_acks (
 );
 create index if not exists announcement_acks_phone_idx on public.announcement_acks (phone) where acknowledged = false;
 alter table public.internal_messages add column if not exists acknowledged_by jsonb default '[]'::jsonb;
+alter table public.internal_messages add column if not exists edited_at timestamptz;
 
 -- 1b) Completed Tasks log — durable record shown on the Completed Tasks page.
 --     Entries older than 60 days are auto-deleted by the app, but you can also
@@ -9455,8 +9456,8 @@ async function sendInternalMessage() {
 }
 
 // Send an announcement to each internal team member individually over WhatsApp
-// (via Periskope), and register a pending-ack row so that when they reply "ACK"
-// the webhook can flip their acknowledgement in internal_messages.acknowledged_by.
+// (via Periskope), verify delivery per-recipient, and register a pending-ack row
+// so that when they reply "ACK" the webhook flips their acknowledgement.
 async function sendAnnouncementWhatsApp(msg, recipient) {
   const pk = getPeriskopeConfig();
   if (!pk?.apikey || !pk?.phone) { toast('WhatsApp send skipped — set up Periskope in Settings first', 'info'); return; }
@@ -9467,18 +9468,61 @@ async function sendAnnouncementWhatsApp(msg, recipient) {
     : INTERNAL_USERS.filter(u => u === recipient);
   const waText = (name) =>
     `📢 *Announcement from ${sender}*\n\n${msg.body}\n\n— \nReply *ACK* (or *acknowledge*) to confirm you've seen this. It'll show as acknowledged in ShiftOps.`;
-  let sent = 0, skipped = [];
+
+  const headers = { 'Authorization': `Bearer ${pk.apikey}`, 'x-phone': pk.phone, 'Content-Type': 'application/json' };
+  const results = []; // { name, phone, state: 'delivered'|'queued'|'failed'|'nonumber', detail }
   const pending = [];
+
   for (const name of targets) {
     const phone = (TEAM_WHATSAPP[name] || '').replace(/\D/g,'');
-    if (!phone) { skipped.push(name); continue; }
-    const ok = await sendPeriskopeMessage(phone, waText(name));
-    if (ok) { sent++; pending.push({ phone, name }); }
-    else skipped.push(name);
+    if (!phone) { results.push({ name, state: 'nonumber' }); continue; }
+    const chatId = `${phone}@c.us`;
+    try {
+      const res = await fetch('https://api.periskope.app/v1/message/send', {
+        method: 'POST', headers, body: JSON.stringify({ chat_id: chatId, message: waText(name) })
+      });
+      const j = await res.json().catch(()=>({}));
+      if (!res.ok) { results.push({ name, phone, state: 'failed', detail: (j.message || j.error || ('HTTP '+res.status)) }); continue; }
+      // Queued OK → verify it actually sends (a 200 is only "queued", not delivered).
+      pending.push({ phone, name });
+      const uniqueId = j.unique_id || j.track_by?.unique_id || '';
+      const statusId = String(uniqueId).replace(/^.*\//,'').trim();
+      let finalState = 'queued';
+      if (statusId) {
+        for (let i = 0; i < 4; i++) {
+          await new Promise(r => setTimeout(r, 1500));
+          try {
+            const sres = await fetch(`https://api.periskope.app/v1/message/${encodeURIComponent(statusId)}/status`, { headers });
+            const sj = await sres.json().catch(()=>({}));
+            const st = (sj.status || sj.data?.status || '').toLowerCase();
+            if (st === 'sent' || st === 'delivered' || st === 'read') { finalState = 'delivered'; break; }
+            if (st === 'failed') { finalState = 'failed'; results.detail = sj.status_description; break; }
+          } catch(e) { /* keep polling */ }
+        }
+      }
+      results.push({ name, phone, state: finalState });
+    } catch(e) {
+      results.push({ name, phone, state: 'failed', detail: (e.message || 'network/CORS error') });
+    }
   }
-  // Register pending acks so the webhook can match an inbound "ACK" to this message.
+
+  // Register pending acks (for everything that at least queued) so an inbound ACK matches.
   if (pending.length) { try { await registerAnnouncementAcks(msg.id, pending); } catch(e) { console.warn('[Announce ack register]', e); } }
-  toast(sent ? `Sent on WhatsApp to ${sent} ${sent===1?'person':'people'}${skipped.length?` (no number: ${skipped.join(', ')})`:''}` : 'WhatsApp send failed for everyone — check Periskope settings', sent ? 'success' : 'error');
+
+  // Build a clear, per-person result toast so failures are visible (not silent).
+  const delivered = results.filter(r => r.state === 'delivered').map(r => r.name);
+  const queued    = results.filter(r => r.state === 'queued').map(r => r.name);
+  const failed    = results.filter(r => r.state === 'failed').map(r => r.name);
+  const nonum     = results.filter(r => r.state === 'nonumber').map(r => r.name);
+  console.log('[Announce WA] results:', JSON.stringify(results));
+
+  let parts = [];
+  if (delivered.length) parts.push(`✓ delivered: ${delivered.join(', ')}`);
+  if (queued.length)    parts.push(`⏳ queued: ${queued.join(', ')}`);
+  if (failed.length)    parts.push(`✗ failed: ${failed.join(', ')}`);
+  if (nonum.length)     parts.push(`no number: ${nonum.join(', ')}`);
+  const anyOk = delivered.length || queued.length;
+  toast(parts.length ? parts.join(' · ') : 'No recipients to send to', anyOk ? 'success' : 'error');
 }
 
 // Write one pending-ack row per recipient. The webhook looks these up by phone:
@@ -9517,6 +9561,11 @@ async function loadMessages() {
     const isUnacked = !isMine && !hasAcked;
     const ackedList = ackedBy.length ? `<div style="margin-top:8px;font-size:12px;color:var(--green);display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span>✅ Acknowledged by:</span>${ackedBy.map(n=>`<span style="background:rgba(56,199,130,0.12);border-radius:12px;padding:2px 8px;">${n}</span>`).join('')}</div>` : `<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">No acknowledgements yet</div>`;
     const ackBtn = !isMine && !hasAcked ? `<button onclick="acknowledgeMessage('${m.id}')" style="margin-top:10px;padding:6px 16px;background:var(--green);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">✓ Acknowledge</button>` : (!isMine && hasAcked ? `<div style="margin-top:10px;font-size:12px;color:var(--green);font-weight:600;">✅ You acknowledged this</div>` : '');
+    // Sender-only edit/delete controls.
+    const ownerBtns = isMine ? `<div style="margin-top:10px;display:flex;gap:8px;">
+        <button onclick="startEditAnnouncement('${m.id}')" style="padding:5px 12px;background:transparent;border:1px solid var(--border2);color:var(--text2);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">✏️ Edit</button>
+        <button onclick="deleteAnnouncement('${m.id}')" style="padding:5px 12px;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">🗑 Delete</button>
+      </div>` : '';
     return `<div style="background:${isUnacked?'rgba(79,142,247,0.07)':'var(--surface)'};border:1px solid ${isUnacked?'var(--accent)':'var(--border)'};border-radius:12px;padding:16px 18px;margin-bottom:12px;">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div style="flex:1;min-width:0;">
@@ -9525,11 +9574,19 @@ async function loadMessages() {
             <span style="font-weight:600;font-size:14px;">${m.sender}</span>
             <span style="color:var(--text-muted);font-size:12px;">→</span>
             <span style="font-size:13px;color:var(--text-muted);">${m.recipient==='GROUP'?'Everyone':m.recipient}</span>
-            <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${new Date(m.created_at).toLocaleString()}</span>
+            <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${new Date(m.created_at).toLocaleString()}${m.edited_at?' · edited':''}</span>
           </div>
-          <div style="font-size:14px;line-height:1.6;">${m.body}${m.incident_id?'<span class="sr-tag" style="margin-left:8px;">Incident linked</span>':''}</div>
+          <div id="msg-view-${m.id}" style="font-size:14px;line-height:1.6;">${escapeHtml(m.body)}${m.incident_id?'<span class="sr-tag" style="margin-left:8px;">Incident linked</span>':''}</div>
+          <div id="msg-edit-${m.id}" style="display:none;margin-top:4px;">
+            <input type="text" id="msg-edit-input-${m.id}" value="${escapeAttr(m.body)}" style="width:100%;font-family:var(--font);font-size:14px;padding:8px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button onclick="saveEditAnnouncement('${m.id}')" style="padding:5px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">Save</button>
+              <button onclick="cancelEditAnnouncement('${m.id}')" style="padding:5px 14px;background:transparent;border:1px solid var(--border2);color:var(--text2);border-radius:6px;font-size:12px;cursor:pointer;">Cancel</button>
+            </div>
+          </div>
           ${ackedList}
           ${ackBtn}
+          ${ownerBtns}
         </div>
       </div>
     </div>`;
@@ -9569,6 +9626,52 @@ async function markMessagesSeen() {
     m.seen_by = seen;
   }
   // NOTE: does NOT clear badge — badge is cleared only via acknowledgeMessage()
+}
+
+// ── Edit / delete announcements (sender only) ─────────────────────────────
+function startEditAnnouncement(id) {
+  const v = document.getElementById('msg-view-' + id);
+  const e = document.getElementById('msg-edit-' + id);
+  if (v) v.style.display = 'none';
+  if (e) { e.style.display = 'block'; const inp = document.getElementById('msg-edit-input-' + id); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
+}
+function cancelEditAnnouncement(id) {
+  const v = document.getElementById('msg-view-' + id);
+  const e = document.getElementById('msg-edit-' + id);
+  if (e) e.style.display = 'none';
+  if (v) v.style.display = '';
+}
+async function saveEditAnnouncement(id) {
+  const me = currentInternalUser || 'Jon';
+  const m = allMessages.find(x => String(x.id) === String(id));
+  if (!m) return;
+  if (m.sender !== me) { toast('Only the sender can edit this announcement', 'error'); return; }
+  const inp = document.getElementById('msg-edit-input-' + id);
+  const newBody = (inp?.value || '').trim();
+  if (!newBody) { toast('Announcement can’t be empty', 'error'); return; }
+  if (newBody === m.body) { cancelEditAnnouncement(id); return; }
+  const { error } = await supabaseClient.from('internal_messages')
+    .update({ body: newBody, edited_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) { toast('Edit failed: ' + error.message, 'error'); return; }
+  m.body = newBody; m.edited_at = new Date().toISOString();
+  toast('Announcement updated');
+  await loadMessages();
+}
+async function deleteAnnouncement(id) {
+  const me = currentInternalUser || 'Jon';
+  const m = allMessages.find(x => String(x.id) === String(id));
+  if (!m) return;
+  if (m.sender !== me) { toast('Only the sender can delete this announcement', 'error'); return; }
+  if (!confirm('Delete this announcement? This removes it for everyone and can’t be undone.')) return;
+  // Clean up any pending WhatsApp acks for this message first (best-effort).
+  try { await supabaseClient.from('announcement_acks').delete().eq('message_id', id); } catch(e) {}
+  const { error } = await supabaseClient.from('internal_messages').delete().eq('id', id);
+  if (error) { toast('Delete failed: ' + error.message, 'error'); return; }
+  // Drop any localStorage ack fallback for this id too.
+  try { const store = JSON.parse(localStorage.getItem('msg_acks_v1') || '{}'); delete store[String(id)]; localStorage.setItem('msg_acks_v1', JSON.stringify(store)); } catch(e) {}
+  toast('Announcement deleted');
+  await loadMessages();
 }
 async function refreshAnnouncementBadge() {
   if (!currentInternalUser || !supabaseClient) { updateAnnouncementBadge(0); return; }
