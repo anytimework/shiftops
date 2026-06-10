@@ -4122,6 +4122,13 @@ function thirdPartyPlatformFeeForShift(s) {
   // Fixed fee type (sr_hours = 0): entire stored absorbed is the platform fee
   return storedAbsorbed;
 }
+// Special-rate portion of SR absorbed = total absorbed minus the 3rd-party platform fee.
+// (Hourly type: rate diff × hours. Fixed-fee type: zero, since it's all platform fee.)
+function specialRateAbsorbedForShift(s) {
+  if (!s?.sr_worker) return 0;
+  const total = parseFloat(s.sr_absorbed || 0) || 0;
+  return Math.max(0, total - thirdPartyPlatformFeeForShift(s));
+}
 function isPayableShift(s) {
   const workerName = String(s?.worker_name || '').trim().toLowerCase();
   return workerName && workerName !== 'available' && !s?.cancelled;
@@ -15385,6 +15392,13 @@ async function loadFinancePage() {
   const estByCountry = splitAmountsByCountry(estRows, estimatedPaymentForShift);
   const srRows = shifts.filter(s => srAbsorbedForShift(s) > 0);
   const srByCountry = splitAmountsByCountry(shifts, srAbsorbedForShift);
+  // Split SR absorbed into its two components:
+  //  • Special rate absorbed = (special rate − client rate) × hours
+  //  • 3rd-party platform fee = fixed fee we pay the external platform (e.g. $10/job)
+  const specialRateRows = shifts.filter(s => specialRateAbsorbedForShift(s) > 0);
+  const specialRateByCountry = splitAmountsByCountry(shifts, specialRateAbsorbedForShift);
+  const platformFeeRows = shifts.filter(s => thirdPartyPlatformFeeForShift(s) > 0);
+  const platformFeeByCountrySR = splitAmountsByCountry(shifts, thirdPartyPlatformFeeForShift);
   const cancelShifts = shifts.filter(s => s.cancelled);
   const cancelCollectedByCountry = splitAmountsByCountry(cancelShifts, shiftPenaltyAmount);
   const lateRows = shifts.filter(s => effectiveLatePenalty(s) > 0);
@@ -15397,6 +15411,8 @@ async function loadFinancePage() {
     paid_out:    { title: 'Total paid out', rows: paidOutRows, amountFn: totalPaymentForShift },
     estimated:   { title: 'Estimated payout', rows: estRows, amountFn: estimatedPaymentForShift },
     sr_absorbed: { title: 'SR absorbed (cost)', rows: srRows, amountFn: srAbsorbedForShift },
+    special_rate: { title: 'Special rate absorbed (cost)', rows: specialRateRows, amountFn: specialRateAbsorbedForShift },
+    platform_fee: { title: '3rd-party platform fees (cost)', rows: platformFeeRows, amountFn: thirdPartyPlatformFeeForShift },
     cancellations_collected: { title: 'Cancellations collected', rows: cancelShifts, amountFn: shiftPenaltyAmount },
     late:        { title: 'Late penalties', rows: lateRows, amountFn: effectiveLatePenalty },
     prior_cancel:{ title: 'Prior cancel deductions', rows: priorRows, amountFn: s => parseFloat(s.cancellation_penalty || 0) },
@@ -15417,7 +15433,8 @@ async function loadFinancePage() {
   document.getElementById('finance-metrics').innerHTML = `
     ${card('paid_out','💵 Total paid out', paidByCountry, 'green')}
     ${card('estimated','⏳ Estimated payout', estByCountry, 'amber')}
-    ${card('sr_absorbed','↺ SR absorbed (cost)', srByCountry, 'amber')}
+    ${card('special_rate','↺ Special rate absorbed (cost)', specialRateByCountry, 'red')}
+    ${card('platform_fee','🏷️ 3rd-party platform fees (cost)', platformFeeByCountrySR, 'red')}
     ${card('cancellations_collected','🚫 Cancellations collected', cancelCollectedByCountry, 'green')}
     ${card('late','⏰ Late penalties', latePenByCountry, 'green')}
     ${card('prior_cancel','↩︎ Prior cancel deductions', priorCancelByCountry, 'green')}
@@ -15448,9 +15465,6 @@ async function loadFinancePage() {
     Malaysia:  (lateCollected.Malaysia || 0) + (cancelCollected.Malaysia || 0) + (priorCancelCollected.Malaysia || 0),
     Philippines: (lateCollected.Philippines || 0) + (cancelCollected.Philippines || 0) + (priorCancelCollected.Philippines || 0)
   };
-  // 3rd-party platform fees PAID by us (a cost we absorb, already counted inside SR absorbed).
-  // Shown here for reference only — NOT added to revenue.
-  const platformFeeByCountry = splitAmountsByCountry(shifts.filter(s => !s.cancelled), thirdPartyPlatformFeeForShift);
 
   document.getElementById('finance-commission-body').innerHTML = `
     <div style="display:flex;flex-wrap:wrap;gap:32px;">
@@ -15472,14 +15486,8 @@ async function loadFinancePage() {
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${penaltiesByCountry.Malaysia.toFixed(2)}</div>
         ${penaltiesByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇵🇭 ₱${penaltiesByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>
-      ${(platformFeeByCountry.Singapore > 0 || platformFeeByCountry.Malaysia > 0 || platformFeeByCountry.Philippines > 0) ? `<div style="min-width:180px;">
-        <div class="sub-text" style="margin-bottom:4px;">3rd-party platform fees (cost)</div>
-        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">🇸🇬 −$${platformFeeByCountry.Singapore.toFixed(2)}</div>
-        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">🇲🇾 −RM${platformFeeByCountry.Malaysia.toFixed(2)}</div>
-        ${platformFeeByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">🇵🇭 −₱${platformFeeByCountry.Philippines.toFixed(2)}</div>` : ''}
-      </div>` : ''}
     </div>
-    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only). <strong>GSV = hours × client rate</strong> (same basis as Total paid out). Commission = each outlet's set % of its GSV. Penalties collected are additional revenue. 3rd-party platform fees are a cost we pay (already counted in SR absorbed). For invoiced figures, use Xero Billing.</div>
+    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only). <strong>GSV = hours × client rate</strong> (same basis as Total paid out). Commission = each outlet's set % of its GSV. Penalties collected are additional revenue. Special rate absorbed and 3rd-party platform fees are costs (shown as separate metric cards above and in the P&amp;L). For invoiced figures, use Xero Billing.</div>
   `;
 
   // ── Operating costs: expenses + salaries for the period ─────────────
@@ -15588,6 +15596,16 @@ async function loadFinancePage() {
     MYR: (commByCountry.Malaysia || 0) + (penaltiesByCountry.Malaysia || 0),
     PHP: (commByCountry.Philippines || 0) + (penaltiesByCountry.Philippines || 0)
   };
+  const specialRateByCur = {
+    SGD: (specialRateByCountry.Singapore || 0),
+    MYR: (specialRateByCountry.Malaysia || 0),
+    PHP: (specialRateByCountry.Philippines || 0)
+  };
+  const platformFeeByCur = {
+    SGD: (platformFeeByCountrySR.Singapore || 0),
+    MYR: (platformFeeByCountrySR.Malaysia || 0),
+    PHP: (platformFeeByCountrySR.Philippines || 0)
+  };
   const srAbsorbedByCur = {
     SGD: (srByCountry.Singapore || 0),
     MYR: (srByCountry.Malaysia || 0),
@@ -15601,6 +15619,8 @@ async function loadFinancePage() {
     const exp = expByCur[c] || 0;
     const sal = salByCur[c] || 0;
     const sr  = srAbsorbedByCur[c] || 0;
+    const specialRate = specialRateByCur[c] || 0;
+    const platformFee = platformFeeByCur[c] || 0;
     const cost = exp + sal + sr;
     const profit = rev - cost;
     const profitColor = profit >= 0 ? 'var(--green)' : 'var(--red)';
@@ -15609,13 +15629,14 @@ async function loadFinancePage() {
       <div class="pen-row"><span>Revenue (commission + penalties)</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(rev, c)}</span></div>
       <div class="pen-row"><span>− Expenses</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(exp, c)}</span></div>
       <div class="pen-row"><span>− Salaries (incl. CPF)</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(sal, c)}</span></div>
-      ${sr > 0 ? `<div class="pen-row"><span>− SR absorbed</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(sr, c)}</span></div>` : ''}
+      ${specialRate > 0 ? `<div class="pen-row"><span>− Special rate absorbed</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(specialRate, c)}</span></div>` : ''}
+      ${platformFee > 0 ? `<div class="pen-row"><span>− 3rd-party platform fees</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(platformFee, c)}</span></div>` : ''}
       <div class="pen-row total" style="border-top:1px solid var(--border2);margin-top:6px;padding-top:8px;"><span style="font-weight:700;">${profit >= 0 ? 'Net profit' : 'Net loss'}</span><span style="font-family:var(--mono);font-weight:700;font-size:16px;color:${profitColor};">${fmtMoney(profit, c)}</span></div>
     </div>`;
   }).join('');
   document.getElementById('finance-pl-body').innerHTML = `
     <div style="display:flex;flex-wrap:wrap;gap:16px;">${plRowsHtml}</div>
-    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + SR absorbed (incl. 3rd-party platform fees we pay)</strong>. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
+    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + special rate absorbed + 3rd-party platform fees</strong>. Special rate absorbed = (special rate − client rate) × hours; platform fee = fixed fee we pay the external platform. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
   `;
   const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
   document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
