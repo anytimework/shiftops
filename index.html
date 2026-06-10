@@ -15448,7 +15448,8 @@ async function loadFinancePage() {
     Malaysia:  (lateCollected.Malaysia || 0) + (cancelCollected.Malaysia || 0) + (priorCancelCollected.Malaysia || 0),
     Philippines: (lateCollected.Philippines || 0) + (cancelCollected.Philippines || 0) + (priorCancelCollected.Philippines || 0)
   };
-  // 3rd-party platform fees earned (also revenue).
+  // 3rd-party platform fees PAID by us (a cost we absorb, already counted inside SR absorbed).
+  // Shown here for reference only — NOT added to revenue.
   const platformFeeByCountry = splitAmountsByCountry(shifts.filter(s => !s.cancelled), thirdPartyPlatformFeeForShift);
 
   document.getElementById('finance-commission-body').innerHTML = `
@@ -15472,13 +15473,13 @@ async function loadFinancePage() {
         ${penaltiesByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇵🇭 ₱${penaltiesByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>
       ${(platformFeeByCountry.Singapore > 0 || platformFeeByCountry.Malaysia > 0 || platformFeeByCountry.Philippines > 0) ? `<div style="min-width:180px;">
-        <div class="sub-text" style="margin-bottom:4px;">3rd-party platform fees</div>
-        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${platformFeeByCountry.Singapore.toFixed(2)}</div>
-        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${platformFeeByCountry.Malaysia.toFixed(2)}</div>
-        ${platformFeeByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇵🇭 ₱${platformFeeByCountry.Philippines.toFixed(2)}</div>` : ''}
+        <div class="sub-text" style="margin-bottom:4px;">3rd-party platform fees (cost)</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">🇸🇬 −$${platformFeeByCountry.Singapore.toFixed(2)}</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">🇲🇾 −RM${platformFeeByCountry.Malaysia.toFixed(2)}</div>
+        ${platformFeeByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">🇵🇭 −₱${platformFeeByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>` : ''}
     </div>
-    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only). <strong>GSV = hours × client rate</strong> (same basis as Total paid out). Commission = each outlet's set % of its GSV. Penalties collected and platform fees are additional revenue. For invoiced figures, use Xero Billing.</div>
+    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only). <strong>GSV = hours × client rate</strong> (same basis as Total paid out). Commission = each outlet's set % of its GSV. Penalties collected are additional revenue. 3rd-party platform fees are a cost we pay (already counted in SR absorbed). For invoiced figures, use Xero Billing.</div>
   `;
 
   // ── Operating costs: expenses + salaries for the period ─────────────
@@ -15574,15 +15575,18 @@ async function loadFinancePage() {
   `;
 
   // ── Profit & Loss (estimated) ───────────────────────────────────────
-  // Revenue = commission + penalties collected + 3rd-party platform fees.
+  // Revenue = commission + penalties collected.
   // (Worker pay and GSV are pass-through: the client pays GSV, the worker keeps
   //  their rate, we keep commission — so revenue is our commission, not GSV.)
+  // 3rd-party platform fees are NOT revenue — they are a cost we pay, already
+  // captured inside SR absorbed below (so they are not added here to avoid
+  // double-counting them as both revenue and cost).
   // Costs = operating expenses + salaries (incl. employer CPF) + SR absorbed.
   // Reported per currency since SG bills SGD, MY bills MYR, and PH salaries are PHP.
   const revByCur = {
-    SGD: (commByCountry.Singapore || 0) + (penaltiesByCountry.Singapore || 0) + (platformFeeByCountry.Singapore || 0),
-    MYR: (commByCountry.Malaysia || 0) + (penaltiesByCountry.Malaysia || 0) + (platformFeeByCountry.Malaysia || 0),
-    PHP: (commByCountry.Philippines || 0) + (penaltiesByCountry.Philippines || 0) + (platformFeeByCountry.Philippines || 0)
+    SGD: (commByCountry.Singapore || 0) + (penaltiesByCountry.Singapore || 0),
+    MYR: (commByCountry.Malaysia || 0) + (penaltiesByCountry.Malaysia || 0),
+    PHP: (commByCountry.Philippines || 0) + (penaltiesByCountry.Philippines || 0)
   };
   const srAbsorbedByCur = {
     SGD: (srByCountry.Singapore || 0),
@@ -15602,7 +15606,7 @@ async function loadFinancePage() {
     const profitColor = profit >= 0 ? 'var(--green)' : 'var(--red)';
     return `<div style="min-width:230px;border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;">
       <div style="font-weight:700;font-family:var(--mono);margin-bottom:8px;">${c}</div>
-      <div class="pen-row"><span>Revenue (commission + penalties${(platformFeeByCountry.Singapore>0||platformFeeByCountry.Malaysia>0)?' + fees':''})</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(rev, c)}</span></div>
+      <div class="pen-row"><span>Revenue (commission + penalties)</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(rev, c)}</span></div>
       <div class="pen-row"><span>− Expenses</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(exp, c)}</span></div>
       <div class="pen-row"><span>− Salaries (incl. CPF)</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(sal, c)}</span></div>
       ${sr > 0 ? `<div class="pen-row"><span>− SR absorbed</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(sr, c)}</span></div>` : ''}
@@ -15611,7 +15615,7 @@ async function loadFinancePage() {
   }).join('');
   document.getElementById('finance-pl-body').innerHTML = `
     <div style="display:flex;flex-wrap:wrap;gap:16px;">${plRowsHtml}</div>
-    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected${(platformFeeByCountry.Singapore>0||platformFeeByCountry.Malaysia>0||platformFeeByCountry.Philippines>0)?' + 3rd-party platform fees':''}</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + SR absorbed</strong>. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
+    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + SR absorbed (incl. 3rd-party platform fees we pay)</strong>. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
   `;
   const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
   document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
