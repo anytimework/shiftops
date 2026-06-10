@@ -1106,11 +1106,16 @@ tr:hover td { background: rgba(91,148,249,0.045); }
           <h2>Finance Dashboard</h2>
           <p style="font-size:12px;color:var(--text2);margin-top:3px;">Read-only financial overview · SR absorbed, cancellations collected, payouts, commission &amp; analytics</p>
         </div>
-        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
-          <select id="fin-period" onchange="loadFinancePage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
-            <option value="all">All loaded shifts</option>
-            <option value="today">Today only</option>
+        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;align-items:center;">
+          <select id="fin-granularity" onchange="onFinGranularityChange()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+            <option value="day">Daily</option>
+            <option value="week">Weekly</option>
+            <option value="month" selected>Monthly</option>
+            <option value="all">All past</option>
           </select>
+          <button class="btn btn-ghost btn-sm" id="fin-prev" onclick="finShiftPeriod(-1)" title="Previous period">‹</button>
+          <span id="fin-period-label" style="font-size:13px;font-weight:600;min-width:150px;text-align:center;font-family:var(--mono);"></span>
+          <button class="btn btn-ghost btn-sm" id="fin-next" onclick="finShiftPeriod(1)" title="Next period">›</button>
           <button class="btn btn-primary btn-sm" onclick="loadFinancePage()">↻ Refresh</button>
         </div>
       </div>
@@ -1883,7 +1888,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>Description</label><input type="text" id="exp-desc" placeholder="e.g. Software subscription, Client dinner, Staff deduction — Jayden"></div>
     <div class="form-grid">
       <div class="form-row"><label>Category</label>
-        <select id="exp-category">
+        <select id="exp-category" onchange="onExpenseCategoryChange()">
           <option value="Subscription">Subscription</option>
           <option value="Salary">Salary</option>
           <option value="CPF">CPF / Statutory</option>
@@ -1904,16 +1909,35 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         </select>
       </div>
       <div class="form-row"><label>Deduction?</label>
-        <select id="exp-is-deduction">
+        <select id="exp-is-deduction" onchange="onExpenseDeductionChange()">
           <option value="false">No — normal expense</option>
           <option value="true">Yes — staff salary deduction</option>
         </select>
       </div>
     </div>
+    <div class="form-grid" id="exp-staff-row" style="display:none;">
+      <div class="form-row"><label>Staff member (deduct from)</label>
+        <select id="exp-staff"></select>
+      </div>
+      <div class="form-row"><label>Apply to month</label><input type="month" id="exp-staff-month"></div>
+    </div>
+    <div class="form-row" id="exp-staff-hint" style="display:none;"><div class="sub-text" style="color:var(--amber);">This amount will be added to the selected staff member's <strong>deductions</strong> for the chosen month and will reduce their net pay on their Salary page.</div></div>
     <div class="form-row"><label>Notes (optional)</label><input type="text" id="exp-notes" placeholder="Any detail to remember"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
       <button class="btn btn-ghost btn-sm" onclick="closeModal('expense-modal')">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="saveExpense()">Save expense</button>
+    </div>
+  </div>
+</div>
+
+<!-- FINANCE METRIC DRILL-DOWN MODAL -->
+<div class="modal-overlay" id="finance-drill-modal">
+  <div class="modal" style="width:680px;max-width:92vw;">
+    <h3 id="finance-drill-title">Detail</h3>
+    <div class="sub-text" id="finance-drill-sub" style="margin-bottom:10px;"></div>
+    <div id="finance-drill-body" style="max-height:60vh;overflow:auto;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('finance-drill-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -14936,19 +14960,51 @@ async function loadExpenses() {
         currency: r.currency || 'SGD',
         recurring: r.recurring || 'one_off',
         is_deduction: !!r.is_deduction,
-        notes: r.notes || ''
+        notes: r.notes || '',
+        staff: r.staff || '',
+        staff_month: r.staff_month || ''
       }));
       saveExpensesLS();
     }
   } catch (e) {}
   return expensesCache;
 }
+function populateExpenseStaffSelect(selected) {
+  const sel = document.getElementById('exp-staff');
+  if (!sel) return;
+  // Staff that can receive deductions = everyone with a salary profile (not finance-only).
+  const staff = INTERNAL_USERS.filter(u => u !== 'Emmanuel');
+  sel.innerHTML = staff.map(u => `<option value="${u}" ${u === selected ? 'selected' : ''}>${u}</option>`).join('');
+  if (selected) sel.value = selected;
+}
+function onExpenseDeductionChange() {
+  const isDed = document.getElementById('exp-is-deduction').value === 'true';
+  // Auto-switch category to Staff Deduction when toggled on (and only then show staff row).
+  if (isDed) {
+    document.getElementById('exp-category').value = 'Staff Deduction';
+  }
+  refreshExpenseStaffRow();
+}
+function onExpenseCategoryChange() {
+  const cat = document.getElementById('exp-category').value;
+  if (cat === 'Staff Deduction') {
+    document.getElementById('exp-is-deduction').value = 'true';
+  }
+  refreshExpenseStaffRow();
+}
+function refreshExpenseStaffRow() {
+  const isDed = document.getElementById('exp-is-deduction').value === 'true'
+    || document.getElementById('exp-category').value === 'Staff Deduction';
+  document.getElementById('exp-staff-row').style.display = isDed ? '' : 'none';
+  document.getElementById('exp-staff-hint').style.display = isDed ? '' : 'none';
+}
 function openExpenseModal(id) {
   if (currentUserRole() !== 'owner') { toast('Expenses are private to the owner', 'error'); return; }
   document.getElementById('expense-modal-title').textContent = id ? 'Edit expense' : 'Add expense';
   const e = id ? (expensesCache || []).find(x => String(x.id) === String(id)) : null;
+  const today = new Date().toISOString().slice(0, 10);
   document.getElementById('exp-id').value = e ? e.id : '';
-  document.getElementById('exp-date').value = e ? e.date : new Date().toISOString().slice(0, 10);
+  document.getElementById('exp-date').value = e ? e.date : today;
   document.getElementById('exp-desc').value = e ? e.description : '';
   document.getElementById('exp-category').value = e ? e.category : 'Subscription';
   document.getElementById('exp-amount').value = e ? e.amount : '';
@@ -14956,6 +15012,10 @@ function openExpenseModal(id) {
   document.getElementById('exp-recurring').value = e ? e.recurring : 'one_off';
   document.getElementById('exp-is-deduction').value = e ? String(!!e.is_deduction) : 'false';
   document.getElementById('exp-notes').value = e ? e.notes : '';
+  populateExpenseStaffSelect(e && e.staff ? e.staff : (INTERNAL_USERS.filter(u => u !== 'Emmanuel')[0] || ''));
+  // Apply-to month defaults to the expense's month.
+  document.getElementById('exp-staff-month').value = monthKey(e ? e.date : today);
+  refreshExpenseStaffRow();
   openModalById('expense-modal');
 }
 async function saveExpense() {
@@ -14967,15 +15027,21 @@ async function saveExpense() {
   const amount = parseFloat(document.getElementById('exp-amount').value || 0) || 0;
   const currency = document.getElementById('exp-currency').value;
   const recurring = document.getElementById('exp-recurring').value;
-  const is_deduction = document.getElementById('exp-is-deduction').value === 'true';
+  const is_deduction = document.getElementById('exp-is-deduction').value === 'true' || category === 'Staff Deduction';
   const notes = document.getElementById('exp-notes').value.trim();
+  const staff = is_deduction ? (document.getElementById('exp-staff').value || '') : '';
+  const staffMonth = is_deduction ? (document.getElementById('exp-staff-month').value || monthKey(date)) : '';
   if (!date || !description || !amount) { toast('Date, description and amount are required', 'error'); return; }
+  if (is_deduction && !staff) { toast('Select the staff member to deduct from', 'error'); return; }
 
   if (!expensesCache) expensesCache = loadExpensesLS();
+  // Detect the previous staff/month/amount if editing, so we can reverse the old salary deduction before applying the new.
+  const prev = id ? (expensesCache || []).find(x => String(x.id) === String(id)) : null;
+
   let savedId = id;
   if (supabaseClient) {
     try {
-      const payload = { exp_date: date, description, category, amount, currency, recurring, is_deduction, notes, updated_at: new Date().toISOString(), created_by: currentInternalUser };
+      const payload = { exp_date: date, description, category, amount, currency, recurring, is_deduction, notes, staff, staff_month: staffMonth, updated_at: new Date().toISOString(), created_by: currentInternalUser };
       if (id) {
         const { error } = await supabaseClient.from('expenses').update(payload).eq('id', id);
         if (error) throw error;
@@ -14985,25 +15051,49 @@ async function saveExpense() {
         savedId = data && data[0] ? data[0].id : ('local-' + Date.now());
       }
     } catch (e) {
-      // fall through to LS-only id
       if (!savedId) savedId = 'local-' + Date.now();
     }
   } else if (!savedId) {
     savedId = 'local-' + Date.now();
   }
 
-  const rec = { id: savedId, date, description, category, amount, currency, recurring, is_deduction, notes };
+  const rec = { id: savedId, date, description, category, amount, currency, recurring, is_deduction, notes, staff, staff_month: staffMonth };
   const idx = expensesCache.findIndex(x => String(x.id) === String(savedId));
   if (idx >= 0) expensesCache[idx] = rec; else expensesCache.unshift(rec);
   saveExpensesLS();
+
+  // Sync into the staff member's salary deduction for the chosen month.
+  // 1) Reverse any prior deduction this expense contributed (on edit).
+  if (prev && prev.is_deduction && prev.staff && prev.staff_month) {
+    await adjustSalaryDeduction(prev.staff, prev.staff_month, -(parseFloat(prev.amount) || 0));
+  }
+  // 2) Apply the new deduction.
+  if (is_deduction && staff && staffMonth) {
+    await adjustSalaryDeduction(staff, staffMonth, amount);
+  }
+
   closeModal('expense-modal');
   toast(id ? 'Expense updated' : 'Expense added');
   renderExpensesPage();
 }
+// Add (or subtract) a delta to a staff member's salary deduction for a month.
+async function adjustSalaryDeduction(user, month, delta) {
+  await loadSalaryEntries();
+  const entry = getSalaryEntry(user, month);
+  entry.username = user; entry.month = month;
+  entry.deduction = Math.max(0, (parseFloat(entry.deduction) || 0) + (parseFloat(delta) || 0));
+  await persistSalaryEntry(entry);
+}
 async function deleteExpense(id) {
   if (currentUserRole() !== 'owner') return;
   if (!confirm('Delete this expense entry?')) return;
+  if (!expensesCache) expensesCache = loadExpensesLS();
+  const rec = (expensesCache || []).find(x => String(x.id) === String(id));
   if (supabaseClient) { try { await supabaseClient.from('expenses').delete().eq('id', id); } catch (e) {} }
+  // Reverse any salary deduction this expense applied.
+  if (rec && rec.is_deduction && rec.staff && rec.staff_month) {
+    await adjustSalaryDeduction(rec.staff, rec.staff_month, -(parseFloat(rec.amount) || 0));
+  }
   expensesCache = (expensesCache || []).filter(x => String(x.id) !== String(id));
   saveExpensesLS();
   toast('Expense deleted');
@@ -15052,11 +15142,12 @@ async function renderExpensesPage() {
   }
   const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
   const body = `<table><thead><tr>
-    <th>Date</th><th>Description</th><th>Category</th><th>Type</th><th style="text-align:right;">Amount</th><th>Notes</th><th></th>
+    <th>Date</th><th>Description</th><th>Category</th><th>Staff</th><th>Type</th><th style="text-align:right;">Amount</th><th>Notes</th><th></th>
   </tr></thead><tbody>${rows.map(e => `<tr>
     <td>${esc(e.date)}</td>
     <td style="font-weight:600;">${esc(e.description)}${e.is_deduction ? ' <span class="nav-pill-new" style="background:var(--amber);">DEDUCTION</span>' : ''}</td>
     <td>${esc(e.category)}</td>
+    <td>${e.is_deduction && e.staff ? esc(e.staff) + (e.staff_month ? ` <span class="sub-text">(${esc(e.staff_month)})</span>` : '') : '—'}</td>
     <td>${e.recurring === 'monthly' ? '🔁 Monthly' : 'One-off'}</td>
     <td style="text-align:right;font-family:var(--mono);font-weight:600;${e.is_deduction ? 'color:var(--amber);' : 'color:var(--red);'}">${fmtMoney(e.amount, e.currency)}</td>
     <td class="sub-text">${esc(e.notes || '—')}</td>
@@ -15066,61 +15157,149 @@ async function renderExpensesPage() {
 }
 
 // ── Finance Dashboard (owner + finance) ──────────────────────────
+// ── Finance period state (past-only) ─────────────────────────────
+// Granularity: day | week | month | all. anchor = a Date inside the selected
+// period. We default the anchor to the last COMPLETED period (so "today" and
+// future are never included by default), and clamp the period end to <= yesterday.
+let finGranularity = 'month';
+let finAnchor = null; // Date
+function _startOfDay(d) { const x = new Date(d); x.setHours(0,0,0,0); return x; }
+function _ymd(d) { return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function _startOfWeek(d) { const x = _startOfDay(d); const day = (x.getDay()+6)%7; x.setDate(x.getDate()-day); return x; } // Monday start
+function _endExclusiveYesterday() { const t = _startOfDay(new Date()); return t; } // shifts strictly before today are "past"
+function finDefaultAnchor() {
+  // Last completed period before today.
+  const today = _startOfDay(new Date());
+  if (finGranularity === 'day') { const d = new Date(today); d.setDate(d.getDate()-1); return d; }
+  if (finGranularity === 'week') { const sw = _startOfWeek(today); const d = new Date(sw); d.setDate(d.getDate()-1); return _startOfWeek(d); }
+  if (finGranularity === 'month') { const d = new Date(today.getFullYear(), today.getMonth(), 0); return d; } // last day of previous month
+  return today; // all
+}
+function finPeriodRange() {
+  // Returns { start, endExclusive, label } where both are Dates; endExclusive is
+  // never beyond start-of-today (past-only). For 'all', start=epoch.
+  const today = _startOfDay(new Date());
+  if (!finAnchor) finAnchor = finDefaultAnchor();
+  let start, endExcl, label;
+  if (finGranularity === 'day') {
+    start = _startOfDay(finAnchor);
+    endExcl = new Date(start); endExcl.setDate(endExcl.getDate()+1);
+    label = start.toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' });
+  } else if (finGranularity === 'week') {
+    start = _startOfWeek(finAnchor);
+    endExcl = new Date(start); endExcl.setDate(endExcl.getDate()+7);
+    const wkEnd = new Date(endExcl); wkEnd.setDate(wkEnd.getDate()-1);
+    label = start.toLocaleDateString(undefined,{day:'numeric',month:'short'}) + ' – ' + wkEnd.toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'});
+  } else if (finGranularity === 'month') {
+    start = new Date(finAnchor.getFullYear(), finAnchor.getMonth(), 1);
+    endExcl = new Date(finAnchor.getFullYear(), finAnchor.getMonth()+1, 1);
+    label = start.toLocaleDateString(undefined,{month:'long', year:'numeric'});
+  } else {
+    start = new Date(2000,0,1);
+    endExcl = today; // all PAST shifts (exclude today + future)
+    label = 'All past (before today)';
+  }
+  // Clamp endExclusive to today (past-only): never include today or future.
+  if (endExcl > today) endExcl = today;
+  return { start, endExcl, label };
+}
+function onFinGranularityChange() {
+  finGranularity = document.getElementById('fin-granularity').value;
+  finAnchor = finDefaultAnchor();
+  loadFinancePage();
+}
+function finShiftPeriod(dir) {
+  if (finGranularity === 'all') return; // no navigation for all
+  if (!finAnchor) finAnchor = finDefaultAnchor();
+  const a = new Date(finAnchor);
+  if (finGranularity === 'day') a.setDate(a.getDate()+dir);
+  else if (finGranularity === 'week') a.setDate(a.getDate()+7*dir);
+  else if (finGranularity === 'month') a.setMonth(a.getMonth()+dir);
+  // Don't allow navigating into the current (incomplete) period or future.
+  const today = _startOfDay(new Date());
+  finAnchor = a;
+  const r = finPeriodRange();
+  if (r.start >= today) { // would include today/future — revert
+    finAnchor = finDefaultAnchor();
+    toast('Finance shows completed past periods only', 'error');
+  }
+  loadFinancePage();
+}
+
+// Holds the current filtered shift subsets for card drill-downs.
+let _finDrill = {};
+
 async function loadFinancePage() {
   const role = currentUserRole();
   if (!(role === 'owner' || role === 'finance')) {
     document.getElementById('finance-metrics').innerHTML = '<div class="empty-state"><p>Not permitted.</p></div>';
     return;
   }
-  // Reuse the ops shift cache. Make sure shifts are loaded.
+  // Sync granularity control + ensure shifts loaded.
+  const gSel = document.getElementById('fin-granularity');
+  if (gSel) finGranularity = gSel.value || 'month';
   try { if (!Array.isArray(allShifts) || !allShifts.length) await loadShifts(); } catch (e) {}
-  const period = (document.getElementById('fin-period') || {}).value || 'all';
-  let shifts = Array.isArray(allShifts) ? allShifts.slice() : [];
-  if (period === 'today') {
-    let todayStr;
-    try {
-      const d = (typeof currentDate !== 'undefined' && currentDate) ? currentDate : new Date();
-      todayStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-    } catch (e) { todayStr = new Date().toISOString().slice(0, 10); }
-    shifts = shifts.filter(s => s.shift_date === todayStr);
-  }
 
-  // Payouts (paid out + estimated) by country — reuse existing helpers.
+  const { start, endExcl, label } = finPeriodRange();
+  const lbl = document.getElementById('fin-period-label');
+  if (lbl) lbl.textContent = label;
+  // Disable next button if it would reach the current/incomplete period.
+  const nextBtn = document.getElementById('fin-next');
+  if (nextBtn) nextBtn.disabled = (finGranularity === 'all');
+  const prevBtn = document.getElementById('fin-prev');
+  if (prevBtn) prevBtn.style.visibility = (finGranularity === 'all') ? 'hidden' : 'visible';
+  if (nextBtn) nextBtn.style.visibility = (finGranularity === 'all') ? 'hidden' : 'visible';
+
+  const inRange = (s) => {
+    if (!s.shift_date) return false;
+    const d = _startOfDay(new Date(s.shift_date + 'T00:00:00'));
+    return d >= start && d < endExcl;
+  };
+  let shifts = (Array.isArray(allShifts) ? allShifts : []).filter(inRange);
+
   const payable = shifts.filter(isPayableShift);
   const paidOutRows = payable.filter(s => s.clock_out);
   const estRows = payable.filter(s => !s.clock_out);
   const paidByCountry = splitAmountsByCountry(paidOutRows, totalPaymentForShift);
   const estByCountry = splitAmountsByCountry(estRows, estimatedPaymentForShift);
-
-  // SR absorbed by country
+  const srRows = shifts.filter(s => srAbsorbedForShift(s) > 0);
   const srByCountry = splitAmountsByCountry(shifts, srAbsorbedForShift);
-
-  // Cancellations collected (penalty amounts) + count
   const cancelShifts = shifts.filter(s => s.cancelled);
   const cancelCollectedByCountry = splitAmountsByCountry(cancelShifts, shiftPenaltyAmount);
+  const lateRows = shifts.filter(s => effectiveLatePenalty(s) > 0);
   const latePenByCountry = splitAmountsByCountry(shifts, effectiveLatePenalty);
+  const priorRows = shifts.filter(s => !s.cancelled && parseFloat(s.cancellation_penalty || 0) > 0);
   const priorCancelByCountry = splitAmountsByCountry(shifts.filter(s => !s.cancelled), s => parseFloat(s.cancellation_penalty || 0));
 
-  const sumC = (o) => (Number(o.Singapore || 0) + Number(o.Malaysia || 0));
-  const card = (label, sgd, myr, cls) => `<div class="metric-card"><div class="metric-label">${label}</div>
+  // Stash drill-down datasets keyed by card id.
+  _finDrill = {
+    paid_out:    { title: 'Total paid out', rows: paidOutRows, amountFn: totalPaymentForShift },
+    estimated:   { title: 'Estimated payout', rows: estRows, amountFn: estimatedPaymentForShift },
+    sr_absorbed: { title: 'SR absorbed (cost)', rows: srRows, amountFn: srAbsorbedForShift },
+    cancellations_collected: { title: 'Cancellations collected', rows: cancelShifts, amountFn: shiftPenaltyAmount },
+    late:        { title: 'Late penalties', rows: lateRows, amountFn: effectiveLatePenalty },
+    prior_cancel:{ title: 'Prior cancel deductions', rows: priorRows, amountFn: s => parseFloat(s.cancellation_penalty || 0) },
+    cancel_count:{ title: 'Cancellations', rows: cancelShifts, amountFn: shiftPenaltyAmount },
+    all_shifts:  { title: 'All shifts in period', rows: shifts, amountFn: totalPaymentForShift }
+  };
+
+  const card = (id, label, sgd, myr, cls) => `<div class="metric-card clickable" onclick="openFinanceDrill('${id}')" style="cursor:pointer;"><div class="metric-label">${label}</div>
     <div class="metric-split">
       <div class="metric-split-row"><span class="metric-split-country">🇸🇬 SG</span><span class="metric-split-amount ${cls}">$${Number(sgd || 0).toFixed(2)}</span></div>
       <div class="metric-split-row"><span class="metric-split-country">🇲🇾 MY</span><span class="metric-split-amount ${cls}">RM${Number(myr || 0).toFixed(2)}</span></div>
     </div></div>`;
 
   document.getElementById('finance-metrics').innerHTML = `
-    ${card('💵 Total paid out', paidByCountry.Singapore, paidByCountry.Malaysia, 'green')}
-    ${card('⏳ Estimated payout', estByCountry.Singapore, estByCountry.Malaysia, 'amber')}
-    ${card('↺ SR absorbed (cost)', srByCountry.Singapore, srByCountry.Malaysia, 'amber')}
-    ${card('🚫 Cancellations collected', cancelCollectedByCountry.Singapore, cancelCollectedByCountry.Malaysia, 'green')}
-    ${card('⏰ Late penalties', latePenByCountry.Singapore, latePenByCountry.Malaysia, 'green')}
-    ${card('↩︎ Prior cancel deductions', priorCancelByCountry.Singapore, priorCancelByCountry.Malaysia, 'green')}
-    <div class="metric-card"><div class="metric-label">Cancellations (count)</div><div class="metric-val ${cancelShifts.length > 0 ? 'red' : 'green'}">${cancelShifts.length}</div></div>
-    <div class="metric-card"><div class="metric-label">Shifts in view</div><div class="metric-val blue">${shifts.length}</div></div>
+    ${card('paid_out','💵 Total paid out', paidByCountry.Singapore, paidByCountry.Malaysia, 'green')}
+    ${card('estimated','⏳ Estimated payout', estByCountry.Singapore, estByCountry.Malaysia, 'amber')}
+    ${card('sr_absorbed','↺ SR absorbed (cost)', srByCountry.Singapore, srByCountry.Malaysia, 'amber')}
+    ${card('cancellations_collected','🚫 Cancellations collected', cancelCollectedByCountry.Singapore, cancelCollectedByCountry.Malaysia, 'green')}
+    ${card('late','⏰ Late penalties', latePenByCountry.Singapore, latePenByCountry.Malaysia, 'green')}
+    ${card('prior_cancel','↩︎ Prior cancel deductions', priorCancelByCountry.Singapore, priorCancelByCountry.Malaysia, 'green')}
+    <div class="metric-card clickable" onclick="openFinanceDrill('cancel_count')" style="cursor:pointer;"><div class="metric-label">Cancellations (count)</div><div class="metric-val ${cancelShifts.length > 0 ? 'red' : 'green'}">${cancelShifts.length}</div></div>
+    <div class="metric-card clickable" onclick="openFinanceDrill('all_shifts')" style="cursor:pointer;"><div class="metric-label">Shifts in view</div><div class="metric-val blue">${shifts.length}</div></div>
   `;
 
-  // Commission & revenue estimate. GSV = client billing value; commission = our cut.
-  // We estimate per-shift client value as gross client cost; commission via outlet commission_pct.
   const commByCountry = { Singapore: 0, Malaysia: 0 };
   const gsvByCountry = { Singapore: 0, Malaysia: 0 };
   shifts.forEach(s => {
@@ -15144,15 +15323,14 @@ async function loadFinancePage() {
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${commByCountry.Malaysia.toFixed(2)}</div>
       </div>
     </div>
-    <div class="sub-text" style="margin-top:10px;">GSV and commission are estimated from loaded shifts and per-outlet commission rates. For invoiced figures, use the Xero Billing module.</div>
+    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only — today &amp; future excluded). GSV and commission are estimated from shifts and per-outlet commission rates. For invoiced figures, use Xero Billing.</div>
   `;
 
-  // Recent cancellations collected table
   const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
   const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
   document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
   if (!recent.length) {
-    document.getElementById('finance-cancel-body').innerHTML = '<div class="empty-state"><p>No cancellations in the selected view.</p></div>';
+    document.getElementById('finance-cancel-body').innerHTML = '<div class="empty-state"><p>No cancellations in the selected period.</p></div>';
   } else {
     document.getElementById('finance-cancel-body').innerHTML = `<table><thead><tr>
       <th>Date</th><th>Worker</th><th>Outlet</th><th style="text-align:right;">Penalty collected</th><th>MC?</th>
@@ -15164,6 +15342,31 @@ async function loadFinancePage() {
       <td>${s.mc_url ? 'Yes (waived)' : 'No'}</td>
     </tr>`).join('')}</tbody></table>`;
   }
+}
+
+// Drill-down: show the shifts behind a finance metric card.
+function openFinanceDrill(cardId) {
+  const d = _finDrill[cardId];
+  if (!d) return;
+  const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
+  document.getElementById('finance-drill-title').textContent = d.title;
+  const rows = (d.rows || []).slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1));
+  const totalsByCountry = splitAmountsByCountry(rows, d.amountFn || (() => 0));
+  document.getElementById('finance-drill-sub').innerHTML =
+    `${rows.length} record${rows.length === 1 ? '' : 's'} · 🇸🇬 $${totalsByCountry.Singapore.toFixed(2)} · 🇲🇾 RM${totalsByCountry.Malaysia.toFixed(2)}`;
+  if (!rows.length) {
+    document.getElementById('finance-drill-body').innerHTML = '<div class="empty-state"><p>No records.</p></div>';
+  } else {
+    document.getElementById('finance-drill-body').innerHTML = `<table><thead><tr>
+      <th>Date</th><th>Worker</th><th>Outlet</th><th style="text-align:right;">Amount</th>
+    </tr></thead><tbody>${rows.map(s => `<tr>
+      <td>${esc(s.shift_date || '—')}</td>
+      <td style="font-weight:600;">${esc(s.worker_name || (s.sr_worker ? ('SR: ' + s.sr_worker) : 'Available'))}</td>
+      <td>${esc(s.outlet || '—')}</td>
+      <td style="text-align:right;font-family:var(--mono);font-weight:600;">${moneyForShift((d.amountFn ? d.amountFn(s) : 0), s)}</td>
+    </tr>`).join('')}</tbody></table>`;
+  }
+  openModalById('finance-drill-modal');
 }
 // Fallbacks for client value / commission if the ops build doesn't expose helpers.
 function estimatedClientValue(s) {
@@ -15226,7 +15429,7 @@ async function renderSalaryPage() {
       <div class="table-wrap">
         <div class="table-header"><span class="table-title">${me} — ${monthLabel(month)} (Part-time, per-shift)</span></div>
         <div style="padding:16px;max-width:560px;">
-          <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>You're paid ${fmtMoney(perShift, sym)} per shift attended. Enter your days worked and any adjustments for this month.</span></div>
+          <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>You're paid ${fmtMoney(perShift, sym)} per shift attended. Enter your days worked, overtime/under-time and bonus. Deductions (if any) are set by the owner.</span></div>
           <div class="form-grid">
             <div class="form-row"><label>Days worked</label><input type="number" id="sal-days" min="0" step="0.5" value="${entry.days_worked || 0}"></div>
             <div class="form-row"><label>Rate per shift</label><input type="text" value="${fmtMoney(perShift, sym)}" disabled></div>
@@ -15237,7 +15440,7 @@ async function renderSalaryPage() {
           </div>
           <div class="form-grid">
             <div class="form-row"><label>Bonus / incentive (${sym})</label><input type="number" id="sal-bonus" min="0" step="0.01" value="${bonus}"></div>
-            <div class="form-row"><label>Deductions (${sym})</label><input type="number" id="sal-ded" min="0" step="0.01" value="${ded}"></div>
+            <div class="form-row"><label>Deductions (${sym}) — set by owner</label><input type="number" id="sal-ded" value="${ded}" disabled title="Deductions are entered by the owner in the Expenses tab"></div>
           </div>
           <div class="form-row"><label>Notes</label><input type="text" id="sal-notes" value="${(window.escapeHtml||(x=>x))(entry.notes||'')}"></div>
           <button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="saveMySalaryEntry('${month}')">Save my entry</button>
@@ -15265,11 +15468,11 @@ async function renderSalaryPage() {
       <div class="table-wrap">
         <div class="table-header"><span class="table-title">${me} — ${monthLabel(month)} (Full-time)</span></div>
         <div style="padding:16px;max-width:560px;">
-          <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Your monthly base is set by the owner. Add this month's bonus/incentive and any deductions.${prof.cpf ? ' CPF (employee 20%) is deducted as you are based in Singapore.' : ' No statutory deductions apply.'}</span></div>
+          <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Your monthly base and any deductions are set by the owner. Add this month's bonus/incentive.${prof.cpf ? ' CPF (employee 20%) is deducted as you are based in Singapore.' : ' No statutory deductions apply.'}</span></div>
           <div class="form-row"><label>Monthly base salary</label><input type="text" value="${fmtMoney(base, sym)}" disabled></div>
           <div class="form-grid">
             <div class="form-row"><label>Bonus / incentive (${sym})</label><input type="number" id="sal-bonus" min="0" step="0.01" value="${bonus}"></div>
-            <div class="form-row"><label>Deductions (${sym})</label><input type="number" id="sal-ded" min="0" step="0.01" value="${ded}"></div>
+            <div class="form-row"><label>Deductions (${sym}) — set by owner</label><input type="number" id="sal-ded" value="${ded}" disabled title="Deductions are entered by the owner in the Expenses tab"></div>
           </div>
           <div class="form-row"><label>Notes</label><input type="text" id="sal-notes" value="${(window.escapeHtml||(x=>x))(entry.notes||'')}"></div>
           <button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="saveMySalaryEntry('${month}')">Save my entry</button>
@@ -15295,7 +15498,7 @@ async function saveMySalaryEntry(month) {
     entry.undertime = parseFloat(document.getElementById('sal-ut').value || 0) || 0;
   }
   entry.bonus = parseFloat((document.getElementById('sal-bonus') || {}).value || 0) || 0;
-  entry.deduction = parseFloat((document.getElementById('sal-ded') || {}).value || 0) || 0;
+  // Deduction is owner-driven (via Expenses) — do NOT overwrite it from the disabled field.
   entry.notes = (document.getElementById('sal-notes') || {}).value || '';
   entry.username = me; entry.month = month;
   await persistSalaryEntry(entry);
