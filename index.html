@@ -700,7 +700,16 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         <span class="nav-icon">🧾</span><span class="nav-label">Xero Billing</span>
         <span class="nav-badge" id="billing-nav-badge" style="background:var(--green);" title="Clients pending billing">0</span>
       </button>
-      <button class="nav-item" onclick="openWhatsAppSettings()" style="margin-top:6px;border-top:1px solid var(--border);padding-top:10px;">
+      <button class="nav-item" id="nav-finance" onclick="switchPage('finance',this)" style="display:none;">
+        <span class="nav-icon">💰</span><span class="nav-label">Finance Dashboard</span>
+      </button>
+      <button class="nav-item" id="nav-expenses" onclick="switchPage('expenses',this)" style="display:none;">
+        <span class="nav-icon">🧮</span><span class="nav-label">Expenses</span>
+      </button>
+      <button class="nav-item" id="nav-salary" onclick="switchPage('salary',this)" style="display:none;">
+        <span class="nav-icon">💸</span><span class="nav-label">My Salary</span>
+      </button>
+      <button class="nav-item" id="nav-whatsapp" onclick="openWhatsAppSettings()" style="margin-top:6px;border-top:1px solid var(--border);padding-top:10px;">
         <span class="nav-icon">💬</span> WhatsApp Alerts
       </button>
     </nav>
@@ -1090,6 +1099,70 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       </div>
     </div>
 
+    <!-- FINANCE DASHBOARD PAGE (Jon + Finance role) -->
+    <div id="page-finance" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left">
+          <h2>Finance Dashboard</h2>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Read-only financial overview · SR absorbed, cancellations collected, payouts, commission &amp; analytics</p>
+        </div>
+        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
+          <select id="fin-period" onchange="loadFinancePage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+            <option value="all">All loaded shifts</option>
+            <option value="today">Today only</option>
+          </select>
+          <button class="btn btn-primary btn-sm" onclick="loadFinancePage()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="content">
+        <div class="metrics" id="finance-metrics" style="margin-bottom:20px;"></div>
+        <div class="table-wrap" style="margin-bottom:18px;">
+          <div class="table-header"><span class="table-title">Commission &amp; Revenue (estimated GSV)</span></div>
+          <div id="finance-commission-body" style="padding:14px 16px;"></div>
+        </div>
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">Recent Cancellations Collected</span><span class="table-count" id="finance-cancel-count"></span></div>
+          <div id="finance-cancel-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- EXPENSES PAGE (Jon only) -->
+    <div id="page-expenses" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left">
+          <h2>Expenses</h2>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Private to you · log recurring &amp; one-off business expenses, subscriptions, salary/CPF, staff deductions</p>
+        </div>
+        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
+          <select id="exp-month-filter" onchange="renderExpensesPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
+          <button class="btn btn-primary btn-sm" onclick="openExpenseModal()">+ Add expense</button>
+        </div>
+      </div>
+      <div class="content">
+        <div class="metrics" id="expenses-metrics" style="margin-bottom:20px;"></div>
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">Expense Entries</span><span class="table-count" id="expenses-count"></span></div>
+          <div id="expenses-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SALARY PAGE (each user sees only their own) -->
+    <div id="page-salary" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left">
+          <h2>My Salary</h2>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;" id="salary-subtitle">Your expected earnings for the selected month — visible only to you</p>
+        </div>
+        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
+          <select id="salary-month-filter" onchange="renderSalaryPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
+        </div>
+      </div>
+      <div class="content">
+        <div id="salary-body"></div>
+      </div>
+    </div>
 
   </div>
 </div>
@@ -1798,6 +1871,85 @@ tr:hover td { background: rgba(91,148,249,0.045); }
   </div>
 </div>
 
+<!-- ADD / EDIT EXPENSE MODAL (Jon only) -->
+<div class="modal-overlay" id="expense-modal">
+  <div class="modal" style="width:480px;">
+    <h3 id="expense-modal-title">Add expense</h3>
+    <input type="hidden" id="exp-id">
+    <div class="form-grid">
+      <div class="form-row"><label>Date</label><input type="date" id="exp-date"></div>
+      <div class="form-row"><label>Currency</label><select id="exp-currency"><option value="SGD">SGD ($)</option><option value="PHP">PHP (₱)</option><option value="MYR">MYR (RM)</option></select></div>
+    </div>
+    <div class="form-row"><label>Description</label><input type="text" id="exp-desc" placeholder="e.g. Software subscription, Client dinner, Staff deduction — Jayden"></div>
+    <div class="form-grid">
+      <div class="form-row"><label>Category</label>
+        <select id="exp-category">
+          <option value="Subscription">Subscription</option>
+          <option value="Salary">Salary</option>
+          <option value="CPF">CPF / Statutory</option>
+          <option value="Staff Deduction">Staff Deduction</option>
+          <option value="Client/Entertainment">Client / Entertainment</option>
+          <option value="Office/Admin">Office / Admin</option>
+          <option value="Marketing">Marketing</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Amount</label><input type="number" id="exp-amount" step="0.01" min="0" placeholder="0.00"></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row"><label>Type</label>
+        <select id="exp-recurring">
+          <option value="one_off">One-off</option>
+          <option value="monthly">Recurring (monthly)</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Deduction?</label>
+        <select id="exp-is-deduction">
+          <option value="false">No — normal expense</option>
+          <option value="true">Yes — staff salary deduction</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row"><label>Notes (optional)</label><input type="text" id="exp-notes" placeholder="Any detail to remember"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('expense-modal')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveExpense()">Save expense</button>
+    </div>
+  </div>
+</div>
+
+<!-- SALARY PROFILE ADMIN MODAL (Jon only) -->
+<div class="modal-overlay" id="salary-profile-modal">
+  <div class="modal" style="width:520px;">
+    <h3>Salary profile · <span id="sp-username"></span></h3>
+    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Configure each team member's pay basis. Only you can see and edit these. Each person sees only their own net pay.</span></div>
+    <input type="hidden" id="sp-user">
+    <div class="form-grid">
+      <div class="form-row"><label>Currency</label><select id="sp-currency"><option value="SGD">SGD ($)</option><option value="PHP">PHP (₱)</option><option value="MYR">MYR (RM)</option></select></div>
+      <div class="form-row"><label>Employment type</label>
+        <select id="sp-type" onchange="toggleSalaryProfileFields()">
+          <option value="full_time">Full-time (monthly base)</option>
+          <option value="part_time">Part-time (per-shift)</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-grid" id="sp-fulltime-fields">
+      <div class="form-row"><label>Monthly base salary</label><input type="number" id="sp-base" step="0.01" min="0" placeholder="0.00"></div>
+      <div class="form-row"><label>CPF / statutory applies?</label>
+        <select id="sp-cpf"><option value="false">No</option><option value="true">Yes (Singapore)</option></select>
+      </div>
+    </div>
+    <div class="form-grid" id="sp-parttime-fields" style="display:none;">
+      <div class="form-row"><label>Rate per shift</label><input type="number" id="sp-per-shift" step="0.01" min="0" placeholder="e.g. 1000"></div>
+      <div class="form-row"><label>&nbsp;</label><div style="font-size:12px;color:var(--text2);padding-top:8px;">Per-shift workers key in their own days worked each month.</div></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('salary-profile-modal')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="saveSalaryProfile()">Save profile</button>
+    </div>
+  </div>
+</div>
+
 <!-- ADD INCIDENT MODAL -->
 <div class="modal-overlay" id="incident-modal">
   <div class="modal" style="width:520px;">
@@ -1911,13 +2063,34 @@ let profileMeta = loadProfileMeta();
 let outletGroups = loadOutletGroups(); // [{ id, name, outlets:[outletName,...] }]
 let shiftComments = loadShiftComments();
 const INTERNAL_USER_ACCOUNTS = [
-  { username:'Jon', passcode:'8472915630' },
-  { username:'Jayden', passcode:'5028741936' },
-  { username:'McBilly', passcode:'9182637450' },
-  { username:'Yra', passcode:'3749501826' },
-  { username:'Niro', passcode:'6839172045' }
+  { username:'Jon', passcode:'8472915630', role:'owner' },
+  { username:'Jayden', passcode:'5028741936', role:'ops' },
+  { username:'McBilly', passcode:'9182637450', role:'ops' },
+  { username:'Yra', passcode:'3749501826', role:'ops' },
+  { username:'Niro', passcode:'6839172045', role:'ops' },
+  { username:'Emmanuel', passcode:'DaantpWBq2niv5', role:'finance' }
 ];
 const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
+// Role per username, used for nav gating. owner = Jon (sees everything incl. Expenses);
+// finance = Emmanuel (Finance Dashboard + own Salary only, no ops pages);
+// ops = everyone else (operations pages + own Salary, no Finance Dashboard / Expenses).
+const USER_ROLES = INTERNAL_USER_ACCOUNTS.reduce((m,a) => { m[a.username] = a.role || 'ops'; return m; }, {});
+function roleForUser(u) { return USER_ROLES[u] || 'ops'; }
+function currentUserRole() { return roleForUser(currentInternalUser); }
+
+// ── Salary profile configuration (per-user pay basis) ─────────
+// Future-proof: each member has a configurable profile { currency, type, base,
+// perShift, cpf }. Stored team-wide in Supabase table `salary_profiles` (with a
+// localStorage fallback). Only Jon (owner) can view/edit profiles; each user
+// sees only their own computed net pay on the Salary page.
+const DEFAULT_SALARY_PROFILES = {
+  'Jon':      { currency:'SGD', type:'full_time', base:0, perShift:0, cpf:true  },
+  'Jayden':   { currency:'SGD', type:'full_time', base:0, perShift:0, cpf:true  },
+  'Yra':      { currency:'PHP', type:'full_time', base:0, perShift:0, cpf:false },
+  'McBilly':  { currency:'PHP', type:'full_time', base:0, perShift:0, cpf:false },
+  'Niro':     { currency:'PHP', type:'part_time', base:0, perShift:1000, cpf:false }
+  // Emmanuel (finance) has no salary profile by default; add via the profile modal if needed.
+};
 // WhatsApp numbers for the internal team (country code + number, no +/spaces).
 // Used to send announcements individually via Periskope and to map an inbound
 // "ACK" reply back to the right team member for the announcement ack flow.
@@ -1926,7 +2099,8 @@ const TEAM_WHATSAPP = {
   'McBilly': '639666696236',
   'Jayden':  '6598242977',
   'Yra':     '639454803292',
-  'Jon':     '6583416027'
+  'Jon':     '6583416027',
+  'Emmanuel': ''
 };
 const INTERNAL_LOGIN_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -3303,6 +3477,9 @@ function switchPage(name, btn) {
   if (name === 'knowledge') { renderKnowledgePage(); }
   if (name === 'analytics') { loadAnalytics(); }
   if (name === 'billing') { loadBillingPage(); }
+  if (name === 'finance') { loadFinancePage(); }
+  if (name === 'expenses') { renderExpensesPage(); }
+  if (name === 'salary') { renderSalaryPage(); }
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -9296,6 +9473,7 @@ function setLoggedInUserLabel() {
   if (el) el.textContent = currentInternalUser || '—';
   const msgLabel = document.getElementById('message-user-label');
   if (msgLabel) msgLabel.textContent = currentInternalUser ? `Signed in: ${currentInternalUser}` : '';
+  applyRoleVisibility();
 }
 function getValidInternalSession() {
   try {
@@ -14526,6 +14704,640 @@ setInterval(async () => {
     await loadActivityLog();
   }
 }, 30000);
+
+
+// ════════════════════════════════════════════════════════════════
+//  FINANCE / EXPENSES / SALARY MODULE
+//  - Role-based nav visibility (owner / finance / ops)
+//  - Finance Dashboard (read-only): SR absorbed, cancellations collected,
+//    payouts, commission, analytics — for Jon (owner) + Emmanuel (finance)
+//  - Expenses page: Jon only. Recurring + one-off, subscriptions, salary/CPF,
+//    staff deductions.
+//  - Salary page: every user sees ONLY their own net pay. Full-time = monthly
+//    base + bonus - deductions (- CPF if applicable). Part-time = per-shift × days.
+//  Data is stored in Supabase (expenses, salary_profiles, salary_entries) with a
+//  localStorage fallback so it works even before the tables are created.
+// ════════════════════════════════════════════════════════════════
+
+function closeModalSafe(id) { const m = document.getElementById(id); if (m) m.classList.remove('open'); }
+function openModalById(id) { const m = document.getElementById(id); if (m) m.classList.add('open'); }
+
+// ── Role-based nav + page visibility ─────────────────────────────
+// Ops pages that the finance role should NOT see.
+const OPS_ONLY_PAGES = ['attendance','completed','workers','outlets','rates','standby','import','reports','analytics','incidents','messages','activity','knowledge','billing'];
+function navButtonForPage(page) {
+  return Array.from(document.querySelectorAll('.nav-item')).find(b => {
+    const oc = b.getAttribute('onclick') || '';
+    return oc.includes(`switchPage('${page}'`);
+  });
+}
+function applyRoleVisibility() {
+  const role = currentUserRole();
+  const finNav = document.getElementById('nav-finance');
+  const expNav = document.getElementById('nav-expenses');
+  const salNav = document.getElementById('nav-salary');
+  const waNav  = document.getElementById('nav-whatsapp');
+  const tasksNav = document.querySelector('.nav-item-tasks');
+
+  // Finance Dashboard: owner + finance
+  if (finNav) finNav.style.display = (role === 'owner' || role === 'finance') ? '' : 'none';
+  // Expenses: owner only
+  if (expNav) expNav.style.display = (role === 'owner') ? '' : 'none';
+  // My Salary: everyone who has a salary profile (all current users)
+  if (salNav) salNav.style.display = '';
+
+  // Ops-only pages + WhatsApp + Tasks: hide entirely for finance role
+  const hideOps = (role === 'finance');
+  OPS_ONLY_PAGES.forEach(p => {
+    const b = navButtonForPage(p);
+    if (b) b.style.display = hideOps ? 'none' : '';
+  });
+  if (waNav) waNav.style.display = hideOps ? 'none' : '';
+  if (tasksNav) tasksNav.style.display = hideOps ? 'none' : '';
+
+  // If the currently shown page is not allowed for this role, redirect to a safe landing page.
+  const landing = (role === 'finance') ? 'finance' : 'attendance';
+  const visiblePage = Array.from(document.querySelectorAll('.main > div')).find(d => d.style.display === 'block');
+  const currentPageId = visiblePage ? visiblePage.id.replace('page-','') : null;
+  const allowedForFinance = ['finance','salary'];
+  if (role === 'finance' && currentPageId && !allowedForFinance.includes(currentPageId)) {
+    const btn = navButtonForPage('finance');
+    if (btn) switchPage('finance', btn);
+  } else if (role === 'finance' && !currentPageId) {
+    const btn = navButtonForPage('finance');
+    if (btn) switchPage('finance', btn);
+  }
+}
+
+// ── Currency formatting for finance module ───────────────────────
+function finCurrencySymbol(cur) {
+  const c = String(cur || 'SGD').toUpperCase();
+  if (c === 'PHP') return '₱';
+  if (c === 'MYR') return 'RM';
+  return '$';
+}
+function fmtMoney(n, cur) { return finCurrencySymbol(cur) + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function monthKey(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0');
+}
+function currentMonthKey() { return monthKey(new Date()); }
+function monthLabel(key) {
+  const [y, m] = String(key).split('-').map(Number);
+  return new Date(y, (m || 1) - 1, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' });
+}
+function buildMonthOptions(selectId, selected) {
+  const sel = document.getElementById(selectId);
+  if (!sel) return;
+  const now = new Date();
+  const opts = [];
+  for (let i = 0; i < 18; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const k = monthKey(d);
+    opts.push(`<option value="${k}" ${k === selected ? 'selected' : ''}>${monthLabel(k)}</option>`);
+  }
+  sel.innerHTML = opts.join('');
+  if (selected) sel.value = selected;
+}
+
+// ── Salary profiles (Supabase table `salary_profiles` + LS fallback) ──
+let salaryProfiles = null; // { username: { currency, type, base, perShift, cpf } }
+function loadSalaryProfilesLS() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('salary_profiles') || 'null');
+    if (saved && typeof saved === 'object') return saved;
+  } catch (e) {}
+  return JSON.parse(JSON.stringify(DEFAULT_SALARY_PROFILES));
+}
+function saveSalaryProfilesLS() {
+  localStorage.setItem('salary_profiles', JSON.stringify(salaryProfiles || {}));
+}
+async function loadSalaryProfiles() {
+  // Start from LS / defaults so the UI always has something.
+  if (!salaryProfiles) salaryProfiles = loadSalaryProfilesLS();
+  if (!supabaseClient) return salaryProfiles;
+  try {
+    const { data, error } = await supabaseClient.from('salary_profiles').select('*');
+    if (error) return salaryProfiles; // table may not exist yet — keep LS
+    if (Array.isArray(data) && data.length) {
+      const remote = {};
+      data.forEach(r => {
+        remote[r.username] = {
+          currency: r.currency || 'SGD',
+          type: r.employment_type || 'full_time',
+          base: parseFloat(r.base_salary || 0) || 0,
+          perShift: parseFloat(r.per_shift_rate || 0) || 0,
+          cpf: !!r.cpf_applies
+        };
+      });
+      // Merge: remote authoritative, but keep defaults for users not present remotely.
+      salaryProfiles = Object.assign({}, DEFAULT_SALARY_PROFILES, salaryProfiles, remote);
+      saveSalaryProfilesLS();
+    }
+  } catch (e) { /* keep LS copy */ }
+  return salaryProfiles;
+}
+function getSalaryProfile(user) {
+  const p = (salaryProfiles && salaryProfiles[user]) || DEFAULT_SALARY_PROFILES[user];
+  if (p) return p;
+  // Finance-only / unknown user: default empty full-time profile.
+  return { currency: 'SGD', type: 'full_time', base: 0, perShift: 0, cpf: false };
+}
+async function persistSalaryProfile(user, profile) {
+  // LS first (always works)
+  if (!salaryProfiles) salaryProfiles = loadSalaryProfilesLS();
+  salaryProfiles[user] = profile;
+  saveSalaryProfilesLS();
+  if (!supabaseClient) return;
+  try {
+    await supabaseClient.from('salary_profiles').upsert({
+      username: user,
+      currency: profile.currency,
+      employment_type: profile.type,
+      base_salary: profile.base,
+      per_shift_rate: profile.perShift,
+      cpf_applies: profile.cpf,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'username' });
+  } catch (e) { /* offline / no table — LS holds it */ }
+}
+
+// ── Salary entries (per user per month: days, bonus, deduction, etc.) ──
+// Supabase table `salary_entries` keyed by (username, month). LS fallback.
+let salaryEntriesCache = null; // { 'username|month': {...} }
+function salaryEntryKey(user, month) { return `${user}|${month}`; }
+function loadSalaryEntriesLS() {
+  try { return JSON.parse(localStorage.getItem('salary_entries') || '{}') || {}; }
+  catch (e) { return {}; }
+}
+function saveSalaryEntriesLS() { localStorage.setItem('salary_entries', JSON.stringify(salaryEntriesCache || {})); }
+async function loadSalaryEntries() {
+  if (!salaryEntriesCache) salaryEntriesCache = loadSalaryEntriesLS();
+  if (!supabaseClient) return salaryEntriesCache;
+  try {
+    const { data, error } = await supabaseClient.from('salary_entries').select('*');
+    if (error) return salaryEntriesCache;
+    if (Array.isArray(data)) {
+      data.forEach(r => {
+        salaryEntriesCache[salaryEntryKey(r.username, r.month)] = {
+          username: r.username, month: r.month,
+          days_worked: parseFloat(r.days_worked || 0) || 0,
+          overtime: parseFloat(r.overtime || 0) || 0,
+          undertime: parseFloat(r.undertime || 0) || 0,
+          bonus: parseFloat(r.bonus || 0) || 0,
+          deduction: parseFloat(r.deduction || 0) || 0,
+          notes: r.notes || ''
+        };
+      });
+      saveSalaryEntriesLS();
+    }
+  } catch (e) {}
+  return salaryEntriesCache;
+}
+function getSalaryEntry(user, month) {
+  const k = salaryEntryKey(user, month);
+  return (salaryEntriesCache && salaryEntriesCache[k]) || { username: user, month, days_worked: 0, overtime: 0, undertime: 0, bonus: 0, deduction: 0, notes: '' };
+}
+async function persistSalaryEntry(entry) {
+  if (!salaryEntriesCache) salaryEntriesCache = loadSalaryEntriesLS();
+  salaryEntriesCache[salaryEntryKey(entry.username, entry.month)] = entry;
+  saveSalaryEntriesLS();
+  if (!supabaseClient) return;
+  try {
+    await supabaseClient.from('salary_entries').upsert({
+      username: entry.username, month: entry.month,
+      days_worked: entry.days_worked, overtime: entry.overtime, undertime: entry.undertime,
+      bonus: entry.bonus, deduction: entry.deduction, notes: entry.notes,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'username,month' });
+  } catch (e) {}
+}
+
+// ── Expenses (Jon only). Supabase table `expenses` + LS fallback ─────
+let expensesCache = null; // array
+function loadExpensesLS() {
+  try { return JSON.parse(localStorage.getItem('expenses') || '[]') || []; }
+  catch (e) { return []; }
+}
+function saveExpensesLS() { localStorage.setItem('expenses', JSON.stringify(expensesCache || [])); }
+async function loadExpenses() {
+  if (!expensesCache) expensesCache = loadExpensesLS();
+  if (!supabaseClient) return expensesCache;
+  try {
+    const { data, error } = await supabaseClient.from('expenses').select('*').order('exp_date', { ascending: false });
+    if (error) return expensesCache;
+    if (Array.isArray(data)) {
+      expensesCache = data.map(r => ({
+        id: r.id,
+        date: r.exp_date,
+        description: r.description || '',
+        category: r.category || 'Other',
+        amount: parseFloat(r.amount || 0) || 0,
+        currency: r.currency || 'SGD',
+        recurring: r.recurring || 'one_off',
+        is_deduction: !!r.is_deduction,
+        notes: r.notes || ''
+      }));
+      saveExpensesLS();
+    }
+  } catch (e) {}
+  return expensesCache;
+}
+function openExpenseModal(id) {
+  if (currentUserRole() !== 'owner') { toast('Expenses are private to the owner', 'error'); return; }
+  document.getElementById('expense-modal-title').textContent = id ? 'Edit expense' : 'Add expense';
+  const e = id ? (expensesCache || []).find(x => String(x.id) === String(id)) : null;
+  document.getElementById('exp-id').value = e ? e.id : '';
+  document.getElementById('exp-date').value = e ? e.date : new Date().toISOString().slice(0, 10);
+  document.getElementById('exp-desc').value = e ? e.description : '';
+  document.getElementById('exp-category').value = e ? e.category : 'Subscription';
+  document.getElementById('exp-amount').value = e ? e.amount : '';
+  document.getElementById('exp-currency').value = e ? e.currency : 'SGD';
+  document.getElementById('exp-recurring').value = e ? e.recurring : 'one_off';
+  document.getElementById('exp-is-deduction').value = e ? String(!!e.is_deduction) : 'false';
+  document.getElementById('exp-notes').value = e ? e.notes : '';
+  openModalById('expense-modal');
+}
+async function saveExpense() {
+  if (currentUserRole() !== 'owner') { toast('Not permitted', 'error'); return; }
+  const id = document.getElementById('exp-id').value;
+  const date = document.getElementById('exp-date').value;
+  const description = document.getElementById('exp-desc').value.trim();
+  const category = document.getElementById('exp-category').value;
+  const amount = parseFloat(document.getElementById('exp-amount').value || 0) || 0;
+  const currency = document.getElementById('exp-currency').value;
+  const recurring = document.getElementById('exp-recurring').value;
+  const is_deduction = document.getElementById('exp-is-deduction').value === 'true';
+  const notes = document.getElementById('exp-notes').value.trim();
+  if (!date || !description || !amount) { toast('Date, description and amount are required', 'error'); return; }
+
+  if (!expensesCache) expensesCache = loadExpensesLS();
+  let savedId = id;
+  if (supabaseClient) {
+    try {
+      const payload = { exp_date: date, description, category, amount, currency, recurring, is_deduction, notes, updated_at: new Date().toISOString(), created_by: currentInternalUser };
+      if (id) {
+        const { error } = await supabaseClient.from('expenses').update(payload).eq('id', id);
+        if (error) throw error;
+      } else {
+        const { data, error } = await supabaseClient.from('expenses').insert(payload).select();
+        if (error) throw error;
+        savedId = data && data[0] ? data[0].id : ('local-' + Date.now());
+      }
+    } catch (e) {
+      // fall through to LS-only id
+      if (!savedId) savedId = 'local-' + Date.now();
+    }
+  } else if (!savedId) {
+    savedId = 'local-' + Date.now();
+  }
+
+  const rec = { id: savedId, date, description, category, amount, currency, recurring, is_deduction, notes };
+  const idx = expensesCache.findIndex(x => String(x.id) === String(savedId));
+  if (idx >= 0) expensesCache[idx] = rec; else expensesCache.unshift(rec);
+  saveExpensesLS();
+  closeModal('expense-modal');
+  toast(id ? 'Expense updated' : 'Expense added');
+  renderExpensesPage();
+}
+async function deleteExpense(id) {
+  if (currentUserRole() !== 'owner') return;
+  if (!confirm('Delete this expense entry?')) return;
+  if (supabaseClient) { try { await supabaseClient.from('expenses').delete().eq('id', id); } catch (e) {} }
+  expensesCache = (expensesCache || []).filter(x => String(x.id) !== String(id));
+  saveExpensesLS();
+  toast('Expense deleted');
+  renderExpensesPage();
+}
+async function renderExpensesPage() {
+  if (currentUserRole() !== 'owner') {
+    document.getElementById('expenses-body').innerHTML = '<div class="empty-state"><p>This page is private to the owner.</p></div>';
+    return;
+  }
+  await loadExpenses();
+  const months = Array.from(new Set((expensesCache || []).map(e => monthKey(e.date)))).sort().reverse();
+  const sel = document.getElementById('exp-month-filter');
+  const prev = sel.value;
+  const all = '<option value="all">All months</option>';
+  sel.innerHTML = all + months.map(m => `<option value="${m}">${monthLabel(m)}</option>`).join('');
+  if (prev && (prev === 'all' || months.includes(prev))) sel.value = prev;
+  const filter = sel.value || 'all';
+
+  let rows = (expensesCache || []).slice();
+  if (filter !== 'all') rows = rows.filter(e => monthKey(e.date) === filter);
+  rows.sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  // Totals by currency
+  const totals = {};
+  const dedTotals = {};
+  const recurringTotals = {};
+  rows.forEach(e => {
+    const cur = e.currency || 'SGD';
+    totals[cur] = (totals[cur] || 0) + e.amount;
+    if (e.is_deduction) dedTotals[cur] = (dedTotals[cur] || 0) + e.amount;
+    if (e.recurring === 'monthly') recurringTotals[cur] = (recurringTotals[cur] || 0) + e.amount;
+  });
+  const totalCards = Object.keys(totals).length
+    ? Object.keys(totals).map(cur => `<div class="metric-card"><div class="metric-label">Total expenses (${cur})</div><div class="metric-val red">${fmtMoney(totals[cur], cur)}</div></div>`).join('')
+    : '<div class="metric-card"><div class="metric-label">Total expenses</div><div class="metric-val green">—</div></div>';
+  const recCards = Object.keys(recurringTotals).map(cur => `<div class="metric-card"><div class="metric-label">Recurring/mo (${cur})</div><div class="metric-val amber">${fmtMoney(recurringTotals[cur], cur)}</div></div>`).join('');
+  const dedCards = Object.keys(dedTotals).map(cur => `<div class="metric-card"><div class="metric-label">Staff deductions (${cur})</div><div class="metric-val amber">${fmtMoney(dedTotals[cur], cur)}</div></div>`).join('');
+  document.getElementById('expenses-metrics').innerHTML = totalCards + recCards + dedCards +
+    `<div class="metric-card"><div class="metric-label">Entries</div><div class="metric-val blue">${rows.length}</div></div>`;
+
+  document.getElementById('expenses-count').textContent = `${rows.length} entr${rows.length === 1 ? 'y' : 'ies'}`;
+  if (!rows.length) {
+    document.getElementById('expenses-body').innerHTML = '<div class="empty-state"><p>No expenses yet. Click “+ Add expense” to log one.</p></div>';
+    return;
+  }
+  const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
+  const body = `<table><thead><tr>
+    <th>Date</th><th>Description</th><th>Category</th><th>Type</th><th style="text-align:right;">Amount</th><th>Notes</th><th></th>
+  </tr></thead><tbody>${rows.map(e => `<tr>
+    <td>${esc(e.date)}</td>
+    <td style="font-weight:600;">${esc(e.description)}${e.is_deduction ? ' <span class="nav-pill-new" style="background:var(--amber);">DEDUCTION</span>' : ''}</td>
+    <td>${esc(e.category)}</td>
+    <td>${e.recurring === 'monthly' ? '🔁 Monthly' : 'One-off'}</td>
+    <td style="text-align:right;font-family:var(--mono);font-weight:600;${e.is_deduction ? 'color:var(--amber);' : 'color:var(--red);'}">${fmtMoney(e.amount, e.currency)}</td>
+    <td class="sub-text">${esc(e.notes || '—')}</td>
+    <td><div class="action-stack"><button class="btn btn-ghost btn-sm" onclick="openExpenseModal('${esc(String(e.id))}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteExpense('${esc(String(e.id))}')">Delete</button></div></td>
+  </tr>`).join('')}</tbody></table>`;
+  document.getElementById('expenses-body').innerHTML = body;
+}
+
+// ── Finance Dashboard (owner + finance) ──────────────────────────
+async function loadFinancePage() {
+  const role = currentUserRole();
+  if (!(role === 'owner' || role === 'finance')) {
+    document.getElementById('finance-metrics').innerHTML = '<div class="empty-state"><p>Not permitted.</p></div>';
+    return;
+  }
+  // Reuse the ops shift cache. Make sure shifts are loaded.
+  try { if (!Array.isArray(allShifts) || !allShifts.length) await loadShifts(); } catch (e) {}
+  const period = (document.getElementById('fin-period') || {}).value || 'all';
+  let shifts = Array.isArray(allShifts) ? allShifts.slice() : [];
+  if (period === 'today') {
+    let todayStr;
+    try {
+      const d = (typeof currentDate !== 'undefined' && currentDate) ? currentDate : new Date();
+      todayStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    } catch (e) { todayStr = new Date().toISOString().slice(0, 10); }
+    shifts = shifts.filter(s => s.shift_date === todayStr);
+  }
+
+  // Payouts (paid out + estimated) by country — reuse existing helpers.
+  const payable = shifts.filter(isPayableShift);
+  const paidOutRows = payable.filter(s => s.clock_out);
+  const estRows = payable.filter(s => !s.clock_out);
+  const paidByCountry = splitAmountsByCountry(paidOutRows, totalPaymentForShift);
+  const estByCountry = splitAmountsByCountry(estRows, estimatedPaymentForShift);
+
+  // SR absorbed by country
+  const srByCountry = splitAmountsByCountry(shifts, srAbsorbedForShift);
+
+  // Cancellations collected (penalty amounts) + count
+  const cancelShifts = shifts.filter(s => s.cancelled);
+  const cancelCollectedByCountry = splitAmountsByCountry(cancelShifts, shiftPenaltyAmount);
+  const latePenByCountry = splitAmountsByCountry(shifts, effectiveLatePenalty);
+  const priorCancelByCountry = splitAmountsByCountry(shifts.filter(s => !s.cancelled), s => parseFloat(s.cancellation_penalty || 0));
+
+  const sumC = (o) => (Number(o.Singapore || 0) + Number(o.Malaysia || 0));
+  const card = (label, sgd, myr, cls) => `<div class="metric-card"><div class="metric-label">${label}</div>
+    <div class="metric-split">
+      <div class="metric-split-row"><span class="metric-split-country">🇸🇬 SG</span><span class="metric-split-amount ${cls}">$${Number(sgd || 0).toFixed(2)}</span></div>
+      <div class="metric-split-row"><span class="metric-split-country">🇲🇾 MY</span><span class="metric-split-amount ${cls}">RM${Number(myr || 0).toFixed(2)}</span></div>
+    </div></div>`;
+
+  document.getElementById('finance-metrics').innerHTML = `
+    ${card('💵 Total paid out', paidByCountry.Singapore, paidByCountry.Malaysia, 'green')}
+    ${card('⏳ Estimated payout', estByCountry.Singapore, estByCountry.Malaysia, 'amber')}
+    ${card('↺ SR absorbed (cost)', srByCountry.Singapore, srByCountry.Malaysia, 'amber')}
+    ${card('🚫 Cancellations collected', cancelCollectedByCountry.Singapore, cancelCollectedByCountry.Malaysia, 'green')}
+    ${card('⏰ Late penalties', latePenByCountry.Singapore, latePenByCountry.Malaysia, 'green')}
+    ${card('↩︎ Prior cancel deductions', priorCancelByCountry.Singapore, priorCancelByCountry.Malaysia, 'green')}
+    <div class="metric-card"><div class="metric-label">Cancellations (count)</div><div class="metric-val ${cancelShifts.length > 0 ? 'red' : 'green'}">${cancelShifts.length}</div></div>
+    <div class="metric-card"><div class="metric-label">Shifts in view</div><div class="metric-val blue">${shifts.length}</div></div>
+  `;
+
+  // Commission & revenue estimate. GSV = client billing value; commission = our cut.
+  // We estimate per-shift client value as gross client cost; commission via outlet commission_pct.
+  const commByCountry = { Singapore: 0, Malaysia: 0 };
+  const gsvByCountry = { Singapore: 0, Malaysia: 0 };
+  shifts.forEach(s => {
+    if (s.cancelled) return;
+    const country = countryForShift(s);
+    const gross = (typeof grossClientValueForShift === 'function') ? grossClientValueForShift(s) : estimatedClientValue(s);
+    const pct = commissionPctForOutlet(s.outlet);
+    gsvByCountry[country] += gross;
+    commByCountry[country] += gross * (pct / 100);
+  });
+  document.getElementById('finance-commission-body').innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:18px;">
+      <div style="min-width:200px;">
+        <div class="sub-text" style="margin-bottom:4px;">Estimated GSV (client value)</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇸🇬 $${gsvByCountry.Singapore.toFixed(2)}</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇲🇾 RM${gsvByCountry.Malaysia.toFixed(2)}</div>
+      </div>
+      <div style="min-width:200px;">
+        <div class="sub-text" style="margin-bottom:4px;">Estimated commission revenue</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${commByCountry.Singapore.toFixed(2)}</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${commByCountry.Malaysia.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="sub-text" style="margin-top:10px;">GSV and commission are estimated from loaded shifts and per-outlet commission rates. For invoiced figures, use the Xero Billing module.</div>
+  `;
+
+  // Recent cancellations collected table
+  const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
+  const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
+  document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
+  if (!recent.length) {
+    document.getElementById('finance-cancel-body').innerHTML = '<div class="empty-state"><p>No cancellations in the selected view.</p></div>';
+  } else {
+    document.getElementById('finance-cancel-body').innerHTML = `<table><thead><tr>
+      <th>Date</th><th>Worker</th><th>Outlet</th><th style="text-align:right;">Penalty collected</th><th>MC?</th>
+    </tr></thead><tbody>${recent.map(s => `<tr>
+      <td>${esc(s.shift_date || '—')}</td>
+      <td style="font-weight:600;">${esc(s.worker_name || '—')}</td>
+      <td>${esc(s.outlet || '—')}</td>
+      <td style="text-align:right;font-family:var(--mono);font-weight:600;color:var(--green);">${moneyForShift(shiftPenaltyAmount(s), s)}</td>
+      <td>${s.mc_url ? 'Yes (waived)' : 'No'}</td>
+    </tr>`).join('')}</tbody></table>`;
+  }
+}
+// Fallbacks for client value / commission if the ops build doesn't expose helpers.
+function estimatedClientValue(s) {
+  // Approximate client gross = rate × hours (rate stored as client hourly rate).
+  const hrs = (typeof shiftHours === 'function') ? shiftHours(s) : parseFloat(s.hours || 0);
+  const rate = parseFloat(s.rate || 0) || 0;
+  if (hrs && rate) return hrs * rate;
+  // Otherwise approximate from total payment.
+  try { return totalPaymentForShift(s) || 0; } catch (e) { return 0; }
+}
+function commissionPctForOutlet(outletName) {
+  try {
+    if (typeof outletProfile === 'function') {
+      const pct = parseFloat(outletProfile(outletName)?.commission_pct);
+      if (!isNaN(pct)) return pct;
+    }
+    const o = (allOutlets || []).find(x => x.name === outletName);
+    const pct2 = o && (o.commission_pct != null) ? parseFloat(o.commission_pct) : NaN;
+    if (!isNaN(pct2)) return pct2;
+  } catch (e) {}
+  return 20; // default commission %
+}
+
+// ── Salary page (per-user self view) ─────────────────────────────
+async function renderSalaryPage() {
+  await loadSalaryProfiles();
+  await loadSalaryEntries();
+  const me = currentInternalUser;
+  const isOwner = currentUserRole() === 'owner';
+  buildMonthOptions('salary-month-filter', (document.getElementById('salary-month-filter').value || currentMonthKey()));
+  const month = document.getElementById('salary-month-filter').value || currentMonthKey();
+
+  const prof = getSalaryProfile(me);
+  const entry = getSalaryEntry(me, month);
+  const sym = prof.currency;
+
+  // Owner sees an admin strip to manage all profiles; everyone sees only their own pay.
+  const adminStrip = isOwner ? `
+    <div class="table-wrap" style="margin-bottom:18px;">
+      <div class="table-header"><span class="table-title">Team Salary Profiles (owner only)</span></div>
+      <div style="padding:12px 16px;">
+        <div class="sub-text" style="margin-bottom:8px;">Configure each member's pay basis. Each member sees only their own net pay below.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+          ${INTERNAL_USERS.map(u => `<button class="btn btn-ghost btn-sm" onclick="openSalaryProfileModal('${u}')">${u}</button>`).join('')}
+        </div>
+      </div>
+    </div>` : '';
+
+  let payCard = '';
+  if (prof.type === 'part_time') {
+    // Part-time: per-shift × (days worked) + overtime - undertime - deductions + bonus.
+    const perShift = prof.perShift || 0;
+    const base = perShift * (entry.days_worked || 0);
+    const ot = entry.overtime || 0;
+    const ut = entry.undertime || 0;
+    const bonus = entry.bonus || 0;
+    const ded = entry.deduction || 0;
+    const net = base + ot - ut + bonus - ded;
+    payCard = `
+      <div class="table-wrap">
+        <div class="table-header"><span class="table-title">${me} — ${monthLabel(month)} (Part-time, per-shift)</span></div>
+        <div style="padding:16px;max-width:560px;">
+          <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>You're paid ${fmtMoney(perShift, sym)} per shift attended. Enter your days worked and any adjustments for this month.</span></div>
+          <div class="form-grid">
+            <div class="form-row"><label>Days worked</label><input type="number" id="sal-days" min="0" step="0.5" value="${entry.days_worked || 0}"></div>
+            <div class="form-row"><label>Rate per shift</label><input type="text" value="${fmtMoney(perShift, sym)}" disabled></div>
+          </div>
+          <div class="form-grid">
+            <div class="form-row"><label>Overtime (${sym})</label><input type="number" id="sal-ot" min="0" step="0.01" value="${ot}"></div>
+            <div class="form-row"><label>Under-time (${sym})</label><input type="number" id="sal-ut" min="0" step="0.01" value="${ut}"></div>
+          </div>
+          <div class="form-grid">
+            <div class="form-row"><label>Bonus / incentive (${sym})</label><input type="number" id="sal-bonus" min="0" step="0.01" value="${bonus}"></div>
+            <div class="form-row"><label>Deductions (${sym})</label><input type="number" id="sal-ded" min="0" step="0.01" value="${ded}"></div>
+          </div>
+          <div class="form-row"><label>Notes</label><input type="text" id="sal-notes" value="${(window.escapeHtml||(x=>x))(entry.notes||'')}"></div>
+          <button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="saveMySalaryEntry('${month}')">Save my entry</button>
+          <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;">
+            <div class="pen-row"><span>Base (${entry.days_worked || 0} × ${fmtMoney(perShift, sym)})</span><span style="font-family:var(--mono);">${fmtMoney(base, sym)}</span></div>
+            <div class="pen-row"><span>+ Overtime</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(ot, sym)}</span></div>
+            <div class="pen-row"><span>− Under-time</span><span style="font-family:var(--mono);color:var(--amber);">${fmtMoney(ut, sym)}</span></div>
+            <div class="pen-row"><span>+ Bonus / incentive</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(bonus, sym)}</span></div>
+            <div class="pen-row"><span>− Deductions</span><span style="font-family:var(--mono);color:var(--amber);">${fmtMoney(ded, sym)}</span></div>
+            <div class="pen-row total" style="border-top:1px solid var(--border2);margin-top:6px;padding-top:8px;"><span style="font-weight:700;">Net pay</span><span style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">${fmtMoney(net, sym)}</span></div>
+          </div>
+        </div>
+      </div>`;
+  } else {
+    // Full-time: base + bonus - deductions (- CPF if applicable).
+    const base = prof.base || 0;
+    const bonus = entry.bonus || 0;
+    const ded = entry.deduction || 0;
+    // Standard SG employee CPF contribution (20%) only if cpf applies (Jon & Jayden, SGD).
+    const cpfRate = (prof.cpf && prof.currency === 'SGD') ? 0.20 : 0;
+    const cpf = base * cpfRate;
+    const net = base + bonus - ded - cpf;
+    const cpfRow = prof.cpf ? `<div class="pen-row"><span>− CPF employee (20%)</span><span style="font-family:var(--mono);color:var(--amber);">${fmtMoney(cpf, sym)}</span></div>` : '';
+    payCard = `
+      <div class="table-wrap">
+        <div class="table-header"><span class="table-title">${me} — ${monthLabel(month)} (Full-time)</span></div>
+        <div style="padding:16px;max-width:560px;">
+          <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Your monthly base is set by the owner. Add this month's bonus/incentive and any deductions.${prof.cpf ? ' CPF (employee 20%) is deducted as you are based in Singapore.' : ' No statutory deductions apply.'}</span></div>
+          <div class="form-row"><label>Monthly base salary</label><input type="text" value="${fmtMoney(base, sym)}" disabled></div>
+          <div class="form-grid">
+            <div class="form-row"><label>Bonus / incentive (${sym})</label><input type="number" id="sal-bonus" min="0" step="0.01" value="${bonus}"></div>
+            <div class="form-row"><label>Deductions (${sym})</label><input type="number" id="sal-ded" min="0" step="0.01" value="${ded}"></div>
+          </div>
+          <div class="form-row"><label>Notes</label><input type="text" id="sal-notes" value="${(window.escapeHtml||(x=>x))(entry.notes||'')}"></div>
+          <button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="saveMySalaryEntry('${month}')">Save my entry</button>
+          <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;">
+            <div class="pen-row"><span>Base salary</span><span style="font-family:var(--mono);">${fmtMoney(base, sym)}</span></div>
+            <div class="pen-row"><span>+ Bonus / incentive</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(bonus, sym)}</span></div>
+            <div class="pen-row"><span>− Deductions</span><span style="font-family:var(--mono);color:var(--amber);">${fmtMoney(ded, sym)}</span></div>
+            ${cpfRow}
+            <div class="pen-row total" style="border-top:1px solid var(--border2);margin-top:6px;padding-top:8px;"><span style="font-weight:700;">Net pay</span><span style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">${fmtMoney(net, sym)}</span></div>
+          </div>
+        </div>
+      </div>`;
+  }
+  document.getElementById('salary-body').innerHTML = adminStrip + payCard;
+}
+async function saveMySalaryEntry(month) {
+  const me = currentInternalUser;
+  const prof = getSalaryProfile(me);
+  const entry = getSalaryEntry(me, month);
+  if (prof.type === 'part_time') {
+    entry.days_worked = parseFloat(document.getElementById('sal-days').value || 0) || 0;
+    entry.overtime = parseFloat(document.getElementById('sal-ot').value || 0) || 0;
+    entry.undertime = parseFloat(document.getElementById('sal-ut').value || 0) || 0;
+  }
+  entry.bonus = parseFloat((document.getElementById('sal-bonus') || {}).value || 0) || 0;
+  entry.deduction = parseFloat((document.getElementById('sal-ded') || {}).value || 0) || 0;
+  entry.notes = (document.getElementById('sal-notes') || {}).value || '';
+  entry.username = me; entry.month = month;
+  await persistSalaryEntry(entry);
+  toast('Salary entry saved');
+  renderSalaryPage();
+}
+
+// ── Salary profile admin modal (owner only) ──────────────────────
+function openSalaryProfileModal(user) {
+  if (currentUserRole() !== 'owner') { toast('Only the owner can edit salary profiles', 'error'); return; }
+  const p = getSalaryProfile(user);
+  document.getElementById('sp-username').textContent = user;
+  document.getElementById('sp-user').value = user;
+  document.getElementById('sp-currency').value = p.currency || 'SGD';
+  document.getElementById('sp-type').value = p.type || 'full_time';
+  document.getElementById('sp-base').value = p.base || '';
+  document.getElementById('sp-per-shift').value = p.perShift || '';
+  document.getElementById('sp-cpf').value = String(!!p.cpf);
+  toggleSalaryProfileFields();
+  openModalById('salary-profile-modal');
+}
+function toggleSalaryProfileFields() {
+  const type = document.getElementById('sp-type').value;
+  document.getElementById('sp-fulltime-fields').style.display = (type === 'full_time') ? '' : 'none';
+  document.getElementById('sp-parttime-fields').style.display = (type === 'part_time') ? '' : 'none';
+}
+async function saveSalaryProfile() {
+  if (currentUserRole() !== 'owner') { toast('Not permitted', 'error'); return; }
+  const user = document.getElementById('sp-user').value;
+  const profile = {
+    currency: document.getElementById('sp-currency').value,
+    type: document.getElementById('sp-type').value,
+    base: parseFloat(document.getElementById('sp-base').value || 0) || 0,
+    perShift: parseFloat(document.getElementById('sp-per-shift').value || 0) || 0,
+    cpf: document.getElementById('sp-cpf').value === 'true'
+  };
+  await persistSalaryProfile(user, profile);
+  closeModal('salary-profile-modal');
+  toast(`Saved salary profile for ${user}`);
+  renderSalaryPage();
+}
+
 </script>
 
 <!-- Cancellation log modal -->
