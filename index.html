@@ -1125,6 +1125,10 @@ tr:hover td { background: rgba(91,148,249,0.045); }
           <div class="table-header"><span class="table-title">Commission &amp; Revenue (estimated GSV)</span></div>
           <div id="finance-commission-body" style="padding:14px 16px;"></div>
         </div>
+        <div class="table-wrap" style="margin-bottom:18px;">
+          <div class="table-header"><span class="table-title">Operating Costs — Expenses &amp; Salaries</span></div>
+          <div id="finance-costs-body" style="padding:14px 16px;"></div>
+        </div>
         <div class="table-wrap">
           <div class="table-header"><span class="table-title">Recent Cancellations Collected</span><span class="table-count" id="finance-cancel-count"></span></div>
           <div id="finance-cancel-body"></div>
@@ -1882,8 +1886,12 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <h3 id="expense-modal-title">Add expense</h3>
     <input type="hidden" id="exp-id">
     <div class="form-grid">
-      <div class="form-row"><label>Date</label><input type="date" id="exp-date"></div>
+      <div class="form-row"><label>Date</label><input type="date" id="exp-date" onchange="onExpenseDateChange()"></div>
+      <div class="form-row"><label>Apply to month</label><input type="month" id="exp-month"></div>
+    </div>
+    <div class="form-grid">
       <div class="form-row"><label>Currency</label><select id="exp-currency"><option value="SGD">SGD ($)</option><option value="PHP">PHP (₱)</option><option value="MYR">MYR (RM)</option></select></div>
+      <div class="form-row"><label>&nbsp;</label><div class="sub-text" style="padding-top:8px;">Month controls which Finance period this expense appears in.</div></div>
     </div>
     <div class="form-row"><label>Description</label><input type="text" id="exp-desc" placeholder="e.g. Software subscription, Client dinner, Staff deduction — Jayden"></div>
     <div class="form-grid">
@@ -6866,7 +6874,11 @@ async function sendPeriskopeGroupMessage(groupChatId, message) {
       body: JSON.stringify({ chat_id: chatId, message })
     });
     const json = await res.json().catch(() => ({}));
-    console.log('[Periskope] group sent to', chatId, json.status || res.status);
+    if (!res.ok) {
+      console.warn('[Periskope] group send REJECTED', res.status, json);
+    } else {
+      console.log('[Periskope] group queued to', chatId, json.status || res.status, json.unique_id || '');
+    }
     return res.ok;
   } catch(e) { console.warn('[Periskope] group send error:', e); return false; }
 }
@@ -6876,16 +6888,28 @@ async function sendPeriskopeGroupMessage(groupChatId, message) {
 // the "Payroll (for attendance and clock-out)" group so payroll sees ended shifts.
 async function notifyPayrollClockOut(message) {
   const pk = getPeriskopeConfig();
-  if (!pk?.payrollEnabled || !pk?.payrollGroupId) {
-    console.log('[Payroll] group alert skipped — not configured/enabled');
+  if (!pk?.payrollEnabled) {
+    console.log('[Payroll] group alert skipped — payroll alerts toggle is OFF');
+    toast('Clock-out saved. WhatsApp alert OFF — enable it in WhatsApp Alerts → Payroll clock-out alerts.', 'error');
+    return false;
+  }
+  if (!pk?.payrollGroupId) {
+    console.log('[Payroll] group alert skipped — no payroll group chat ID set');
+    toast('Clock-out saved. No WhatsApp group set — pick one in WhatsApp Alerts → Fetch my groups.', 'error');
     return false;
   }
   if (!pk?.apikey || !pk?.phone) {
     console.warn('[Payroll] group alert skipped — Periskope API key/phone not set');
+    toast('Clock-out saved. WhatsApp not sent — Periskope API key/phone missing in WhatsApp Alerts.', 'error');
     return false;
   }
   const ok = await sendPeriskopeGroupMessage(pk.payrollGroupId, message);
-  if (!ok) console.warn('[Payroll] group alert failed to send');
+  if (!ok) {
+    console.warn('[Payroll] group alert failed to send');
+    toast('Clock-out saved, but WhatsApp alert failed to send — check Periskope key & group in WhatsApp Alerts.', 'error');
+  } else {
+    console.log('[Payroll] group alert sent ✓');
+  }
   return ok;
 }
 
@@ -14922,6 +14946,50 @@ function getSalaryEntry(user, month) {
   const k = salaryEntryKey(user, month);
   return (salaryEntriesCache && salaryEntriesCache[k]) || { username: user, month, days_worked: 0, overtime: 0, undertime: 0, bonus: 0, deduction: 0, notes: '' };
 }
+// Compute a user's net pay for a month using their profile + month entry.
+// Returns { currency, base, bonus, deduction, cpf, ot, ut, net, type }.
+function computeNetPay(user, month) {
+  const prof = getSalaryProfile(user);
+  const entry = getSalaryEntry(user, month);
+  const sym = prof.currency || 'SGD';
+  const bonus = parseFloat(entry.bonus) || 0;
+  const ded = parseFloat(entry.deduction) || 0;
+  if (prof.type === 'part_time') {
+    const perShift = parseFloat(prof.perShift) || 0;
+    const base = perShift * (parseFloat(entry.days_worked) || 0);
+    const ot = parseFloat(entry.overtime) || 0;
+    const ut = parseFloat(entry.undertime) || 0;
+    const net = base + ot - ut + bonus - ded;
+    // Company cost (no statutory) = what we pay the worker = net.
+    return { currency: sym, base, bonus, deduction: ded, cpf: 0, employerCpf: 0, ot, ut, net, companyCost: net, type: 'part_time' };
+  }
+  const base = parseFloat(prof.base) || 0;
+  // Singapore CPF: employee 20% (deducted from pay) + employer 17% (paid on top).
+  const cpfEmployeeRate = (prof.cpf && sym === 'SGD') ? 0.20 : 0;
+  const cpfEmployerRate = (prof.cpf && sym === 'SGD') ? 0.17 : 0;
+  const cpf = base * cpfEmployeeRate;            // employee portion (reduces net)
+  const employerCpf = base * cpfEmployerRate;    // employer portion (company cost on top)
+  const net = base + bonus - ded - cpf;          // take-home
+  // Total cost to company = gross base + bonus + employer CPF (the deduction is
+  // money the staff owes back, so it offsets the company's cash outflow).
+  const companyCost = base + bonus - ded + employerCpf;
+  return { currency: sym, base, bonus, deduction: ded, cpf, employerCpf, ot: 0, ut: 0, net, companyCost, type: 'full_time' };
+}
+// Return the list of month keys (YYYY-MM) that the [start, endExcl) range touches.
+function monthsInPeriod(start, endExcl) {
+  const out = [];
+  let y = start.getFullYear(), m = start.getMonth();
+  const endY = endExcl.getFullYear(), endM = endExcl.getMonth();
+  // endExcl is exclusive; include months strictly before endExcl, but if endExcl
+  // lands on the 1st of a month, that month is not included.
+  const lastInclusive = new Date(endExcl.getTime() - 1); // last ms of the range
+  const lY = lastInclusive.getFullYear(), lM = lastInclusive.getMonth();
+  while (y < lY || (y === lY && m <= lM)) {
+    out.push(y + '-' + String(m + 1).padStart(2, '0'));
+    m++; if (m > 11) { m = 0; y++; }
+  }
+  return out;
+}
 async function persistSalaryEntry(entry) {
   if (!salaryEntriesCache) salaryEntriesCache = loadSalaryEntriesLS();
   salaryEntriesCache[salaryEntryKey(entry.username, entry.month)] = entry;
@@ -14947,13 +15015,15 @@ function saveExpensesLS() { localStorage.setItem('expenses', JSON.stringify(expe
 async function loadExpenses() {
   if (!expensesCache) expensesCache = loadExpensesLS();
   if (!supabaseClient) return expensesCache;
+  const localCopy = (expensesCache || []).slice();
   try {
     const { data, error } = await supabaseClient.from('expenses').select('*').order('exp_date', { ascending: false });
-    if (error) return expensesCache;
+    if (error) return expensesCache; // table missing / no columns — keep local
     if (Array.isArray(data)) {
-      expensesCache = data.map(r => ({
+      const remote = data.map(r => ({
         id: r.id,
         date: r.exp_date,
+        exp_month: r.exp_month || (r.exp_date ? monthKey(r.exp_date) : ''),
         description: r.description || '',
         category: r.category || 'Other',
         amount: parseFloat(r.amount || 0) || 0,
@@ -14964,9 +15034,15 @@ async function loadExpenses() {
         staff: r.staff || '',
         staff_month: r.staff_month || ''
       }));
+      // Merge: keep any local-only entries (ids that start with 'local-' or not in
+      // the remote set) so a Supabase that's empty or missing columns doesn't wipe
+      // expenses that were saved to localStorage only.
+      const remoteIds = new Set(remote.map(r => String(r.id)));
+      const localOnly = localCopy.filter(l => !remoteIds.has(String(l.id)));
+      expensesCache = remote.concat(localOnly);
       saveExpensesLS();
     }
-  } catch (e) {}
+  } catch (e) { /* keep local */ }
   return expensesCache;
 }
 function populateExpenseStaffSelect(selected) {
@@ -15012,11 +15088,23 @@ function openExpenseModal(id) {
   document.getElementById('exp-recurring').value = e ? e.recurring : 'one_off';
   document.getElementById('exp-is-deduction').value = e ? String(!!e.is_deduction) : 'false';
   document.getElementById('exp-notes').value = e ? e.notes : '';
+  document.getElementById('exp-month').value = (e && e.exp_month) ? e.exp_month : monthKey(e ? e.date : today);
   populateExpenseStaffSelect(e && e.staff ? e.staff : (INTERNAL_USERS.filter(u => u !== 'Emmanuel')[0] || ''));
-  // Apply-to month defaults to the expense's month.
-  document.getElementById('exp-staff-month').value = monthKey(e ? e.date : today);
+  // Staff-deduction apply-to month defaults to the expense month.
+  document.getElementById('exp-staff-month').value = (e && e.staff_month) ? e.staff_month : (document.getElementById('exp-month').value || monthKey(e ? e.date : today));
   refreshExpenseStaffRow();
   openModalById('expense-modal');
+}
+// Keep the "Apply to month" in sync when the user changes the date (only if they
+// haven't deviated from the date-derived month already).
+function onExpenseDateChange() {
+  const dateVal = document.getElementById('exp-date').value;
+  if (!dateVal) return;
+  const monthEl = document.getElementById('exp-month');
+  monthEl.value = monthKey(dateVal);
+  // Also sync staff-month if it equals the (now-changed) month default.
+  const sm = document.getElementById('exp-staff-month');
+  if (sm && !sm.value) sm.value = monthEl.value;
 }
 async function saveExpense() {
   if (currentUserRole() !== 'owner') { toast('Not permitted', 'error'); return; }
@@ -15029,8 +15117,9 @@ async function saveExpense() {
   const recurring = document.getElementById('exp-recurring').value;
   const is_deduction = document.getElementById('exp-is-deduction').value === 'true' || category === 'Staff Deduction';
   const notes = document.getElementById('exp-notes').value.trim();
+  const exp_month = document.getElementById('exp-month').value || monthKey(date);
   const staff = is_deduction ? (document.getElementById('exp-staff').value || '') : '';
-  const staffMonth = is_deduction ? (document.getElementById('exp-staff-month').value || monthKey(date)) : '';
+  const staffMonth = is_deduction ? (document.getElementById('exp-staff-month').value || exp_month) : '';
   if (!date || !description || !amount) { toast('Date, description and amount are required', 'error'); return; }
   if (is_deduction && !staff) { toast('Select the staff member to deduct from', 'error'); return; }
 
@@ -15041,7 +15130,7 @@ async function saveExpense() {
   let savedId = id;
   if (supabaseClient) {
     try {
-      const payload = { exp_date: date, description, category, amount, currency, recurring, is_deduction, notes, staff, staff_month: staffMonth, updated_at: new Date().toISOString(), created_by: currentInternalUser };
+      const payload = { exp_date: date, exp_month, description, category, amount, currency, recurring, is_deduction, notes, staff, staff_month: staffMonth, updated_at: new Date().toISOString(), created_by: currentInternalUser };
       if (id) {
         const { error } = await supabaseClient.from('expenses').update(payload).eq('id', id);
         if (error) throw error;
@@ -15057,7 +15146,7 @@ async function saveExpense() {
     savedId = 'local-' + Date.now();
   }
 
-  const rec = { id: savedId, date, description, category, amount, currency, recurring, is_deduction, notes, staff, staff_month: staffMonth };
+  const rec = { id: savedId, date, exp_month, description, category, amount, currency, recurring, is_deduction, notes, staff, staff_month: staffMonth };
   const idx = expensesCache.findIndex(x => String(x.id) === String(savedId));
   if (idx >= 0) expensesCache[idx] = rec; else expensesCache.unshift(rec);
   saveExpensesLS();
@@ -15105,7 +15194,8 @@ async function renderExpensesPage() {
     return;
   }
   await loadExpenses();
-  const months = Array.from(new Set((expensesCache || []).map(e => monthKey(e.date)))).sort().reverse();
+  const expMonthOf = (e) => e.exp_month || monthKey(e.date);
+  const months = Array.from(new Set((expensesCache || []).map(expMonthOf))).sort().reverse();
   const sel = document.getElementById('exp-month-filter');
   const prev = sel.value;
   const all = '<option value="all">All months</option>';
@@ -15114,7 +15204,7 @@ async function renderExpensesPage() {
   const filter = sel.value || 'all';
 
   let rows = (expensesCache || []).slice();
-  if (filter !== 'all') rows = rows.filter(e => monthKey(e.date) === filter);
+  if (filter !== 'all') rows = rows.filter(e => expMonthOf(e) === filter);
   rows.sort((a, b) => (a.date < b.date ? 1 : -1));
 
   // Totals by currency
@@ -15235,10 +15325,9 @@ async function loadFinancePage() {
     document.getElementById('finance-metrics').innerHTML = '<div class="empty-state"><p>Not permitted.</p></div>';
     return;
   }
-  // Sync granularity control + ensure shifts loaded.
+  // Sync granularity control.
   const gSel = document.getElementById('fin-granularity');
   if (gSel) finGranularity = gSel.value || 'month';
-  try { if (!Array.isArray(allShifts) || !allShifts.length) await loadShifts(); } catch (e) {}
 
   const { start, endExcl, label } = finPeriodRange();
   const lbl = document.getElementById('fin-period-label');
@@ -15250,12 +15339,28 @@ async function loadFinancePage() {
   if (prevBtn) prevBtn.style.visibility = (finGranularity === 'all') ? 'hidden' : 'visible';
   if (nextBtn) nextBtn.style.visibility = (finGranularity === 'all') ? 'hidden' : 'visible';
 
-  const inRange = (s) => {
-    if (!s.shift_date) return false;
-    const d = _startOfDay(new Date(s.shift_date + 'T00:00:00'));
-    return d >= start && d < endExcl;
-  };
-  let shifts = (Array.isArray(allShifts) ? allShifts : []).filter(inRange);
+  // The attendance page only loads the currently-viewed day/week into allShifts,
+  // so the Finance Dashboard must query the shifts table directly for the period's
+  // date range. Falls back to filtering allShifts if Supabase isn't available.
+  const fmtD = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const startStr = fmtD(start);
+  const endStr = fmtD(endExcl); // exclusive
+  let shifts = [];
+  document.getElementById('finance-metrics').innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><div class="spinner"></div><p style="margin-top:10px;">Loading ' + label + '…</p></div>';
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
+        .from('shifts').select('*')
+        .gte('shift_date', startStr).lt('shift_date', endStr)
+        .order('shift_date');
+      if (error) throw error;
+      shifts = data || [];
+    } catch (e) {
+      shifts = (Array.isArray(allShifts) ? allShifts : []).filter(s => s.shift_date && s.shift_date >= startStr && s.shift_date < endStr);
+    }
+  } else {
+    shifts = (Array.isArray(allShifts) ? allShifts : []).filter(s => s.shift_date && s.shift_date >= startStr && s.shift_date < endStr);
+  }
 
   const payable = shifts.filter(isPayableShift);
   const paidOutRows = payable.filter(s => s.clock_out);
@@ -15326,6 +15431,98 @@ async function loadFinancePage() {
     <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only — today &amp; future excluded). GSV and commission are estimated from shifts and per-outlet commission rates. For invoiced figures, use Xero Billing.</div>
   `;
 
+  // ── Operating costs: expenses + salaries for the period ─────────────
+  await loadExpenses();
+  await loadSalaryProfiles();
+  await loadSalaryEntries();
+  let months = monthsInPeriod(start, endExcl); // YYYY-MM keys the period touches
+  // For the very wide "all past" range, monthsInPeriod could span back to 2000.
+  // Clamp to months where we actually have expense or salary data (plus the
+  // current run of months up to today) so recurring costs/salaries aren't
+  // multiplied across empty historical months.
+  if (finGranularity === 'all') {
+    const dataMonths = new Set();
+    (expensesCache || []).forEach(e => { const m = e.exp_month || monthKey(e.date); if (m) dataMonths.add(m); });
+    Object.keys(salaryEntriesCache || {}).forEach(k => { const mm = k.split('|')[1]; if (mm) dataMonths.add(mm); });
+    if (dataMonths.size) {
+      const earliest = Array.from(dataMonths).sort()[0];
+      months = months.filter(m => m >= earliest);
+    } else {
+      months = months.slice(-12); // no data — just last 12 months
+    }
+  }
+  const monthSet = new Set(months);
+
+  // Expenses: one-off counted if their date is in range; monthly recurring counted
+  // once per month the period touches. Totalled by currency.
+  const expByCur = {}; // currency -> amount
+  const expRows = []; // for drill list
+  (expensesCache || []).forEach(e => {
+    const cur = e.currency || 'SGD';
+    const eMonth = e.exp_month || monthKey(e.date);
+    if (e.recurring === 'monthly') {
+      // Count once for every touched month >= the expense's first month.
+      const applicable = months.filter(m => m >= eMonth);
+      if (applicable.length) {
+        expByCur[cur] = (expByCur[cur] || 0) + e.amount * applicable.length;
+        applicable.forEach(m => expRows.push({ label: e.description + ' (recurring ' + m + ')', amount: e.amount, currency: cur, category: e.category }));
+      }
+    } else {
+      // One-off: count if its applied month is within the period's months.
+      if (monthSet.has(eMonth)) {
+        expByCur[cur] = (expByCur[cur] || 0) + e.amount;
+        expRows.push({ label: e.description, amount: e.amount, currency: cur, category: e.category });
+      }
+    }
+  });
+
+  // Salaries: company cost per user per month = gross base + bonus − deduction
+  // + employer CPF. Track CPF (employee + employer) separately too.
+  const salByCur = {}; // currency -> company salary cost
+  const cpfByCur = {}; // currency -> total CPF (employee + employer)
+  const salRows = [];
+  INTERNAL_USERS.filter(u => u !== 'Emmanuel').forEach(u => {
+    months.forEach(m => {
+      const np = computeNetPay(u, m);
+      const cost = np.companyCost || 0;
+      const totalCpf = (np.cpf || 0) + (np.employerCpf || 0);
+      if (cost || totalCpf) {
+        salByCur[np.currency] = (salByCur[np.currency] || 0) + cost;
+        if (totalCpf) cpfByCur[np.currency] = (cpfByCur[np.currency] || 0) + totalCpf;
+        const cpfNote = totalCpf ? ` (incl. CPF ${fmtMoney(np.employerCpf, np.currency)} employer + ${fmtMoney(np.cpf, np.currency)} employee)` : '';
+        salRows.push({ label: u + ' — ' + m + cpfNote, amount: cost, currency: np.currency });
+      }
+    });
+  });
+
+  _finDrill.expenses = { title: 'Expenses in period', genericRows: expRows };
+  _finDrill.salaries = { title: 'Salaries — company cost (incl. employer CPF)', genericRows: salRows };
+
+  const curList = Array.from(new Set([...Object.keys(expByCur), ...Object.keys(salByCur), ...Object.keys(cpfByCur)]));
+  const curOrder = ['SGD', 'PHP', 'MYR'];
+  curList.sort((a, b) => (curOrder.indexOf(a) - curOrder.indexOf(b)));
+  const costBlock = (titleTxt, byCur, onclick) => {
+    const rows = (curList.length ? curList : ['SGD']).map(c => {
+      const amt = (byCur[c] || 0);
+      return `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">${fmtMoney(amt, c)}</div>`;
+    }).join('');
+    const cursor = onclick ? 'cursor:pointer;' : '';
+    return `<div style="min-width:180px;${cursor}" ${onclick ? `onclick="${onclick}"` : ''}><div class="sub-text" style="margin-bottom:4px;">${titleTxt}</div>${rows || '<div>—</div>'}</div>`;
+  };
+  const monthsLabel = months.length === 1 ? months[0] : (months[0] + ' → ' + months[months.length - 1]);
+  document.getElementById('finance-costs-body').innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:24px;">
+      ${costBlock('🧮 Expenses (tap to view)', expByCur, "openFinanceGenericDrill('expenses')")}
+      ${costBlock('💸 Salaries — company cost (tap to view)', salByCur, "openFinanceGenericDrill('salaries')")}
+      ${costBlock('🏦 of which CPF (EE + ER)', cpfByCur, '')}
+      <div style="min-width:180px;">
+        <div class="sub-text" style="margin-bottom:4px;">Total operating cost</div>
+        ${(curList.length ? curList : ['SGD']).map(c => `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--red);">${fmtMoney((expByCur[c] || 0) + (salByCur[c] || 0), c)}</div>`).join('')}
+      </div>
+    </div>
+    <div class="sub-text" style="margin-top:10px;">Covering month(s): <strong>${monthsLabel}</strong>. Subscriptions &amp; salaries counted per month; one-off expenses by their applied month. <strong>Salary company cost = gross base + bonus − deductions + employer CPF (17%)</strong>; CPF line shows total CPF (employee 20% + employer 17%) for SG staff. Currencies are not converted.</div>
+  `;
+
   const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
   const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
   document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
@@ -15368,7 +15565,32 @@ function openFinanceDrill(cardId) {
   }
   openModalById('finance-drill-modal');
 }
-// Fallbacks for client value / commission if the ops build doesn't expose helpers.
+
+// Drill-down for non-shift lists (expenses, salaries) — generic label/amount rows.
+function openFinanceGenericDrill(cardId) {
+  const d = _finDrill[cardId];
+  if (!d || !d.genericRows) return;
+  const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
+  document.getElementById('finance-drill-title').textContent = d.title;
+  const rows = d.genericRows.slice();
+  const byCur = {};
+  rows.forEach(r => { byCur[r.currency] = (byCur[r.currency] || 0) + r.amount; });
+  document.getElementById('finance-drill-sub').innerHTML = rows.length
+    ? Object.keys(byCur).map(c => fmtMoney(byCur[c], c)).join(' · ')
+    : 'No records';
+  if (!rows.length) {
+    document.getElementById('finance-drill-body').innerHTML = '<div class="empty-state"><p>No records.</p></div>';
+  } else {
+    document.getElementById('finance-drill-body').innerHTML = `<table><thead><tr>
+      <th>Item</th>${rows[0].category !== undefined ? '<th>Category</th>' : ''}<th style="text-align:right;">Amount</th>
+    </tr></thead><tbody>${rows.map(r => `<tr>
+      <td style="font-weight:600;">${esc(r.label)}</td>
+      ${r.category !== undefined ? `<td>${esc(r.category || '—')}</td>` : ''}
+      <td style="text-align:right;font-family:var(--mono);font-weight:600;color:var(--red);">${fmtMoney(r.amount, r.currency)}</td>
+    </tr>`).join('')}</tbody></table>`;
+  }
+  openModalById('finance-drill-modal');
+}
 function estimatedClientValue(s) {
   // Approximate client gross = rate × hours (rate stored as client hourly rate).
   const hrs = (typeof shiftHours === 'function') ? shiftHours(s) : parseFloat(s.hours || 0);
