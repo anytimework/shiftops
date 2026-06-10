@@ -1129,6 +1129,10 @@ tr:hover td { background: rgba(91,148,249,0.045); }
           <div class="table-header"><span class="table-title">Operating Costs — Expenses &amp; Salaries</span></div>
           <div id="finance-costs-body" style="padding:14px 16px;"></div>
         </div>
+        <div class="table-wrap" style="margin-bottom:18px;">
+          <div class="table-header"><span class="table-title">📊 Profit &amp; Loss (estimated)</span></div>
+          <div id="finance-pl-body" style="padding:14px 16px;"></div>
+        </div>
         <div class="table-wrap">
           <div class="table-header"><span class="table-title">Recent Cancellations Collected</span><span class="table-count" id="finance-cancel-count"></span></div>
           <div id="finance-cancel-body"></div>
@@ -15405,30 +15409,55 @@ async function loadFinancePage() {
     <div class="metric-card clickable" onclick="openFinanceDrill('all_shifts')" style="cursor:pointer;"><div class="metric-label">Shifts in view</div><div class="metric-val blue">${shifts.length}</div></div>
   `;
 
+  // GSV (client billing value) MUST use the same basis as "Total paid out":
+  // payoutForShift = hours × client rate. Commission = per-outlet % of that GSV.
+  // This keeps GSV reconciled with the paid-out card instead of a separate estimate.
   const commByCountry = { Singapore: 0, Malaysia: 0 };
   const gsvByCountry = { Singapore: 0, Malaysia: 0 };
   shifts.forEach(s => {
     if (s.cancelled) return;
     const country = countryForShift(s);
-    const gross = (typeof grossClientValueForShift === 'function') ? grossClientValueForShift(s) : estimatedClientValue(s);
+    const gsv = (typeof payoutForShift === 'function') ? (payoutForShift(s) || 0) : estimatedClientValue(s);
     const pct = commissionPctForOutlet(s.outlet);
-    gsvByCountry[country] += gross;
-    commByCountry[country] += gross * (pct / 100);
+    gsvByCountry[country] += gsv;
+    commByCountry[country] += gsv * (pct / 100);
   });
+
+  // Penalties collected = late penalties + cancellation penalties collected (real revenue to us).
+  const lateCollected = splitAmountsByCountry(shifts, effectiveLatePenalty);
+  const cancelCollected = splitAmountsByCountry(shifts.filter(s => s.cancelled), shiftPenaltyAmount);
+  const priorCancelCollected = splitAmountsByCountry(shifts.filter(s => !s.cancelled), s => parseFloat(s.cancellation_penalty || 0));
+  const penaltiesByCountry = {
+    Singapore: (lateCollected.Singapore || 0) + (cancelCollected.Singapore || 0) + (priorCancelCollected.Singapore || 0),
+    Malaysia:  (lateCollected.Malaysia || 0) + (cancelCollected.Malaysia || 0) + (priorCancelCollected.Malaysia || 0)
+  };
+  // 3rd-party platform fees earned (also revenue).
+  const platformFeeByCountry = splitAmountsByCountry(shifts.filter(s => !s.cancelled), thirdPartyPlatformFeeForShift);
+
   document.getElementById('finance-commission-body').innerHTML = `
-    <div style="display:flex;flex-wrap:wrap;gap:18px;">
-      <div style="min-width:200px;">
-        <div class="sub-text" style="margin-bottom:4px;">Estimated GSV (client value)</div>
+    <div style="display:flex;flex-wrap:wrap;gap:32px;">
+      <div style="min-width:180px;">
+        <div class="sub-text" style="margin-bottom:4px;">Estimated GSV (client billing)</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇸🇬 $${gsvByCountry.Singapore.toFixed(2)}</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇲🇾 RM${gsvByCountry.Malaysia.toFixed(2)}</div>
       </div>
-      <div style="min-width:200px;">
-        <div class="sub-text" style="margin-bottom:4px;">Estimated commission revenue</div>
+      <div style="min-width:180px;">
+        <div class="sub-text" style="margin-bottom:4px;">Commission revenue</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${commByCountry.Singapore.toFixed(2)}</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${commByCountry.Malaysia.toFixed(2)}</div>
       </div>
+      <div style="min-width:180px;">
+        <div class="sub-text" style="margin-bottom:4px;">Penalties collected (late + cancel)</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${penaltiesByCountry.Singapore.toFixed(2)}</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${penaltiesByCountry.Malaysia.toFixed(2)}</div>
+      </div>
+      ${(platformFeeByCountry.Singapore > 0 || platformFeeByCountry.Malaysia > 0) ? `<div style="min-width:180px;">
+        <div class="sub-text" style="margin-bottom:4px;">3rd-party platform fees</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${platformFeeByCountry.Singapore.toFixed(2)}</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${platformFeeByCountry.Malaysia.toFixed(2)}</div>
+      </div>` : ''}
     </div>
-    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only — today &amp; future excluded). GSV and commission are estimated from shifts and per-outlet commission rates. For invoiced figures, use Xero Billing.</div>
+    <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only). <strong>GSV = hours × client rate</strong> (same basis as Total paid out). Commission = each outlet's set % of its GSV. Penalties collected and platform fees are additional revenue. For invoiced figures, use Xero Billing.</div>
   `;
 
   // ── Operating costs: expenses + salaries for the period ─────────────
@@ -15523,7 +15552,44 @@ async function loadFinancePage() {
     <div class="sub-text" style="margin-top:10px;">Covering month(s): <strong>${monthsLabel}</strong>. Subscriptions &amp; salaries counted per month; one-off expenses by their applied month. <strong>Salary company cost = gross base + bonus − deductions + employer CPF (17%)</strong>; CPF line shows total CPF (employee 20% + employer 17%) for SG staff. Currencies are not converted.</div>
   `;
 
-  const esc = (window.escapeHtml || (s => String(s == null ? '' : s)));
+  // ── Profit & Loss (estimated) ───────────────────────────────────────
+  // Revenue = commission + penalties collected + 3rd-party platform fees.
+  // (Worker pay and GSV are pass-through: the client pays GSV, the worker keeps
+  //  their rate, we keep commission — so revenue is our commission, not GSV.)
+  // Costs = operating expenses + salaries (incl. employer CPF) + SR absorbed.
+  // Reported per currency since SG bills SGD, MY bills MYR, and PH salaries are PHP.
+  const revByCur = {
+    SGD: (commByCountry.Singapore || 0) + (penaltiesByCountry.Singapore || 0) + (platformFeeByCountry.Singapore || 0),
+    MYR: (commByCountry.Malaysia || 0) + (penaltiesByCountry.Malaysia || 0) + (platformFeeByCountry.Malaysia || 0)
+  };
+  const srAbsorbedByCur = {
+    SGD: (srByCountry.Singapore || 0),
+    MYR: (srByCountry.Malaysia || 0)
+  };
+  const plCurs = Array.from(new Set([...Object.keys(revByCur), ...Object.keys(expByCur), ...Object.keys(salByCur), 'PHP']))
+    .filter(c => (revByCur[c] || 0) || (expByCur[c] || 0) || (salByCur[c] || 0) || (srAbsorbedByCur[c] || 0));
+  plCurs.sort((a, b) => (['SGD','MYR','PHP'].indexOf(a) - ['SGD','MYR','PHP'].indexOf(b)));
+  const plRowsHtml = (plCurs.length ? plCurs : ['SGD']).map(c => {
+    const rev = revByCur[c] || 0;
+    const exp = expByCur[c] || 0;
+    const sal = salByCur[c] || 0;
+    const sr  = srAbsorbedByCur[c] || 0;
+    const cost = exp + sal + sr;
+    const profit = rev - cost;
+    const profitColor = profit >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<div style="min-width:230px;border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;">
+      <div style="font-weight:700;font-family:var(--mono);margin-bottom:8px;">${c}</div>
+      <div class="pen-row"><span>Revenue (commission + penalties${(platformFeeByCountry.Singapore>0||platformFeeByCountry.Malaysia>0)?' + fees':''})</span><span style="font-family:var(--mono);color:var(--green);">${fmtMoney(rev, c)}</span></div>
+      <div class="pen-row"><span>− Expenses</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(exp, c)}</span></div>
+      <div class="pen-row"><span>− Salaries (incl. CPF)</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(sal, c)}</span></div>
+      ${sr > 0 ? `<div class="pen-row"><span>− SR absorbed</span><span style="font-family:var(--mono);color:var(--red);">${fmtMoney(sr, c)}</span></div>` : ''}
+      <div class="pen-row total" style="border-top:1px solid var(--border2);margin-top:6px;padding-top:8px;"><span style="font-weight:700;">${profit >= 0 ? 'Net profit' : 'Net loss'}</span><span style="font-family:var(--mono);font-weight:700;font-size:16px;color:${profitColor};">${fmtMoney(profit, c)}</span></div>
+    </div>`;
+  }).join('');
+  document.getElementById('finance-pl-body').innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:16px;">${plRowsHtml}</div>
+    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected${(platformFeeByCountry.Singapore>0||platformFeeByCountry.Malaysia>0)?' + 3rd-party platform fees':''}</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + SR absorbed</strong>. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
+  `;
   const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
   document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
   if (!recent.length) {
