@@ -862,7 +862,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
             <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Recommended: copy from Google Sheets/Excel including headers, then paste below. Excel/CSV upload is also supported. Unmatched workers/outlets will be highlighted for mapping.</span></div>
             <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;">
               <div class="form-row"><label>Import mode</label><select id="import-mode"><option value="auto">Auto: past with Out = clocked-out</option><option value="completed">Force clocked-out/completed</option><option value="scheduled">Force confirmed/scheduled</option></select></div>
-              <div class="form-row"><label>Default country</label><select id="import-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
+              <div class="form-row"><label>Default country</label><select id="import-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option><option value="Philippines">Philippines</option></select></div>
 
             </div>
             <div class="form-row"><label>Paste data here</label><textarea id="import-paste" placeholder="Paste copied rows from Excel / Google Sheets here..." style="width:100%;min-height:180px;font-family:var(--mono);font-size:12px;padding:10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg);color:var(--text);"></textarea></div>
@@ -1247,7 +1247,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div id="add-block-warn" class="alert alert-red" style="display:none;"><span class="alert-icon">🚫</span><span id="add-block-text"></span></div>
     <div class="form-row">
       <label>Country</label>
-      <select id="f-country" onchange="onShiftCountryChange()"><option value="Singapore" selected>Singapore</option><option value="Malaysia">Malaysia</option></select>
+      <select id="f-country" onchange="onShiftCountryChange()"><option value="Singapore" selected>Singapore</option><option value="Malaysia">Malaysia</option><option value="Philippines">Philippines</option></select>
     </div>
     <div class="form-row">
       <label>Worker name <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional — leave blank for Available)</span></label>
@@ -1792,7 +1792,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
   <div class="modal">
     <h3 id="worker-modal-title">Add worker</h3>
     <div class="form-row"><label>Full name</label><input type="text" id="wf-name" placeholder="e.g. Amirah B."></div>
-    <div class="form-row"><label>Country</label><select id="wf-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
+    <div class="form-row"><label>Country</label><select id="wf-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option><option value="Philippines">Philippines</option></select></div>
     <div class="form-row"><label>Phone</label><input type="text" id="wf-phone" placeholder="+65 9xxx xxxx"></div>
     <div class="form-grid">
       <div class="form-row"><label>Payment method</label>
@@ -1827,7 +1827,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
   <div class="modal">
     <h3 id="outlet-modal-title">Add outlet</h3>
     <div class="form-row"><label>Outlet name</label><input type="text" id="of-name" placeholder="e.g. Kopitiam Sengkang"></div>
-    <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option></select></div>
+    <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option><option value="Philippines">Philippines</option></select></div>
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
@@ -3865,7 +3865,9 @@ function breakSelectHtml(id, value = 0) {
 
 function normaliseCountry(country) {
   const c = String(country || '').trim().toLowerCase();
-  return c === 'malaysia' || c === 'my' ? 'Malaysia' : 'Singapore';
+  if (c === 'malaysia' || c === 'my') return 'Malaysia';
+  if (c === 'philippines' || c === 'ph' || c === 'philippine') return 'Philippines';
+  return 'Singapore';
 }
 function outletCountry(outletName) {
   const outlet = allOutlets.find(o => o.name === outletName);
@@ -3875,7 +3877,12 @@ function workerCountry(workerName) {
   const worker = allWorkers.find(w => String(w.name || '').toLowerCase() === String(workerName || '').toLowerCase());
   return normaliseCountry(worker?.country);
 }
-function currencySymbolForCountry(country) { return normaliseCountry(country) === 'Malaysia' ? 'RM' : '$'; }
+function currencySymbolForCountry(country) {
+  const c = normaliseCountry(country);
+  if (c === 'Malaysia') return 'RM';
+  if (c === 'Philippines') return '₱';
+  return '$';
+}
 function currencySymbolForOutlet(outletName) { return currencySymbolForCountry(outletCountry(outletName)); }
 function moneyForCountry(n, country) { return currencySymbolForCountry(country) + Number(n || 0).toFixed(2); }
 function moneyForShift(n, s) { return moneyForCountry(n, s?.country || outletCountry(s?.outlet)); }
@@ -3885,12 +3892,13 @@ function splitAmountsByCountry(rows, amountFn) {
     const country = countryForShift(s);
     acc[country] = (acc[country] || 0) + Number(amountFn(s) || 0);
     return acc;
-  }, { Singapore: 0, Malaysia: 0 });
+  }, { Singapore: 0, Malaysia: 0, Philippines: 0 });
 }
 function countrySplitMetric(amounts, cls = 'green') {
   return `<div class="metric-split">
     <div class="metric-split-row"><span class="metric-split-country">🇸🇬 Singapore</span><span class="metric-split-amount ${cls}">$${Number(amounts.Singapore || 0).toFixed(2)}</span></div>
     <div class="metric-split-row"><span class="metric-split-country">🇲🇾 Malaysia</span><span class="metric-split-amount ${cls}">RM${Number(amounts.Malaysia || 0).toFixed(2)}</span></div>
+    ${Number(amounts.Philippines || 0) ? `<div class="metric-split-row"><span class="metric-split-country">🇵🇭 Philippines</span><span class="metric-split-amount ${cls}">₱${Number(amounts.Philippines || 0).toFixed(2)}</span></div>` : ''}
   </div>`;
 }
 function updateCurrencyLabels() {
@@ -3984,11 +3992,14 @@ function payrollSummary(s) {
   const workerTotal = Number(hours) * effectiveRate;
   const total = workerTotal.toFixed(2);
   const tc = transportClaim(s);
-  const tcSuffix = tc > 0 ? (country === 'Malaysia' ? ` + RM${tc.toFixed(2)} transport claim` : ` + SG$${tc.toFixed(2)} transport claim`) : '';
+  const tcSuffix = tc > 0 ? (country === 'Malaysia' ? ` + RM${tc.toFixed(2)} transport claim` : country === 'Philippines' ? ` + ₱${tc.toFixed(2)} transport claim` : ` + SG$${tc.toFixed(2)} transport claim`) : '';
   const cancelPen = !s.cancelled ? parseFloat(s.cancellation_penalty || 0) : 0;
-  const penSuffix = cancelPen > 0 ? (country === 'Malaysia' ? ` - RM${cancelPen.toFixed(2)} prev cancellation` : ` - SG$${cancelPen.toFixed(2)} prev cancellation`) : '';
+  const penSuffix = cancelPen > 0 ? (country === 'Malaysia' ? ` - RM${cancelPen.toFixed(2)} prev cancellation` : country === 'Philippines' ? ` - ₱${cancelPen.toFixed(2)} prev cancellation` : ` - SG$${cancelPen.toFixed(2)} prev cancellation`) : '';
   if (country === 'Malaysia') {
     return `${malaysiaSafeDate(s.shift_date)} ${s.worker_name} ${cleanHourText(hours)} work at RM${rate} per hr total RM${total}${penSuffix}${tcSuffix}`;
+  }
+  if (country === 'Philippines') {
+    return `${formatShortDate(s.shift_date)} ${s.worker_name} ${formatHourValue(hours)}hrs work at ₱${rate}/hr = ₱${total}${penSuffix}${tcSuffix}`;
   }
   return `${formatShortDate(s.shift_date)} ${s.worker_name} ${formatHourValue(hours)}hrs work at SG${rate}/hr = SG${total}${penSuffix}${tcSuffix}`;
 }
@@ -3998,6 +4009,7 @@ function simplePayrollText(s) {
   const country = normaliseCountry(s?.country || outletCountry(s.outlet));
   const rate = Number(s.rate || 0).toFixed(0);
   if (country === 'Malaysia') return `${cleanHourText(hours)} work on ${malaysiaSafeDate(s.shift_date)} at RM${rate} per hr`;
+  if (country === 'Philippines') return `${formatHourValue(hours)}hrs work on ${formatShortDate(s.shift_date)} at ₱${rate}/hr`;
   return `${formatHourValue(hours)}hrs work on ${formatShortDate(s.shift_date)} at SG${rate}/hr`;
 }
 function payoutForShift(s) {
@@ -8373,13 +8385,13 @@ function renderMetrics() {
     ? shiftPenaltyAmount(s)
     : effectiveLatePenalty(s) + parseFloat(s.cancellation_penalty || 0));
   const srAbsorbedByCountry = splitAmountsByCountry(allShifts, srAbsorbedForShift);
-  const srAbsorbedTotal = srAbsorbedByCountry.Singapore + srAbsorbedByCountry.Malaysia;
+  const srAbsorbedTotal = srAbsorbedByCountry.Singapore + srAbsorbedByCountry.Malaysia + srAbsorbedByCountry.Philippines;
   const totalPaidOutRows = payableShifts.filter(s => s.clock_out);
   const unpaidPaidOut = totalPaidOutRows.filter(s => !s.is_paid).length;
   const estimatedPayoutRows = payableShifts.filter(s => !s.clock_out);
   const totalPaidOutByCountry = splitAmountsByCountry(totalPaidOutRows, totalPaymentForShift);
   const estimatedPayoutByCountry = splitAmountsByCountry(estimatedPayoutRows, estimatedPaymentForShift);
-  const estimatedPayoutTotal = estimatedPayoutByCountry.Singapore + estimatedPayoutByCountry.Malaysia;
+  const estimatedPayoutTotal = estimatedPayoutByCountry.Singapore + estimatedPayoutByCountry.Malaysia + estimatedPayoutByCountry.Philippines;
 
   updatePendingClockInBadge(pendingClockIn);
   updatePendingClockOutBadge(pendingClockOut);
@@ -10348,7 +10360,7 @@ function splitReportCountByCountry(rows) {
   return rows.reduce((acc, s) => {
     acc[countryForShift(s)] = (acc[countryForShift(s)] || 0) + 1;
     return acc;
-  }, { Singapore: 0, Malaysia: 0 });
+  }, { Singapore: 0, Malaysia: 0, Philippines: 0 });
 }
 function splitReportHoursByCountry(rows) {
   return splitAmountsByCountry(rows, s => parseFloat(calcShiftHours(s) || 0));
@@ -10358,6 +10370,7 @@ function countrySplitPlain(amounts, decimals = 0, cls = '') {
   return `<div class="metric-split">
     <div class="metric-split-row"><span class="metric-split-country">🇸🇬 Singapore</span><span class="metric-split-amount ${cls}">${fmt(amounts.Singapore)}</span></div>
     <div class="metric-split-row"><span class="metric-split-country">🇲🇾 Malaysia</span><span class="metric-split-amount ${cls}">${fmt(amounts.Malaysia)}</span></div>
+    ${Number(amounts.Philippines || 0) ? `<div class="metric-split-row"><span class="metric-split-country">🇵🇭 Philippines</span><span class="metric-split-amount ${cls}">${fmt(amounts.Philippines)}</span></div>` : ''}
   </div>`;
 }
 function reportMetricCard(filter, label, value, active = currentReportMetricFilter === filter) {
@@ -10371,6 +10384,7 @@ function reportRowsForMetric(rows, filter) {
   if (!filter || filter === 'all') return rows;
   if (filter === 'singapore') return rows.filter(s => countryForShift(s) === 'Singapore');
   if (filter === 'malaysia') return rows.filter(s => countryForShift(s) === 'Malaysia');
+  if (filter === 'philippines') return rows.filter(s => countryForShift(s) === 'Philippines');
   if (filter === 'sr_absorbed') return rows.filter(s => srAbsorbedForShift(s) > 0);
   if (filter === 'transport') return rows.filter(s => transportClaim(s) > 0);
   if (filter === 'comp_absorbed') return rows.filter(s => compensationAbsorbed(s) > 0);
@@ -10385,6 +10399,7 @@ function metricFilterLabelForReport(filter) {
     all: 'all rows',
     singapore: 'Singapore',
     malaysia: 'Malaysia',
+    philippines: 'Philippines',
     sr_absorbed: 'SR absorbed rows',
     transport: 'transport rows',
     comp_absorbed: 'compensation absorbed rows',
@@ -12185,10 +12200,10 @@ function renderAnalytics(rows, from, to) {
     ${aSplitCard('Completed', compByCty, 'green', v => v.toFixed(0))}
     ${aSplitCard('Cancelled', cancByCty, 'red', v => v.toFixed(0))}
     ${aSplitCard('Total Hours', hrsByCty, 'teal', v => v.toFixed(1)+'h')}
-    ${aSplitCard('Total Payout', payByCty, 'green', (v,c) => c==='Malaysia' ? 'RM'+v.toFixed(0) : '$'+v.toFixed(0))}
-    ${aSplitCard('Penalties', penByCty, 'red', (v,c) => c==='Malaysia' ? 'RM'+v.toFixed(2) : '$'+v.toFixed(2))}
+    ${aSplitCard('Total Payout', payByCty, 'green', (v,c) => currencySymbolForCountry(c)+v.toFixed(0))}
+    ${aSplitCard('Penalties', penByCty, 'red', (v,c) => currencySymbolForCountry(c)+v.toFixed(2))}
     ${aSplitCard('Late Arrivals', lateByCty, withLate.length>0?'amber':'green', v => v.toFixed(0))}
-    ${aSplitCard('SR Absorbed', srByCty, srByCty.Singapore+srByCty.Malaysia>0?'amber':'', (v,c) => c==='Malaysia' ? 'RM'+v.toFixed(2) : '$'+v.toFixed(2))}
+    ${aSplitCard('SR Absorbed', srByCty, (srByCty.Singapore+srByCty.Malaysia+srByCty.Philippines)>0?'amber':'', (v,c) => currencySymbolForCountry(c)+v.toFixed(2))}
     ${aCard('Cancellation Rate', completed.length+cancelled.length>0?(cancelled.length/(completed.length+cancelled.length)*100).toFixed(1)+'%':'0%', cancelled.length>3?'amber':'green', '')}
     ${aCard('Avg Hours/Shift', completed.length?(totalHrs/completed.length).toFixed(1)+'h':'—', '', '')}
   </div>`;
@@ -12367,32 +12382,28 @@ function buildRecommendations(rows, completed, cancelled, withLate) {
 function aSplitCard(label, byCty, color, fmt) {
   const colors = { blue:'var(--accent)', green:'var(--green)', red:'var(--red)', amber:'var(--amber)', teal:'var(--teal)' };
   const c = colors[color] || 'var(--text)';
-  const sg = byCty.Singapore || 0;
-  const my = byCty.Malaysia  || 0;
   const fmtFn = typeof fmt === 'function' ? fmt : v => fmt ? v+fmt : v;
-  const hasBoth = sg > 0 && my > 0;
-  // If only one country has data, show like aCard but with country flag
-  if (!hasBoth) {
-    const val = sg > 0 ? fmtFn(sg, 'Singapore') : my > 0 ? fmtFn(my, 'Malaysia') : '—';
-    const flag = sg > 0 ? '🇸🇬 ' : my > 0 ? '🇲🇾 ' : '';
+  const flags = { Singapore: '🇸🇬', Malaysia: '🇲🇾', Philippines: '🇵🇭' };
+  const order = ['Singapore', 'Malaysia', 'Philippines'];
+  const present = order.filter(cty => (byCty[cty] || 0) > 0);
+  // If only one country has data, show single-value card with its flag.
+  if (present.length <= 1) {
+    const cty = present[0];
+    const val = cty ? fmtFn(byCty[cty], cty) : '—';
+    const flag = cty ? flags[cty] + ' ' : '';
     return `<div class="metric-card" style="min-width:0;">
       <div class="metric-label">${label}</div>
       <div style="font-size:20px;font-weight:700;color:${c};margin-top:4px;">${flag}${val}</div>
     </div>`;
   }
+  const rows = present.map((cty, i) => `${i > 0 ? '<div style="height:1px;background:var(--border2);"></div>' : ''}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span style="font-size:11px;color:var(--text3);">${flags[cty]} ${cty === 'Singapore' ? 'SG' : cty === 'Malaysia' ? 'MY' : 'PH'}</span>
+        <span style="font-size:16px;font-weight:700;color:${c};">${fmtFn(byCty[cty], cty)}</span>
+      </div>`).join('');
   return `<div class="metric-card" style="min-width:0;">
     <div class="metric-label">${label}</div>
-    <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-        <span style="font-size:11px;color:var(--text3);">🇸🇬 SG</span>
-        <span style="font-size:16px;font-weight:700;color:${c};">${fmtFn(sg, 'Singapore')}</span>
-      </div>
-      <div style="height:1px;background:var(--border2);"></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-        <span style="font-size:11px;color:var(--text3);">🇲🇾 MY</span>
-        <span style="font-size:16px;font-weight:700;color:${c};">${fmtFn(my, 'Malaysia')}</span>
-      </div>
-    </div>
+    <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px;">${rows}</div>
   </div>`;
 }
 
@@ -12939,7 +12950,7 @@ ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e
 async function callClaude(userMessage) {
   aiHistory.push({ role: 'user', content: userMessage });
 
-  const systemPrompt = `You are a helpful operations assistant embedded in "Anytime Work Operations", an F&B payroll and shift management system used in Singapore and Malaysia.
+  const systemPrompt = `You are a helpful operations assistant embedded in "Anytime Work Operations", an F&B payroll and shift management system used in Singapore, Malaysia, and the Philippines.
 
 You have two modes:
 1. ANSWER: Answer questions about shifts, workers, outlets using the live system context provided.
@@ -13796,9 +13807,10 @@ function _billingFilterShifts(rows) {
       const workerName = String(s.worker_name || '').trim().toLowerCase();
       if (!workerName || workerName === 'available') return false;
       if (!s.outlet) return false;
-      // Only SG shifts — billing is in SGD; MY shifts use RM and would corrupt totals
-      const country = String(s.country || '').trim().toLowerCase();
-      if (country === 'malaysia') return false;
+      // Only SG shifts — billing is in SGD; MY (RM) and PH (₱) shifts use other
+      // currencies and would corrupt SGD invoice totals.
+      const country = normaliseCountry(s.country || outletCountry(s.outlet));
+      if (country !== 'Singapore') return false;
       // A billable compensation amount must reach the invoice even though the
       // shift was never worked (no clock-in/out, e.g. outlet declined late).
       if (Math.min(parseFloat(s.compensation_billable || 0), parseFloat(s.compensation_paid || 0)) > 0) return true;
@@ -15392,19 +15404,23 @@ async function loadFinancePage() {
     all_shifts:  { title: 'All shifts in period', rows: shifts, amountFn: totalPaymentForShift }
   };
 
-  const card = (id, label, sgd, myr, cls) => `<div class="metric-card clickable" onclick="openFinanceDrill('${id}')" style="cursor:pointer;"><div class="metric-label">${label}</div>
+  const card = (id, label, byC, cls) => {
+    const sg = Number(byC.Singapore || 0), my = Number(byC.Malaysia || 0), ph = Number(byC.Philippines || 0);
+    return `<div class="metric-card clickable" onclick="openFinanceDrill('${id}')" style="cursor:pointer;"><div class="metric-label">${label}</div>
     <div class="metric-split">
-      <div class="metric-split-row"><span class="metric-split-country">🇸🇬 SG</span><span class="metric-split-amount ${cls}">$${Number(sgd || 0).toFixed(2)}</span></div>
-      <div class="metric-split-row"><span class="metric-split-country">🇲🇾 MY</span><span class="metric-split-amount ${cls}">RM${Number(myr || 0).toFixed(2)}</span></div>
+      <div class="metric-split-row"><span class="metric-split-country">🇸🇬 SG</span><span class="metric-split-amount ${cls}">$${sg.toFixed(2)}</span></div>
+      <div class="metric-split-row"><span class="metric-split-country">🇲🇾 MY</span><span class="metric-split-amount ${cls}">RM${my.toFixed(2)}</span></div>
+      ${ph ? `<div class="metric-split-row"><span class="metric-split-country">🇵🇭 PH</span><span class="metric-split-amount ${cls}">₱${ph.toFixed(2)}</span></div>` : ''}
     </div></div>`;
+  };
 
   document.getElementById('finance-metrics').innerHTML = `
-    ${card('paid_out','💵 Total paid out', paidByCountry.Singapore, paidByCountry.Malaysia, 'green')}
-    ${card('estimated','⏳ Estimated payout', estByCountry.Singapore, estByCountry.Malaysia, 'amber')}
-    ${card('sr_absorbed','↺ SR absorbed (cost)', srByCountry.Singapore, srByCountry.Malaysia, 'amber')}
-    ${card('cancellations_collected','🚫 Cancellations collected', cancelCollectedByCountry.Singapore, cancelCollectedByCountry.Malaysia, 'green')}
-    ${card('late','⏰ Late penalties', latePenByCountry.Singapore, latePenByCountry.Malaysia, 'green')}
-    ${card('prior_cancel','↩︎ Prior cancel deductions', priorCancelByCountry.Singapore, priorCancelByCountry.Malaysia, 'green')}
+    ${card('paid_out','💵 Total paid out', paidByCountry, 'green')}
+    ${card('estimated','⏳ Estimated payout', estByCountry, 'amber')}
+    ${card('sr_absorbed','↺ SR absorbed (cost)', srByCountry, 'amber')}
+    ${card('cancellations_collected','🚫 Cancellations collected', cancelCollectedByCountry, 'green')}
+    ${card('late','⏰ Late penalties', latePenByCountry, 'green')}
+    ${card('prior_cancel','↩︎ Prior cancel deductions', priorCancelByCountry, 'green')}
     <div class="metric-card clickable" onclick="openFinanceDrill('cancel_count')" style="cursor:pointer;"><div class="metric-label">Cancellations (count)</div><div class="metric-val ${cancelShifts.length > 0 ? 'red' : 'green'}">${cancelShifts.length}</div></div>
     <div class="metric-card clickable" onclick="openFinanceDrill('all_shifts')" style="cursor:pointer;"><div class="metric-label">Shifts in view</div><div class="metric-val blue">${shifts.length}</div></div>
   `;
@@ -15412,8 +15428,8 @@ async function loadFinancePage() {
   // GSV (client billing value) MUST use the same basis as "Total paid out":
   // payoutForShift = hours × client rate. Commission = per-outlet % of that GSV.
   // This keeps GSV reconciled with the paid-out card instead of a separate estimate.
-  const commByCountry = { Singapore: 0, Malaysia: 0 };
-  const gsvByCountry = { Singapore: 0, Malaysia: 0 };
+  const commByCountry = { Singapore: 0, Malaysia: 0, Philippines: 0 };
+  const gsvByCountry = { Singapore: 0, Malaysia: 0, Philippines: 0 };
   shifts.forEach(s => {
     if (s.cancelled) return;
     const country = countryForShift(s);
@@ -15429,7 +15445,8 @@ async function loadFinancePage() {
   const priorCancelCollected = splitAmountsByCountry(shifts.filter(s => !s.cancelled), s => parseFloat(s.cancellation_penalty || 0));
   const penaltiesByCountry = {
     Singapore: (lateCollected.Singapore || 0) + (cancelCollected.Singapore || 0) + (priorCancelCollected.Singapore || 0),
-    Malaysia:  (lateCollected.Malaysia || 0) + (cancelCollected.Malaysia || 0) + (priorCancelCollected.Malaysia || 0)
+    Malaysia:  (lateCollected.Malaysia || 0) + (cancelCollected.Malaysia || 0) + (priorCancelCollected.Malaysia || 0),
+    Philippines: (lateCollected.Philippines || 0) + (cancelCollected.Philippines || 0) + (priorCancelCollected.Philippines || 0)
   };
   // 3rd-party platform fees earned (also revenue).
   const platformFeeByCountry = splitAmountsByCountry(shifts.filter(s => !s.cancelled), thirdPartyPlatformFeeForShift);
@@ -15440,21 +15457,25 @@ async function loadFinancePage() {
         <div class="sub-text" style="margin-bottom:4px;">Estimated GSV (client billing)</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇸🇬 $${gsvByCountry.Singapore.toFixed(2)}</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇲🇾 RM${gsvByCountry.Malaysia.toFixed(2)}</div>
+        ${gsvByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;">🇵🇭 ₱${gsvByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>
       <div style="min-width:180px;">
         <div class="sub-text" style="margin-bottom:4px;">Commission revenue</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${commByCountry.Singapore.toFixed(2)}</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${commByCountry.Malaysia.toFixed(2)}</div>
+        ${commByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇵🇭 ₱${commByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>
       <div style="min-width:180px;">
         <div class="sub-text" style="margin-bottom:4px;">Penalties collected (late + cancel)</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${penaltiesByCountry.Singapore.toFixed(2)}</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${penaltiesByCountry.Malaysia.toFixed(2)}</div>
+        ${penaltiesByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇵🇭 ₱${penaltiesByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>
-      ${(platformFeeByCountry.Singapore > 0 || platformFeeByCountry.Malaysia > 0) ? `<div style="min-width:180px;">
+      ${(platformFeeByCountry.Singapore > 0 || platformFeeByCountry.Malaysia > 0 || platformFeeByCountry.Philippines > 0) ? `<div style="min-width:180px;">
         <div class="sub-text" style="margin-bottom:4px;">3rd-party platform fees</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇸🇬 $${platformFeeByCountry.Singapore.toFixed(2)}</div>
         <div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇲🇾 RM${platformFeeByCountry.Malaysia.toFixed(2)}</div>
+        ${platformFeeByCountry.Philippines ? `<div style="font-family:var(--mono);font-weight:700;font-size:16px;color:var(--green);">🇵🇭 ₱${platformFeeByCountry.Philippines.toFixed(2)}</div>` : ''}
       </div>` : ''}
     </div>
     <div class="sub-text" style="margin-top:10px;">Showing <strong>${label}</strong> (completed past periods only). <strong>GSV = hours × client rate</strong> (same basis as Total paid out). Commission = each outlet's set % of its GSV. Penalties collected and platform fees are additional revenue. For invoiced figures, use Xero Billing.</div>
@@ -15560,11 +15581,13 @@ async function loadFinancePage() {
   // Reported per currency since SG bills SGD, MY bills MYR, and PH salaries are PHP.
   const revByCur = {
     SGD: (commByCountry.Singapore || 0) + (penaltiesByCountry.Singapore || 0) + (platformFeeByCountry.Singapore || 0),
-    MYR: (commByCountry.Malaysia || 0) + (penaltiesByCountry.Malaysia || 0) + (platformFeeByCountry.Malaysia || 0)
+    MYR: (commByCountry.Malaysia || 0) + (penaltiesByCountry.Malaysia || 0) + (platformFeeByCountry.Malaysia || 0),
+    PHP: (commByCountry.Philippines || 0) + (penaltiesByCountry.Philippines || 0) + (platformFeeByCountry.Philippines || 0)
   };
   const srAbsorbedByCur = {
     SGD: (srByCountry.Singapore || 0),
-    MYR: (srByCountry.Malaysia || 0)
+    MYR: (srByCountry.Malaysia || 0),
+    PHP: (srByCountry.Philippines || 0)
   };
   const plCurs = Array.from(new Set([...Object.keys(revByCur), ...Object.keys(expByCur), ...Object.keys(salByCur), 'PHP']))
     .filter(c => (revByCur[c] || 0) || (expByCur[c] || 0) || (salByCur[c] || 0) || (srAbsorbedByCur[c] || 0));
@@ -15588,7 +15611,7 @@ async function loadFinancePage() {
   }).join('');
   document.getElementById('finance-pl-body').innerHTML = `
     <div style="display:flex;flex-wrap:wrap;gap:16px;">${plRowsHtml}</div>
-    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected${(platformFeeByCountry.Singapore>0||platformFeeByCountry.Malaysia>0)?' + 3rd-party platform fees':''}</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + SR absorbed</strong>. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
+    <div class="sub-text" style="margin-top:12px;">P&amp;L is per currency (not converted). <strong>Revenue = commission + penalties collected${(platformFeeByCountry.Singapore>0||platformFeeByCountry.Malaysia>0||platformFeeByCountry.Philippines>0)?' + 3rd-party platform fees':''}</strong> — GSV and worker pay are pass-through and excluded. <strong>Costs = expenses + salaries (incl. employer CPF) + SR absorbed</strong>. PHP shows only costs (Filipino staff salaries) unless PHP revenue exists.</div>
   `;
   const recent = cancelShifts.slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1)).slice(0, 25);
   document.getElementById('finance-cancel-count').textContent = `${cancelShifts.length} cancellation${cancelShifts.length === 1 ? '' : 's'} in view`;
@@ -15616,7 +15639,7 @@ function openFinanceDrill(cardId) {
   const rows = (d.rows || []).slice().sort((a, b) => ((a.shift_date || '') < (b.shift_date || '') ? 1 : -1));
   const totalsByCountry = splitAmountsByCountry(rows, d.amountFn || (() => 0));
   document.getElementById('finance-drill-sub').innerHTML =
-    `${rows.length} record${rows.length === 1 ? '' : 's'} · 🇸🇬 $${totalsByCountry.Singapore.toFixed(2)} · 🇲🇾 RM${totalsByCountry.Malaysia.toFixed(2)}`;
+    `${rows.length} record${rows.length === 1 ? '' : 's'} · 🇸🇬 $${totalsByCountry.Singapore.toFixed(2)} · 🇲🇾 RM${totalsByCountry.Malaysia.toFixed(2)}${totalsByCountry.Philippines ? ` · 🇵🇭 ₱${totalsByCountry.Philippines.toFixed(2)}` : ''}`;
   if (!rows.length) {
     document.getElementById('finance-drill-body').innerHTML = '<div class="empty-state"><p>No records.</p></div>';
   } else {
@@ -15858,6 +15881,7 @@ async function saveSalaryProfile() {
         <select id="inw-country" class="form-input">
           <option value="Singapore">Singapore</option>
           <option value="Malaysia">Malaysia</option>
+          <option value="Philippines">Philippines</option>
         </select>
       </div>
       <div class="form-row"><label>Phone</label><input id="inw-phone" class="form-input" placeholder="+65 9123 4567"></div>
@@ -15897,6 +15921,7 @@ async function saveSalaryProfile() {
         <select id="ino-country" class="form-input">
           <option value="Singapore">Singapore</option>
           <option value="Malaysia">Malaysia</option>
+          <option value="Philippines">Philippines</option>
         </select>
       </div>
       <div class="form-row"><label>Address / Location</label><input id="ino-location" class="form-input" placeholder="e.g. #01-01, 123 Example Road"></div>
