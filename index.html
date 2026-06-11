@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v35 — (1) Finance: "Special rate absorbed" card now = total SR absorbed − 3rd-party platform fee, so own-member special rate (sr_worker null) is correctly counted and Special rate + 3rd-party fee always reconcile to the SR Absorbed total. (2) Techimmense (Indore, India) software-maintenance vendor seeded once as a SGD 700/month recurring expense (category Software, no portal login) so it flows into Operating Costs and the P&L; guarded by localStorage seed_techimmense_v1 so it never duplicates. (3) Clock-out payroll WhatsApp alert: getPeriskopeConfig now merges credentials and payroll group/enable across local + shared team config and takes the POSITIVE payrollEnabled/payrollGroupId from either source, so a device whose local config predates payroll setup (payrollEnabled=false) no longer silently blocks the shared-enabled clock-out alert. Note: the bonus/incentive entered in My Salary is stored per-month — it appears in Reports/P&L only when the Finance Dashboard period is set to that same month. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -1820,6 +1819,28 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-worker-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="worker-save-btn" onclick="saveWorker()">Add worker</button>
     </div>
+  </div>
+</div>
+
+<!-- WORKER DETAIL / ANALYTICS MODAL -->
+<div class="modal-overlay" id="worker-detail-modal">
+  <div class="modal modal-wide">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:4px;">
+      <h3 id="worker-detail-title" style="margin:0;">Worker</h3>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('worker-detail-modal').classList.remove('open')">✕ Close</button>
+    </div>
+    <div id="worker-detail-body"><div class="empty-state"><p>Loading…</p></div></div>
+  </div>
+</div>
+
+<!-- OUTLET DETAIL MODAL -->
+<div class="modal-overlay" id="outlet-detail-modal">
+  <div class="modal modal-wide">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:4px;">
+      <h3 id="outlet-detail-title" style="margin:0;">Outlet</h3>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('outlet-detail-modal').classList.remove('open')">✕ Close</button>
+    </div>
+    <div id="outlet-detail-body"><div class="empty-state"><p>Loading…</p></div></div>
   </div>
 </div>
 
@@ -4123,12 +4144,11 @@ function thirdPartyPlatformFeeForShift(s) {
   // Fixed fee type (sr_hours = 0): entire stored absorbed is the platform fee
   return storedAbsorbed;
 }
-// Special-rate portion of SR absorbed = total SR absorbed minus the 3rd-party platform fee.
-// This covers BOTH own-member special rate (sr_worker null, sr_rate set) AND 3rd-party
-// hourly SR. Only the 3rd-party fixed platform fee is subtracted; everything else absorbed
-// is special-rate cost. This guarantees: special rate + platform fee = total SR absorbed.
+// Special-rate portion of SR absorbed = total absorbed minus the 3rd-party platform fee.
+// (Hourly type: rate diff × hours. Fixed-fee type: zero, since it's all platform fee.)
 function specialRateAbsorbedForShift(s) {
-  const total = srAbsorbedForShift(s);
+  if (!s?.sr_worker) return 0;
+  const total = parseFloat(s.sr_absorbed || 0) || 0;
   return Math.max(0, total - thirdPartyPlatformFeeForShift(s));
 }
 function isPayableShift(s) {
@@ -6767,36 +6787,14 @@ let _pkConfigShared = null;
 function getPeriskopeConfig() {
   let local = null;
   try { local = JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) { local = null; }
-  const shared = _pkConfigShared || null;
-  // Build a merged config. Credentials (apikey/phone) and the payroll group/enable
-  // flags may live on different devices: e.g. the owner set the payroll group on one
-  // device, but a clock-out happens on another that only has apikey/phone locally.
-  // Merge so a clock-out alert can always find both the credentials AND the payroll
-  // group, regardless of which device saved which field. Local wins where it has a
-  // value; shared fills any gaps. This fixes clock-out alerts silently not sending
-  // because the payroll group was configured on a different device.
-  if (!local && !shared) return null;
-  const pick = (k) => {
-    const lv = local ? local[k] : undefined;
-    if (lv !== undefined && lv !== '' && lv !== null) return lv;
-    return shared ? shared[k] : undefined;
-  };
-  // Payroll group + enable flag: take the positive value from EITHER source. A device
-  // that saved its Periskope key locally before payroll was configured will have
-  // payrollEnabled=false / payrollGroupId='' locally; that stale local "off" must not
-  // block the shared team setting that has payroll switched ON with a group chosen.
-  const payrollGroupId = (local && local.payrollGroupId) ? local.payrollGroupId
-                         : (shared && shared.payrollGroupId ? shared.payrollGroupId : '');
-  const payrollEnabled = !!((local && local.payrollEnabled) || (shared && shared.payrollEnabled));
-  const enabled = (local && local.enabled !== undefined) ? local.enabled
-                  : (shared ? shared.enabled : undefined);
-  return {
-    apikey:  pick('apikey'),
-    phone:   pick('phone'),
-    enabled,
-    payrollGroupId,
-    payrollEnabled
-  };
+  // If this device has a usable local config, prefer it. Otherwise use the shared
+  // team config pulled from Supabase. Merge so a device-local payroll group choice
+  // still works even when the key/phone come from the shared record.
+  if (local?.apikey && local?.phone) return local;
+  if (_pkConfigShared?.apikey && _pkConfigShared?.phone) {
+    return { ..._pkConfigShared, ...(local || {}) , apikey: _pkConfigShared.apikey, phone: _pkConfigShared.phone };
+  }
+  return local || _pkConfigShared || null;
 }
 async function loadPeriskopeConfigShared() {
   if (!supabaseClient) return;
@@ -7168,10 +7166,32 @@ async function checkPaymentFollowups() {
   _lastPayFollowupCheck = now;
 
   const todayStr = new Date().toISOString().slice(0,10);
-  for (const s of (allShifts || [])) {
+
+  // IMPORTANT: do NOT iterate `allShifts` here. That array is scoped to whatever
+  // date/week/outlet the user is currently viewing, so it is frequently stale or
+  // missing today's rows entirely — which is exactly why a follow-up could fire
+  // for a worker who was already marked paid within the 25-min window (the paid
+  // flag updated in the DB but not in the view the timer happened to be reading).
+  // Query the DB fresh every tick so we always evaluate the live `is_paid` value.
+  let candidates = [];
+  try {
+    const { data, error } = await supabaseClient
+      .from('shifts')
+      .select('*')
+      .eq('shift_date', todayStr)
+      .not('clock_out', 'is', null)
+      .or('is_paid.is.null,is_paid.eq.false')   // unpaid only (null counts as unpaid)
+      .not('cancelled', 'is', true);
+    if (error) { console.warn('[Payroll follow-up] query failed', error); return; }
+    candidates = data || [];
+  } catch (e) {
+    console.warn('[Payroll follow-up] query exception', e);
+    return;
+  }
+
+  for (const s of candidates) {
     if (!isPayableShift(s) || s.cancelled) continue;
-    if (!s.clock_out || s.is_paid) continue;            // must be clocked out and still unpaid
-    if (!s.shift_date || s.shift_date !== todayStr) continue; // only chase same-day clock-outs
+    if (!s.clock_out || s.is_paid) continue;            // double-check: still unpaid
     const r = shiftReminders[s.id] || {};
     if (r.payFollowupSentAt) continue;                  // already nudged (synced flag)
 
@@ -7184,6 +7204,19 @@ async function checkPaymentFollowups() {
     const dueAt = coDate.getTime() + 25 * 60000;
     if (now < dueAt) continue;                          // not yet 25 min past clock-out
     if (now > dueAt + 6 * 3600000) continue;            // don't fire on stale/backfilled rows (>6h late)
+
+    // Final race guard: re-read this single row's paid status immediately before
+    // sending, in case it was marked paid between the bulk query and now.
+    try {
+      const { data: fresh } = await supabaseClient
+        .from('shifts')
+        .select('is_paid, clock_out, cancelled')
+        .eq('id', s.id)
+        .single();
+      if (fresh && (fresh.is_paid === true || fresh.cancelled === true || !fresh.clock_out)) {
+        continue; // paid/cancelled/un-clocked-out in the meantime — skip
+      }
+    } catch (e) { /* if the re-check fails, fall through and send */ }
 
     const ok = await sendPeriskopeGroupMessage(pk.payrollGroupId, buildPayFollowupMessage(s, co));
     if (ok) {
@@ -9289,10 +9322,10 @@ async function loadWorkerCards() {
     const meta = workerProfile(w.name);
     const disliked = (meta.disliked_outlets || []).length ? `<div class="sub-text" style="margin-top:6px;color:var(--amber);">Avoid: ${escapeHtml(meta.disliked_outlets.join(', '))}</div>` : '';
     return `<div class="worker-card ${suspended?'suspended':''}">
-      <div class="worker-card-top">
+      <div class="worker-card-top" onclick="openWorkerDetail('${escapeAttr(w.name)}')" style="cursor:pointer;" title="View work history & analytics">
         <div class="worker-avatar">${initials}</div>
         <div class="worker-info">
-          <h4>${w.name}</h4>
+          <h4>${w.name} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗ View</span></h4>
           <p>${w.bank_method || 'PayNow'} ${w.bank_details ? '· '+w.bank_details : ''}</p>
         </div>
         ${suspended
@@ -9469,6 +9502,182 @@ async function saveWorker() {
 }
 const addWorker = saveWorker;
 
+// ── Worker / Outlet detail + analytics ───────────────────────────────────────
+// These pull the FULL shift history from the DB (not the view-scoped `allShifts`)
+// so history and analytics are complete regardless of the current date view.
+
+function _shiftPeriod(s) {
+  // Classify a shift into Morning / Lunch / Dinner / Midnight by scheduled start.
+  const m = toMins((s.scheduled_start || '').slice(0,5));
+  if (m === null || isNaN(m)) return 'Other';
+  if (m >= 5*60 && m < 11*60)  return 'Morning';   // 05:00–10:59
+  if (m >= 11*60 && m < 16*60) return 'Lunch';     // 11:00–15:59
+  if (m >= 16*60 && m < 22*60) return 'Dinner';    // 16:00–21:59
+  return 'Midnight';                                // 22:00–04:59
+}
+function _isSameDayBooking(s) {
+  // "Last-minute" = the slot/booking was created on the same calendar day as the shift.
+  if (!s.created_at || !s.shift_date) return false;
+  try {
+    const created = new Date(s.created_at);
+    // Compare in SG local date terms.
+    const createdDate = created.toISOString().slice(0,10);
+    return createdDate === String(s.shift_date).slice(0,10);
+  } catch(e) { return false; }
+}
+function _isLateShift(s) {
+  if (s.cancelled || !s.clock_in) return false;
+  const info = calcLatePenalty((s.scheduled_start||'').slice(0,5), (s.clock_in||'').slice(0,5));
+  return info.status === 'late';
+}
+
+async function _fetchWorkerShifts(name) {
+  const { data, error } = await supabaseClient
+    .from('shifts')
+    .select('*')
+    .eq('worker_name', name)
+    .order('shift_date', { ascending: false })
+    .order('scheduled_start', { ascending: false });
+  if (error) { console.warn('[Worker detail] query failed', error); return []; }
+  return data || [];
+}
+async function _fetchOutletShifts(outletName) {
+  const { data, error } = await supabaseClient
+    .from('shifts')
+    .select('*')
+    .eq('outlet', outletName)
+    .order('shift_date', { ascending: false })
+    .order('scheduled_start', { ascending: false });
+  if (error) { console.warn('[Outlet detail] query failed', error); return []; }
+  return data || [];
+}
+
+function _statCard(label, value, color) {
+  return `<div style="background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;min-width:110px;flex:1;">
+    <div style="font-size:11px;color:var(--text3);margin-bottom:3px;">${label}</div>
+    <div style="font-size:20px;font-weight:700;color:${color||'var(--text)'};">${value}</div>
+  </div>`;
+}
+function _miniBar(label, count, max) {
+  const pct = max > 0 ? Math.round((count / max) * 100) : 0;
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+    <div style="width:74px;font-size:11px;color:var(--text2);flex-shrink:0;">${label}</div>
+    <div style="flex:1;background:var(--bg3);border-radius:6px;height:14px;overflow:hidden;">
+      <div style="width:${pct}%;height:100%;background:var(--accent);border-radius:6px;min-width:${count>0?'3px':'0'};"></div>
+    </div>
+    <div style="width:28px;text-align:right;font-size:11px;font-weight:600;color:var(--text);">${count}</div>
+  </div>`;
+}
+
+function _historyTable(shifts, mode) {
+  // mode: 'worker' shows outlet; 'outlet' shows worker.
+  if (!shifts.length) return `<div class="empty-state" style="padding:20px;"><p>No shift records yet.</p></div>`;
+  const rows = shifts.slice(0, 200).map(s => {
+    const d = s.shift_date ? `${new Date(s.shift_date+'T00:00:00').getDate()} ${MONTHS[new Date(s.shift_date+'T00:00:00').getMonth()]} ${String(new Date(s.shift_date+'T00:00:00').getFullYear()).slice(2)}` : '—';
+    const who = mode === 'worker' ? escapeHtml(s.outlet || '—') : escapeHtml(s.worker_name || '—');
+    const start = (s.scheduled_start||'').slice(0,5) || '—';
+    const period = _shiftPeriod(s);
+    let status;
+    if (s.cancelled) status = `<span class="badge badge-red">Cancelled</span>`;
+    else if (_isLateShift(s)) status = `<span class="badge badge-amber">Late</span>`;
+    else if (s.clock_in) status = `<span class="badge badge-green">Worked</span>`;
+    else status = `<span class="badge" style="background:var(--bg3);color:var(--text3);">Scheduled</span>`;
+    const lm = _isSameDayBooking(s) ? ` <span class="badge badge-blue" title="Booked same day">LM</span>` : '';
+    return `<tr><td style="white-space:nowrap;">${d}</td><td>${who}</td><td style="white-space:nowrap;">${start} · ${period}</td><td>${status}${lm}</td></tr>`;
+  }).join('');
+  const more = shifts.length > 200 ? `<div class="sub-text" style="margin-top:6px;">Showing latest 200 of ${shifts.length} records.</div>` : '';
+  return `<div style="max-height:300px;overflow-y:auto;border:1px solid var(--border2);border-radius:var(--radius);">
+    <table style="width:100%;"><thead><tr>
+      <th>Date</th><th>${mode==='worker'?'Outlet':'Worker'}</th><th>Start</th><th>Status</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+}
+
+async function openWorkerDetail(name) {
+  const modal = document.getElementById('worker-detail-modal');
+  document.getElementById('worker-detail-title').textContent = name;
+  document.getElementById('worker-detail-body').innerHTML = `<div class="empty-state"><p>Loading work history…</p></div>`;
+  modal.classList.add('open');
+
+  const shifts = await _fetchWorkerShifts(name);
+
+  // Worked = not cancelled AND clocked in.
+  const worked = shifts.filter(s => !s.cancelled && s.clock_in);
+  const cancelledCount = shifts.filter(s => s.cancelled).length;
+  const lateCount = shifts.filter(s => _isLateShift(s)).length;
+  const lastMinCount = shifts.filter(s => !s.cancelled && _isSameDayBooking(s)).length;
+
+  // Day-of-week distribution (worked shifts).
+  const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const dowCounts = [0,0,0,0,0,0,0];
+  worked.forEach(s => { if (s.shift_date) dowCounts[new Date(s.shift_date+'T00:00:00').getDay()]++; });
+  const dowMax = Math.max(...dowCounts, 1);
+  const topDow = dowCounts.indexOf(Math.max(...dowCounts));
+
+  // Period distribution (worked shifts).
+  const periods = { Morning:0, Lunch:0, Dinner:0, Midnight:0, Other:0 };
+  worked.forEach(s => { periods[_shiftPeriod(s)]++; });
+  const periodMax = Math.max(periods.Morning, periods.Lunch, periods.Dinner, periods.Midnight, 1);
+
+  const dowBars = DOW.map((lbl,i)=>_miniBar(lbl, dowCounts[i], dowMax)).join('');
+  const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
+
+  document.getElementById('worker-detail-body').innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
+      ${_statCard('Times worked', worked.length, 'var(--green)')}
+      ${_statCard('Times late', lateCount, lateCount>0?'var(--amber)':'var(--text)')}
+      ${_statCard('Times cancelled', cancelledCount, cancelledCount>0?'var(--red)':'var(--text)')}
+      ${_statCard('Last-minute taken', lastMinCount, 'var(--accent)')}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:16px;">
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Days of week worked${worked.length?` · usually <span style="color:var(--accent);">${DOW[topDow]}</span>`:''}</div>
+        ${dowBars}
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Shift periods taken</div>
+        ${periodBars}
+      </div>
+    </div>
+    <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Work history (${shifts.length})</div>
+    ${_historyTable(shifts, 'worker')}
+  `;
+}
+
+async function openOutletDetail(outletName) {
+  const modal = document.getElementById('outlet-detail-modal');
+  document.getElementById('outlet-detail-title').textContent = outletName;
+  document.getElementById('outlet-detail-body').innerHTML = `<div class="empty-state"><p>Loading work history…</p></div>`;
+  modal.classList.add('open');
+
+  const shifts = await _fetchOutletShifts(outletName);
+  const worked = shifts.filter(s => !s.cancelled && s.clock_in);
+  const cancelledCount = shifts.filter(s => s.cancelled).length;
+  const lateCount = shifts.filter(s => _isLateShift(s)).length;
+  const lastMinCount = shifts.filter(s => !s.cancelled && _isSameDayBooking(s)).length;
+  const uniqueWorkers = new Set(worked.map(s => String(s.worker_name||'').trim().toLowerCase()).filter(Boolean)).size;
+
+  const periods = { Morning:0, Lunch:0, Dinner:0, Midnight:0, Other:0 };
+  worked.forEach(s => { periods[_shiftPeriod(s)]++; });
+  const periodMax = Math.max(periods.Morning, periods.Lunch, periods.Dinner, periods.Midnight, 1);
+  const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
+
+  document.getElementById('outlet-detail-body').innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
+      ${_statCard('Shifts worked', worked.length, 'var(--green)')}
+      ${_statCard('Unique workers', uniqueWorkers, 'var(--accent)')}
+      ${_statCard('Late arrivals', lateCount, lateCount>0?'var(--amber)':'var(--text)')}
+      ${_statCard('Cancellations', cancelledCount, cancelledCount>0?'var(--red)':'var(--text)')}
+      ${_statCard('Last-minute', lastMinCount, 'var(--accent)')}
+    </div>
+    <div style="margin-bottom:16px;max-width:360px;">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Shift periods filled</div>
+      ${periodBars}
+    </div>
+    <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Work history (${shifts.length})</div>
+    ${_historyTable(shifts, 'outlet')}
+  `;
+}
+
 // ── Outlets page ──────────────────────────────────────────────
 function loadOutletsList() {
   const q = (document.getElementById('outlet-search-page')?.value || '').trim().toLowerCase();
@@ -9479,7 +9688,7 @@ function loadOutletsList() {
     <tbody>${filteredOutlets.map(o => {
       const meta = outletProfile(o.name);
       const banned = (meta.banned_workers || []).length ? `<div class="sub-text" style="color:var(--red);margin-top:4px;">Banned: ${escapeHtml(meta.banned_workers.join(', '))}</div>` : '';
-      return `<tr><td style="font-weight:500;">${escapeHtml(o.name)}</td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
 }
@@ -15061,7 +15270,7 @@ function loadExpensesLS() {
 function saveExpensesLS() { localStorage.setItem('expenses', JSON.stringify(expensesCache || [])); }
 async function loadExpenses() {
   if (!expensesCache) expensesCache = loadExpensesLS();
-  if (!supabaseClient) { await seedTechimmenseExpense(); return expensesCache; }
+  if (!supabaseClient) return expensesCache;
   const localCopy = (expensesCache || []).slice();
   try {
     const { data, error } = await supabaseClient.from('expenses').select('*').order('exp_date', { ascending: false });
@@ -15090,49 +15299,7 @@ async function loadExpenses() {
       saveExpensesLS();
     }
   } catch (e) { /* keep local */ }
-  await seedTechimmenseExpense();
   return expensesCache;
-}
-// One-time seed: Techimmense (Indore, India) is our maintenance/dev vendor paid
-// SGD 700/month. They are NOT a portal user (no login). We record their retainer
-// as a monthly recurring expense so it flows into Operating Costs and the P&L.
-// Guarded so it is created exactly once and never duplicates on reload.
-async function seedTechimmenseExpense() {
-  try {
-    const already = (expensesCache || []).some(e =>
-      /techimmense|technimese|techimense/i.test(String(e.description || '')));
-    if (already) { localStorage.setItem('seed_techimmense_v1', '1'); return; }
-    if (localStorage.getItem('seed_techimmense_v1') === '1') return; // user may have deleted it on purpose
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10);
-    const exp_month = monthKey(today);
-    const rec = {
-      id: 'local-techimmense-' + Date.now(),
-      date: dateStr, exp_month,
-      description: 'Techimmense — software maintenance retainer (Indore, India)',
-      category: 'Software', amount: 700, currency: 'SGD',
-      recurring: 'monthly', is_deduction: false,
-      notes: 'Monthly maintenance/dev vendor. No portal access.', staff: '', staff_month: ''
-    };
-    expensesCache = (expensesCache || []).concat(rec);
-    saveExpensesLS();
-    localStorage.setItem('seed_techimmense_v1', '1');
-    if (supabaseClient) {
-      try {
-        const { data, error } = await supabaseClient.from('expenses').insert({
-          exp_date: rec.date, exp_month: rec.exp_month, description: rec.description,
-          category: rec.category, amount: rec.amount, currency: rec.currency,
-          recurring: rec.recurring, is_deduction: false, notes: rec.notes,
-          staff: '', staff_month: '', created_by: currentInternalUser
-        }).select('id').single();
-        if (!error && data && data.id) {
-          // Swap the local id for the persisted Supabase id so it syncs team-wide.
-          rec.id = data.id;
-          saveExpensesLS();
-        }
-      } catch (e) { /* keep local-only if insert fails */ }
-    }
-  } catch (e) { /* never block dashboard on seed */ }
 }
 function populateExpenseStaffSelect(selected) {
   const sel = document.getElementById('exp-staff');
