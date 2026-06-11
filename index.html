@@ -3749,6 +3749,28 @@ function clearActivityLog() {
 
 // ── Penalty logic ─────────────────────────────────────────────
 function toMins(t) { if (!t) return null; const [h,m] = t.split(':').map(Number); return h*60+m; }
+// Canonical identity helpers used to match the SAME worker across slightly
+// different spellings / formats (the data has e.g. "Tai Chuin" vs "Tai Chiun").
+// normWorkerKey: lowercase, trim, collapse internal whitespace, drop punctuation.
+function normWorkerKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // strip accents
+    .replace(/[^a-z0-9]+/g, ' ')                        // punctuation → space
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+// digitsOnly: reduce a phone to bare digits so +65 8806 9276 == 6588069276 etc.
+function digitsOnly(p) { return String(p || '').replace(/\D+/g, ''); }
+// Race a promise against a timeout so a hung Supabase/network call can never wedge
+// the UI on a "Loading…" state. On timeout the returned promise REJECTS, so callers
+// can fall back to a clear error instead of spinning forever.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, rej) => setTimeout(() => rej(new Error((label || 'operation') + ' timed out after ' + ms + 'ms')), ms))
+  ]);
+}
 function rawDurationHours(start, end) {
   if (!start || !end) return null;
   let startM = toMins(start);
@@ -7380,7 +7402,9 @@ async function buildDowFrequencyCache(force) {
       .from('shifts')
       .select('worker_name, shift_date, scheduled_start, clock_in, cancelled')
       .gte('shift_date', cutoffStr)
-      .not('cancelled', 'is', true);
+      .not('cancelled', 'is', true)
+      .not('clock_in', 'is', null)   // we only count shifts they showed up for — filter server-side so the payload stays small
+      .limit(5000);                  // hard cap so a big table can't return a multi-MB payload that stalls the client
     if (error) { console.warn('[Likely] freq query failed', error); return _dowFreqCache || {}; }
     (data || []).forEach(s => {
       const name = String(s.worker_name || '').trim();
@@ -7398,7 +7422,7 @@ async function buildDowFrequencyCache(force) {
     console.warn('[Likely] freq cache exception', e);
     return _dowFreqCache || {};
   }
-  return _dowFreqCache;
+  return _dowFreqCache || {};
 }
 
 // Fetch the workers assigned ANY non-cancelled shift on a given date, straight
@@ -7419,6 +7443,19 @@ async function fetchScheduledWorkerSetForDate(dateStr) {
   const set = new Set();
   const windows = new Map();
   if (!dateStr) return { ok: false, set, windows };
+  // Add a window under EVERY identity key we can derive for the worker (normalized
+  // name + phone), so a candidate keyed by a slightly different spelling or by
+  // phone still collides. This is what catches "Tai Chuin" (scheduled) vs
+  // "Tai Chiun" (history) — same person, two spellings — which exact-name
+  // matching missed and let an already-booked worker get offered an overlap.
+  const addWindow = (keys, win) => {
+    keys.forEach(k => {
+      if (!k) return;
+      set.add(k);
+      if (!windows.has(k)) windows.set(k, []);
+      windows.get(k).push(win);
+    });
+  };
   try {
     const { data, error } = await supabaseClient
       .from('shifts')
@@ -7427,13 +7464,13 @@ async function fetchScheduledWorkerSetForDate(dateStr) {
       .not('cancelled', 'is', true);
     if (error) { console.warn('[Likely] scheduled-set query failed', error); return { ok: false, set, windows }; }
     (data || []).forEach(s => {
-      const k = String(s.worker_name || '').trim().toLowerCase();
-      if (!k || k === 'available') return;
-      set.add(k);
+      const rawName = String(s.worker_name || '').trim();
+      if (!rawName || rawName.toLowerCase() === 'available') return;
       const start = toMins((s.scheduled_start || '').slice(0,5));
       const end   = toMins((s.scheduled_end   || '').slice(0,5));
-      if (!windows.has(k)) windows.set(k, []);
-      windows.get(k).push({ start, end, id: s.id });
+      const win = { start, end, id: s.id };
+      const keys = [ normWorkerKey(rawName), digitsOnly(workerPhone(rawName)) ].filter(Boolean);
+      addWindow(keys, win);
     });
     return { ok: true, set, windows };
   } catch(e) {
@@ -7443,12 +7480,25 @@ async function fetchScheduledWorkerSetForDate(dateStr) {
 }
 
 // True if `windows` (from fetchScheduledWorkerSetForDate) shows the worker has a
-// booked shift that day whose time overlaps the slot. If the slot has no usable
-// time window, OR any of the worker's bookings has an unknown window, we treat it
-// as a clash (be safe — never double-book on missing data).
-function workerClashesInWindows(nameLc, slot, windows) {
-  const list = windows && windows.get ? windows.get(nameLc) : null;
-  if (!list || !list.length) return false;
+// booked shift that day whose time overlaps the slot. Looks the worker up under
+// BOTH their normalized-name key and their phone key, so a spelling variant or a
+// name/phone mismatch between the history and the schedule still resolves to the
+// same person. If the slot has no usable time window, OR any of the worker's
+// bookings has an unknown window, we treat it as a clash (never double-book on
+// missing data).
+function workerClashesInWindows(workerName, slot, windows) {
+  if (!windows || !windows.get) return false;
+  const keys = [ normWorkerKey(workerName), digitsOnly(workerPhone(workerName)) ].filter(Boolean);
+  // Merge all booked windows found under any of this worker's identity keys.
+  const seenIds = new Set();
+  const list = [];
+  keys.forEach(k => (windows.get(k) || []).forEach(w => {
+    const id = String(w.id);
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
+    list.push(w);
+  }));
+  if (!list.length) return false;
   const sStart = toMins(slot.start), sEnd = toMins(slot.end);
   return list.some(w => {
     if (String(w.id) === String(slot.id)) return false; // not the slot itself
@@ -7479,11 +7529,12 @@ function likelyWorkersForSlot(slot, freqCache, scheduled) {
     if (standbyKeys.has(key)) return;                        // already in standby section above
     // Time-aware exclusion against AUTHORITATIVE DB data: if they already have a
     // shift that day whose time overlaps this slot, never offer (double-book /
-    // clash). A worker booked elsewhere at a non-overlapping time is still
-    // offerable. This replaces the old blanket "any shift that day → exclude",
-    // which over-excluded, while the window data closes the under-exclusion gap
-    // that let an overlapping already-scheduled worker slip through.
-    if (sched.has(key) && workerClashesInWindows(key, slot, windows)) return;
+    // clash). The window lookup matches by normalized name OR phone, so a spelling
+    // variant between history and schedule still collides. We do NOT gate on
+    // sched.has(key) first — that exact-key precondition was the bug that let a
+    // misspelled-but-already-booked worker (e.g. "Tai Chiun" vs "Tai Chuin")
+    // skip the overlap check entirely.
+    if (workerClashesInWindows(name, slot, windows)) return;
     if (isWorkerSuspended(name)) return;                     // suspended
     if (assignmentRestriction(name, outlet)) return;         // banned / not-wanted at outlet
     // Belt-and-braces: also drop any worker whose loaded shift that day clashes,
@@ -7529,13 +7580,21 @@ async function toggleLikelyWorkers(shiftId, cid) {
   body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Loading likely workers…</div>`;
   if (!slot) { body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Slot no longer open.</div>`; return; }
 
-  const freq = await buildDowFrequencyCache(false);
-  const scheduled = await fetchScheduledWorkerSetForDate(slot.date);
+  let freq, scheduled;
+  try {
+    freq = await withTimeout(buildDowFrequencyCache(false), 8000, 'likely-worker history');
+    scheduled = await withTimeout(fetchScheduledWorkerSetForDate(slot.date), 8000, 'scheduled-worker check');
+  } catch (err) {
+    console.warn('[Likely] load failed/timed out', err);
+    body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't load likely workers (the request timed out or was blocked). This doesn't affect the offers already sent above — tap <b>Hide</b> then <b>Show</b> again to retry.</div>`;
+    return;
+  }
   if (!scheduled.ok) {
     body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't check who's already scheduled that day (network/permissions). Not listing likely workers to avoid offering someone a clashing slot — try again in a moment.</div>`;
     return;
   }
   const likely = likelyWorkersForSlot(slot, freq, scheduled);
+  const rem = shiftReminders[slot.id] || {};
   const offeredKeys = (Array.isArray(rem.offeredNames) ? rem.offeredNames : []).map(n => String(n).toLowerCase());
 
   if (!likely.length) {
@@ -7564,8 +7623,15 @@ async function toggleLikelyWorkers(shiftId, cid) {
 async function offerSlotToLikely(shiftId) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
-  const freq = await buildDowFrequencyCache(false);
-  const scheduled = await fetchScheduledWorkerSetForDate(slot.date);
+  let freq, scheduled;
+  try {
+    freq = await withTimeout(buildDowFrequencyCache(false), 8000, 'likely-worker history');
+    scheduled = await withTimeout(fetchScheduledWorkerSetForDate(slot.date), 8000, 'scheduled-worker check');
+  } catch (err) {
+    console.warn('[Likely] offer-all load failed/timed out', err);
+    toast('Could not load likely workers (timed out or blocked) — try again in a moment.', 'error');
+    return;
+  }
   if (!scheduled.ok) { toast("Couldn't verify who's already scheduled that day — not offering, to avoid a clash. Try again in a moment.", 'error'); return; }
   const likely = likelyWorkersForSlot(slot, freq, scheduled);
   if (!confirm(`Offer this slot to ${likely.length} worker${likely.length!==1?'s':''} who usually work this weekday? First to reply YES gets it.`)) return;
@@ -7664,7 +7730,8 @@ async function offerSlotToStandby(shiftId, workerName) {
   // Live double-check: never offer to someone already booked that day with a shift
   // whose time overlaps this slot (guards against a stale rendered chip).
   try {
-    const wkLc = String(workerName || '').trim().toLowerCase();
+    const wkKey = normWorkerKey(workerName);
+    const wkPhone = digitsOnly(workerPhone(workerName));
     const sStart = toMins(slot.start), sEnd = toMins(slot.end);
     const { data: sameDay } = await supabaseClient
       .from('shifts')
@@ -7673,7 +7740,11 @@ async function offerSlotToStandby(shiftId, workerName) {
       .not('cancelled', 'is', true);
     const clash = (sameDay || []).some(s => {
       if (String(s.id) === String(slot.id)) return false;
-      if (String(s.worker_name||'').trim().toLowerCase() !== wkLc) return false;
+      // Match the same worker by normalized name OR phone (handles spelling drift).
+      const rowName = String(s.worker_name||'');
+      const sameWorker = normWorkerKey(rowName) === wkKey
+        || (wkPhone && digitsOnly(workerPhone(rowName)) === wkPhone);
+      if (!sameWorker) return false;
       // If we can't compare times, treat any existing same-day shift as a block.
       if (sStart == null || sEnd == null) return true;
       const eStart = toMins((s.scheduled_start||'').slice(0,5));
@@ -7807,7 +7878,8 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
   }
   if (slot.date) {
     try {
-      const wkLc = String(worker || '').trim().toLowerCase();
+      const wkKey = normWorkerKey(worker);
+      const wkPhone = digitsOnly(workerPhone(worker));
       const sStart = toMins(slot.start), sEnd = toMins(slot.end);
       const { data: sameDay, error: sdErr } = await supabaseClient
         .from('shifts')
@@ -7817,7 +7889,10 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
       if (!sdErr) {
         const clash = (sameDay || []).some(s => {
           if (String(s.id) === String(slot.id)) return false;
-          if (String(s.worker_name||'').trim().toLowerCase() !== wkLc) return false;
+          const rowName = String(s.worker_name||'');
+          const sameWorker = normWorkerKey(rowName) === wkKey
+            || (wkPhone && digitsOnly(workerPhone(rowName)) === wkPhone);
+          if (!sameWorker) return false;
           if (sStart == null || sEnd == null) return true;
           const eStart = toMins((s.scheduled_start||'').slice(0,5));
           const eEnd   = toMins((s.scheduled_end||'').slice(0,5));
