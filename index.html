@@ -7167,12 +7167,12 @@ async function checkPaymentFollowups() {
 
   const todayStr = new Date().toISOString().slice(0,10);
 
-  // IMPORTANT: do NOT iterate `allShifts` here. That array is scoped to whatever
-  // date/week/outlet the user is currently viewing, so it is frequently stale or
-  // missing today's rows entirely — which is exactly why a follow-up could fire
-  // for a worker who was already marked paid within the 25-min window (the paid
-  // flag updated in the DB but not in the view the timer happened to be reading).
-  // Query the DB fresh every tick so we always evaluate the live `is_paid` value.
+  // CRITICAL: never iterate `allShifts` here. That array only holds the shifts for
+  // whatever date/week/outlet you are currently *viewing*. If you mark a worker paid
+  // and then look at another day (or the array was loaded before your paid-click
+  // propagated), the in-memory row still shows is_paid=false even though the DB says
+  // paid — and the nudge fires for someone you already paid on time. Query the DB
+  // fresh every tick so the live is_paid value is always the source of truth.
   let candidates = [];
   try {
     const { data, error } = await supabaseClient
@@ -7180,7 +7180,7 @@ async function checkPaymentFollowups() {
       .select('*')
       .eq('shift_date', todayStr)
       .not('clock_out', 'is', null)
-      .or('is_paid.is.null,is_paid.eq.false')   // unpaid only (null counts as unpaid)
+      .or('is_paid.is.null,is_paid.eq.false')   // unpaid only (null also counts as unpaid)
       .not('cancelled', 'is', true);
     if (error) { console.warn('[Payroll follow-up] query failed', error); return; }
     candidates = data || [];
@@ -7205,8 +7205,8 @@ async function checkPaymentFollowups() {
     if (now < dueAt) continue;                          // not yet 25 min past clock-out
     if (now > dueAt + 6 * 3600000) continue;            // don't fire on stale/backfilled rows (>6h late)
 
-    // Final race guard: re-read this single row's paid status immediately before
-    // sending, in case it was marked paid between the bulk query and now.
+    // FINAL RACE GUARD: re-read this one row's paid status the instant before sending,
+    // in case it was marked paid between the bulk query above and now.
     try {
       const { data: fresh } = await supabaseClient
         .from('shifts')
@@ -7214,9 +7214,9 @@ async function checkPaymentFollowups() {
         .eq('id', s.id)
         .single();
       if (fresh && (fresh.is_paid === true || fresh.cancelled === true || !fresh.clock_out)) {
-        continue; // paid/cancelled/un-clocked-out in the meantime — skip
+        continue; // paid / cancelled / un-clocked-out in the meantime — skip silently
       }
-    } catch (e) { /* if the re-check fails, fall through and send */ }
+    } catch (e) { /* if the re-check itself fails, fall through and send */ }
 
     const ok = await sendPeriskopeGroupMessage(pk.payrollGroupId, buildPayFollowupMessage(s, co));
     if (ok) {
@@ -7351,6 +7351,245 @@ function buildSlotOfferMessage(slot, workerName) {
   return `🆕 *Shift Available — Want it?*\n\nHi ${workerName}! A shift just opened up that matches your standby availability:\n\n📅 *${dateStr}*\n🏠 *${outlet}*${tRange ? `\n⏰ ${tRange}` : ''}${role ? `\n👔 ${role}` : ''}\n\nReply *YES* to grab it (first to confirm gets it), or ignore if you're no longer free. 🙌`;
 }
 
+// ── "Likely to work on this day" suggestions ─────────────────────────────────
+// Beyond the standby list, surface workers who HISTORICALLY tend to work the
+// slot's weekday (e.g. usual-Friday people) so ops can also offer them the slot.
+//
+// A worker is suggested only if ALL of these hold:
+//   • they have worked the slot's weekday before (frequency > 0)
+//   • they are NOT already on the standby list for that date (shown separately)
+//   • they are NOT already assigned ANY non-cancelled shift that date
+//        — i.e. "not scheduled". This is the hard exclusion: if they already have
+//          a shift that day at all (overlapping OR not) we do not offer, because
+//          they're already booked. We never want to double-book or offer a clash.
+//   • they are NOT suspended
+//   • they are NOT banned / not-wanted at the slot's outlet
+//   • they have a phone on file (so a WhatsApp offer is possible)
+
+let _dowFreqCache = null;
+let _dowFreqCacheAt = 0;
+
+async function buildDowFrequencyCache(force) {
+  const now = Date.now();
+  if (!force && _dowFreqCache && (now - _dowFreqCacheAt) < 10 * 60000) return _dowFreqCache;
+  const map = {};
+  try {
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 183);
+    const cutoffStr = cutoff.toISOString().slice(0,10);
+    const { data, error } = await supabaseClient
+      .from('shifts')
+      .select('worker_name, shift_date, scheduled_start, clock_in, cancelled')
+      .gte('shift_date', cutoffStr)
+      .not('cancelled', 'is', true);
+    if (error) { console.warn('[Likely] freq query failed', error); return _dowFreqCache || {}; }
+    (data || []).forEach(s => {
+      const name = String(s.worker_name || '').trim();
+      if (!name || name.toLowerCase() === 'available') return;
+      if (!s.shift_date || !s.clock_in) return;   // only count shifts they actually showed up for
+      const key = name.toLowerCase();
+      if (!map[key]) map[key] = { name, dow:[0,0,0,0,0,0,0], total:0, lastWorked:'' };
+      map[key].dow[new Date(s.shift_date + 'T00:00:00').getDay()]++;
+      map[key].total++;
+      if (s.shift_date > map[key].lastWorked) map[key].lastWorked = s.shift_date;
+    });
+    _dowFreqCache = map;
+    _dowFreqCacheAt = now;
+  } catch(e) {
+    console.warn('[Likely] freq cache exception', e);
+    return _dowFreqCache || {};
+  }
+  return _dowFreqCache;
+}
+
+// Fetch the workers assigned ANY non-cancelled shift on a given date, straight
+// from the DB so it is correct even for dates not in the current view (allShifts
+// only holds the focused day/week, optionally one outlet — so the in-memory
+// clash check misses cross-date / other-outlet bookings).
+//
+// Returns { ok, set, windows } where:
+//   • ok      — true only if the DB query succeeded. Callers MUST treat ok:false
+//               as "I don't know who's booked" and refuse to offer, rather than
+//               offering to everyone (the old empty-set-on-error behaviour was
+//               exactly what let an already-scheduled worker get offered an
+//               overlapping slot).
+//   • set     — lowercased names with any shift that day.
+//   • windows — Map(nameLc → [{start,end,id}]) of that day's booked time ranges,
+//               so we can test true time-overlap against authoritative data.
+async function fetchScheduledWorkerSetForDate(dateStr) {
+  const set = new Set();
+  const windows = new Map();
+  if (!dateStr) return { ok: false, set, windows };
+  try {
+    const { data, error } = await supabaseClient
+      .from('shifts')
+      .select('worker_name, scheduled_start, scheduled_end, cancelled, id')
+      .eq('shift_date', dateStr)
+      .not('cancelled', 'is', true);
+    if (error) { console.warn('[Likely] scheduled-set query failed', error); return { ok: false, set, windows }; }
+    (data || []).forEach(s => {
+      const k = String(s.worker_name || '').trim().toLowerCase();
+      if (!k || k === 'available') return;
+      set.add(k);
+      const start = toMins((s.scheduled_start || '').slice(0,5));
+      const end   = toMins((s.scheduled_end   || '').slice(0,5));
+      if (!windows.has(k)) windows.set(k, []);
+      windows.get(k).push({ start, end, id: s.id });
+    });
+    return { ok: true, set, windows };
+  } catch(e) {
+    console.warn('[Likely] scheduled-set exception', e);
+    return { ok: false, set, windows };
+  }
+}
+
+// True if `windows` (from fetchScheduledWorkerSetForDate) shows the worker has a
+// booked shift that day whose time overlaps the slot. If the slot has no usable
+// time window, OR any of the worker's bookings has an unknown window, we treat it
+// as a clash (be safe — never double-book on missing data).
+function workerClashesInWindows(nameLc, slot, windows) {
+  const list = windows && windows.get ? windows.get(nameLc) : null;
+  if (!list || !list.length) return false;
+  const sStart = toMins(slot.start), sEnd = toMins(slot.end);
+  return list.some(w => {
+    if (String(w.id) === String(slot.id)) return false; // not the slot itself
+    if (sStart == null || sEnd == null) return true;     // can't compare → block
+    if (w.start == null || w.end == null) return true;   // unknown booking → block
+    return sStart < w.end && sEnd > w.start;             // standard overlap test
+  });
+}
+
+// Synchronous filter given a prebuilt freq cache + DB-sourced scheduled data.
+// `scheduled` MUST be the result of fetchScheduledWorkerSetForDate for the slot's
+// date: { ok, set, windows }. If scheduled.ok is false the DB lookup failed and we
+// CANNOT safely judge who's booked — callers must not offer in that case, but as a
+// last-ditch guard we still apply the in-memory clash check here.
+function likelyWorkersForSlot(slot, freqCache, scheduled) {
+  if (!slot || !slot.date) return [];
+  const targetDow = new Date(slot.date + 'T00:00:00').getDay();
+  const outlet = slot.outlet || '';
+  const standbyKeys = new Set(standbyForDay(slot.date).map(x => String(x.worker_name||'').trim().toLowerCase()));
+  const sched    = (scheduled && scheduled.set)     ? scheduled.set     : new Set();
+  const windows  = (scheduled && scheduled.windows) ? scheduled.windows : new Map();
+  const out = [];
+  Object.values(freqCache || {}).forEach(entry => {
+    const name = entry.name;
+    const key = name.toLowerCase();
+    const freq = entry.dow[targetDow] || 0;
+    if (freq <= 0) return;                                   // never worked this weekday
+    if (standbyKeys.has(key)) return;                        // already in standby section above
+    // Time-aware exclusion against AUTHORITATIVE DB data: if they already have a
+    // shift that day whose time overlaps this slot, never offer (double-book /
+    // clash). A worker booked elsewhere at a non-overlapping time is still
+    // offerable. This replaces the old blanket "any shift that day → exclude",
+    // which over-excluded, while the window data closes the under-exclusion gap
+    // that let an overlapping already-scheduled worker slip through.
+    if (sched.has(key) && workerClashesInWindows(key, slot, windows)) return;
+    if (isWorkerSuspended(name)) return;                     // suspended
+    if (assignmentRestriction(name, outlet)) return;         // banned / not-wanted at outlet
+    // Belt-and-braces: also drop any worker whose loaded shift that day clashes,
+    // in case the windows map is incomplete for some reason.
+    if (workerHasClashingShift(name, slot)) return;
+    if (!workerPhone(name)) return;                          // no phone → can't WhatsApp
+    out.push({ name, freq, total: entry.total, lastWorked: entry.lastWorked });
+  });
+  out.sort((a,b) => (b.freq - a.freq) || (b.total - a.total) || a.name.localeCompare(b.name));
+  return out;
+}
+
+// Collapsible placeholder rendered inside the offer block. The DB-backed list
+// loads on first expand (kept collapsed so a long roster doesn't clutter cards).
+function renderLikelyWorkersPlaceholder(slot) {
+  if (!slot || !slot.date) return '';
+  const DOW = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const dowName = DOW[new Date(slot.date + 'T00:00:00').getDay()];
+  const idAttr = escapeAttr(String(slot.id));
+  const cid = 'likely-' + String(slot.id).replace(/[^a-zA-Z0-9_-]/g,'');
+  return `<div style="margin-top:8px;">
+    <button class="btn btn-ghost btn-sm" id="${cid}-btn"
+      onclick="toggleLikelyWorkers('${idAttr}','${cid}')"
+      title="Workers who usually work ${dowName} and aren't already scheduled or on standby"
+      style="color:var(--accent);">\u25b8 Show others likely to work ${dowName}</button>
+    <div id="${cid}-body" style="display:none;margin-top:8px;"></div></div>`;
+}
+
+async function toggleLikelyWorkers(shiftId, cid) {
+  const body = document.getElementById(cid + '-body');
+  const btn = document.getElementById(cid + '-btn');
+  if (!body) return;
+  const slot = resolveOfferableSlot(shiftId);
+  const DOW = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const dowName = slot ? DOW[new Date(slot.date + 'T00:00:00').getDay()] : 'this day';
+  if (body.style.display !== 'none') {
+    body.style.display = 'none';
+    if (btn) btn.innerHTML = `\u25b8 Show others likely to work ${dowName}`;
+    return;
+  }
+  body.style.display = 'block';
+  if (btn) btn.innerHTML = `\u25be Hide others likely to work ${dowName}`;
+  body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Loading likely workers…</div>`;
+  if (!slot) { body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Slot no longer open.</div>`; return; }
+
+  const freq = await buildDowFrequencyCache(false);
+  const scheduled = await fetchScheduledWorkerSetForDate(slot.date);
+  if (!scheduled.ok) {
+    body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't check who's already scheduled that day (network/permissions). Not listing likely workers to avoid offering someone a clashing slot — try again in a moment.</div>`;
+    return;
+  }
+  const likely = likelyWorkersForSlot(slot, freq, scheduled);
+  const offeredKeys = (Array.isArray(rem.offeredNames) ? rem.offeredNames : []).map(n => String(n).toLowerCase());
+
+  if (!likely.length) {
+    body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">No other workers with a ${dowName} history are free and eligible for this slot.</div>`;
+    return;
+  }
+  const idAttr = escapeAttr(String(slot.id));
+  const chips = likely.map(w => {
+    const already = offeredKeys.includes(w.name.toLowerCase());
+    const label = `${escapeHtml(w.name)} \u00b7 ${w.freq}\u00d7 ${dowName.slice(0,3)}`;
+    if (already) {
+      return `<button class="btn btn-ghost btn-sm" onclick="resendOfferToStandby('${idAttr}','${escapeAttr(w.name)}')" title="Already offered — re-send the WhatsApp">\u2713 ${label} \u00b7 re-send</button>`;
+    }
+    return `<button class="btn btn-amber btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(w.name)}')" title="Offer this slot to ${escapeHtml(w.name)} via WhatsApp">\ud83d\udce4 ${label}</button>`;
+  }).join('');
+  const offerAllBtn = likely.length > 1
+    ? `<button class="btn btn-primary btn-sm" onclick="offerSlotToLikely('${idAttr}')" title="Offer to all ${likely.length} likely workers; first YES gets it">\ud83d\udce3 Offer to all ${likely.length}</button>`
+    : '';
+  body.innerHTML = `
+    <div class="standby-meta" style="margin-bottom:6px;color:var(--text2);">
+      ${likely.length} worker${likely.length!==1?'s':''} usually work ${dowName}, aren't scheduled that day, and aren't suspended/banned. Tap to offer via WhatsApp:
+    </div>
+    <div class="standby-actions" style="margin-top:0;flex-wrap:wrap;">${chips}${offerAllBtn}</div>`;
+}
+
+async function offerSlotToLikely(shiftId) {
+  const slot = resolveOfferableSlot(shiftId);
+  if (!slot) { toast('Slot no longer open', 'error'); return; }
+  const freq = await buildDowFrequencyCache(false);
+  const scheduled = await fetchScheduledWorkerSetForDate(slot.date);
+  if (!scheduled.ok) { toast("Couldn't verify who's already scheduled that day — not offering, to avoid a clash. Try again in a moment.", 'error'); return; }
+  const likely = likelyWorkersForSlot(slot, freq, scheduled);
+  if (!confirm(`Offer this slot to ${likely.length} worker${likely.length!==1?'s':''} who usually work this weekday? First to reply YES gets it.`)) return;
+  if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
+  const r = shiftReminders[shiftId];
+  r.offeredNames = Array.isArray(r.offeredNames) ? r.offeredNames : [];
+  let sent = 0, logged = 0;
+  for (const w of likely) {
+    const phone = workerPhone(w.name);
+    let ok = false;
+    if (phone) { try { ok = await sendPeriskopeMessage(phone, buildSlotOfferMessage(slot, w.name)); } catch(e) { ok = false; } }
+    if (ok) sent++;
+    if (!r.offeredNames.some(n => String(n).toLowerCase() === w.name.toLowerCase())) r.offeredNames.push(w.name);
+    logged++;
+  }
+  r.offerSentAt = new Date().toISOString();
+  r.lastReminderAt = r.offerSentAt;
+  await persistReminder(shiftId);
+  if (sent === logged) toast(`✓ Slot offered to ${sent} likely worker${sent!==1?'s':''} via WhatsApp`);
+  else if (sent > 0) toast(`Offered to ${logged} (sent ${sent} via WhatsApp; rest need a manual message)`, 'info');
+  else toast(`Logged offer to ${logged} — WhatsApp not sent (check Periskope)`, 'info');
+  rerenderOfferPanels();
+}
+
 // ── Shift-confirmed message builder ──────────────────────────────────────────
 // Sent to a worker the moment ops assigns them into a slot, so they know the
 // shift is locked in and will appear in their Anytime Work app.
@@ -7377,7 +7616,10 @@ function renderOfferToStandbyBlock(slot) {
   }
   const eligible = eligibleStandbyForSlot(slot);
   if (!eligible.length) {
-    return `<div class="standby-meta" style="margin-top:8px;color:var(--text3);">No standby workers available for this date${slot.outlet ? ' / outlet' : ''}.</div>`;
+    return `<div style="margin-top:9px;border-top:1px dashed var(--border);padding-top:8px;">
+      <div class="standby-meta" style="color:var(--text3);">No standby workers available for this date${slot.outlet ? ' / outlet' : ''}.</div>
+      ${renderLikelyWorkersPlaceholder(slot)}
+    </div>`;
   }
   const chips = eligible.map(x => {
     const name = x.worker_name;
@@ -7402,6 +7644,7 @@ function renderOfferToStandbyBlock(slot) {
     <div class="standby-meta" style="margin-bottom:6px;font-weight:600;color:var(--purple);">\ud83e\uddfe Offer slot to standby</div>
     <div class="standby-actions" style="margin-top:0;">${chips}${offerAll}</div>
     ${sentNote}
+    ${renderLikelyWorkersPlaceholder(slot)}
   </div>`;
 }
 
@@ -7418,6 +7661,28 @@ async function offerSlotToStandby(shiftId, workerName) {
   if (!slot) { toast('Slot no longer open', 'error'); return; }
   const restriction = assignmentRestriction(workerName, slot.outlet || '');
   if (restriction) { toast(restriction, 'error'); return; }
+  // Live double-check: never offer to someone already booked that day with a shift
+  // whose time overlaps this slot (guards against a stale rendered chip).
+  try {
+    const wkLc = String(workerName || '').trim().toLowerCase();
+    const sStart = toMins(slot.start), sEnd = toMins(slot.end);
+    const { data: sameDay } = await supabaseClient
+      .from('shifts')
+      .select('scheduled_start, scheduled_end, cancelled, worker_name, id')
+      .eq('shift_date', slot.date)
+      .not('cancelled', 'is', true);
+    const clash = (sameDay || []).some(s => {
+      if (String(s.id) === String(slot.id)) return false;
+      if (String(s.worker_name||'').trim().toLowerCase() !== wkLc) return false;
+      // If we can't compare times, treat any existing same-day shift as a block.
+      if (sStart == null || sEnd == null) return true;
+      const eStart = toMins((s.scheduled_start||'').slice(0,5));
+      const eEnd   = toMins((s.scheduled_end||'').slice(0,5));
+      if (eStart == null || eEnd == null) return true; // unknown window → be safe, block
+      return sStart < eEnd && sEnd > eStart;
+    });
+    if (clash) { toast(`${workerName} already has an overlapping shift that day — not offered.`, 'error'); rerenderOfferPanels(); return; }
+  } catch(e) { /* if the check fails, proceed (don't hard-block on a transient error) */ }
   const phone = workerPhone(workerName);
   // Try to send via Periskope, but record the offer regardless so the manual
   // "accepted" path still works when Periskope isn't configured / no phone on file.
@@ -7533,10 +7798,38 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
   const restriction = assignmentRestriction(worker, slot.outlet || '');
   if (restriction) { toast(restriction, 'error'); return false; }
   // Safety net: never assign a worker into a slot that clashes with another
-  // shift they already have that day (the offer chips already hide these).
+  // shift they already have that day. allShifts only holds the focused day/week
+  // (and maybe one outlet), so check the DB directly for the slot's actual date —
+  // otherwise a cross-date / other-outlet booking is invisible here.
   if (workerHasClashingShift(worker, slot)) {
     toast(`${worker} already has an overlapping shift on ${slot.date || 'that date'} — cannot assign (time clash).`, 'error');
     return false;
+  }
+  if (slot.date) {
+    try {
+      const wkLc = String(worker || '').trim().toLowerCase();
+      const sStart = toMins(slot.start), sEnd = toMins(slot.end);
+      const { data: sameDay, error: sdErr } = await supabaseClient
+        .from('shifts')
+        .select('scheduled_start, scheduled_end, cancelled, worker_name, id')
+        .eq('shift_date', slot.date)
+        .not('cancelled', 'is', true);
+      if (!sdErr) {
+        const clash = (sameDay || []).some(s => {
+          if (String(s.id) === String(slot.id)) return false;
+          if (String(s.worker_name||'').trim().toLowerCase() !== wkLc) return false;
+          if (sStart == null || sEnd == null) return true;
+          const eStart = toMins((s.scheduled_start||'').slice(0,5));
+          const eEnd   = toMins((s.scheduled_end||'').slice(0,5));
+          if (eStart == null || eEnd == null) return true;
+          return sStart < eEnd && sEnd > eStart;
+        });
+        if (clash) {
+          toast(`${worker} already has an overlapping shift on ${slot.date} — cannot assign (time clash).`, 'error');
+          return false;
+        }
+      }
+    } catch(e) { /* transient check failure → fall through to the in-memory guard above */ }
   }
   // Make sure the worker exists in the workers table (so phone/profile resolve later).
   if (!(allWorkers || []).find(w => String(w.name).toLowerCase() === worker.toLowerCase())) {
@@ -9507,7 +9800,6 @@ const addWorker = saveWorker;
 // so history and analytics are complete regardless of the current date view.
 
 function _shiftPeriod(s) {
-  // Classify a shift into Morning / Lunch / Dinner / Midnight by scheduled start.
   const m = toMins((s.scheduled_start || '').slice(0,5));
   if (m === null || isNaN(m)) return 'Other';
   if (m >= 5*60 && m < 11*60)  return 'Morning';   // 05:00–10:59
@@ -9516,12 +9808,9 @@ function _shiftPeriod(s) {
   return 'Midnight';                                // 22:00–04:59
 }
 function _isSameDayBooking(s) {
-  // "Last-minute" = the slot/booking was created on the same calendar day as the shift.
   if (!s.created_at || !s.shift_date) return false;
   try {
-    const created = new Date(s.created_at);
-    // Compare in SG local date terms.
-    const createdDate = created.toISOString().slice(0,10);
+    const createdDate = new Date(s.created_at).toISOString().slice(0,10);
     return createdDate === String(s.shift_date).slice(0,10);
   } catch(e) { return false; }
 }
@@ -9530,11 +9819,9 @@ function _isLateShift(s) {
   const info = calcLatePenalty((s.scheduled_start||'').slice(0,5), (s.clock_in||'').slice(0,5));
   return info.status === 'late';
 }
-
 async function _fetchWorkerShifts(name) {
   const { data, error } = await supabaseClient
-    .from('shifts')
-    .select('*')
+    .from('shifts').select('*')
     .eq('worker_name', name)
     .order('shift_date', { ascending: false })
     .order('scheduled_start', { ascending: false });
@@ -9543,37 +9830,31 @@ async function _fetchWorkerShifts(name) {
 }
 async function _fetchOutletShifts(outletName) {
   const { data, error } = await supabaseClient
-    .from('shifts')
-    .select('*')
+    .from('shifts').select('*')
     .eq('outlet', outletName)
     .order('shift_date', { ascending: false })
     .order('scheduled_start', { ascending: false });
   if (error) { console.warn('[Outlet detail] query failed', error); return []; }
   return data || [];
 }
-
 function _statCard(label, value, color) {
   return `<div style="background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;min-width:110px;flex:1;">
     <div style="font-size:11px;color:var(--text3);margin-bottom:3px;">${label}</div>
-    <div style="font-size:20px;font-weight:700;color:${color||'var(--text)'};">${value}</div>
-  </div>`;
+    <div style="font-size:20px;font-weight:700;color:${color||'var(--text)'};">${value}</div></div>`;
 }
 function _miniBar(label, count, max) {
   const pct = max > 0 ? Math.round((count / max) * 100) : 0;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
     <div style="width:74px;font-size:11px;color:var(--text2);flex-shrink:0;">${label}</div>
     <div style="flex:1;background:var(--bg3);border-radius:6px;height:14px;overflow:hidden;">
-      <div style="width:${pct}%;height:100%;background:var(--accent);border-radius:6px;min-width:${count>0?'3px':'0'};"></div>
-    </div>
-    <div style="width:28px;text-align:right;font-size:11px;font-weight:600;color:var(--text);">${count}</div>
-  </div>`;
+      <div style="width:${pct}%;height:100%;background:var(--accent);border-radius:6px;min-width:${count>0?'3px':'0'};"></div></div>
+    <div style="width:28px;text-align:right;font-size:11px;font-weight:600;color:var(--text);">${count}</div></div>`;
 }
-
 function _historyTable(shifts, mode) {
-  // mode: 'worker' shows outlet; 'outlet' shows worker.
   if (!shifts.length) return `<div class="empty-state" style="padding:20px;"><p>No shift records yet.</p></div>`;
   const rows = shifts.slice(0, 200).map(s => {
-    const d = s.shift_date ? `${new Date(s.shift_date+'T00:00:00').getDate()} ${MONTHS[new Date(s.shift_date+'T00:00:00').getMonth()]} ${String(new Date(s.shift_date+'T00:00:00').getFullYear()).slice(2)}` : '—';
+    const dObj = s.shift_date ? new Date(s.shift_date+'T00:00:00') : null;
+    const d = dObj ? `${dObj.getDate()} ${MONTHS[dObj.getMonth()]} ${String(dObj.getFullYear()).slice(2)}` : '—';
     const who = mode === 'worker' ? escapeHtml(s.outlet || '—') : escapeHtml(s.worker_name || '—');
     const start = (s.scheduled_start||'').slice(0,5) || '—';
     const period = _shiftPeriod(s);
@@ -9587,40 +9868,29 @@ function _historyTable(shifts, mode) {
   }).join('');
   const more = shifts.length > 200 ? `<div class="sub-text" style="margin-top:6px;">Showing latest 200 of ${shifts.length} records.</div>` : '';
   return `<div style="max-height:300px;overflow-y:auto;border:1px solid var(--border2);border-radius:var(--radius);">
-    <table style="width:100%;"><thead><tr>
-      <th>Date</th><th>${mode==='worker'?'Outlet':'Worker'}</th><th>Start</th><th>Status</th>
-    </tr></thead><tbody>${rows}</tbody></table></div>${more}`;
+    <table style="width:100%;"><thead><tr><th>Date</th><th>${mode==='worker'?'Outlet':'Worker'}</th><th>Start</th><th>Status</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>${more}`;
 }
-
 async function openWorkerDetail(name) {
   const modal = document.getElementById('worker-detail-modal');
   document.getElementById('worker-detail-title').textContent = name;
   document.getElementById('worker-detail-body').innerHTML = `<div class="empty-state"><p>Loading work history…</p></div>`;
   modal.classList.add('open');
-
   const shifts = await _fetchWorkerShifts(name);
-
-  // Worked = not cancelled AND clocked in.
   const worked = shifts.filter(s => !s.cancelled && s.clock_in);
   const cancelledCount = shifts.filter(s => s.cancelled).length;
   const lateCount = shifts.filter(s => _isLateShift(s)).length;
   const lastMinCount = shifts.filter(s => !s.cancelled && _isSameDayBooking(s)).length;
-
-  // Day-of-week distribution (worked shifts).
   const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const dowCounts = [0,0,0,0,0,0,0];
   worked.forEach(s => { if (s.shift_date) dowCounts[new Date(s.shift_date+'T00:00:00').getDay()]++; });
   const dowMax = Math.max(...dowCounts, 1);
   const topDow = dowCounts.indexOf(Math.max(...dowCounts));
-
-  // Period distribution (worked shifts).
   const periods = { Morning:0, Lunch:0, Dinner:0, Midnight:0, Other:0 };
   worked.forEach(s => { periods[_shiftPeriod(s)]++; });
   const periodMax = Math.max(periods.Morning, periods.Lunch, periods.Dinner, periods.Midnight, 1);
-
   const dowBars = DOW.map((lbl,i)=>_miniBar(lbl, dowCounts[i], dowMax)).join('');
   const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
-
   document.getElementById('worker-detail-body').innerHTML = `
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
       ${_statCard('Times worked', worked.length, 'var(--green)')}
@@ -9629,38 +9899,27 @@ async function openWorkerDetail(name) {
       ${_statCard('Last-minute taken', lastMinCount, 'var(--accent)')}
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:16px;">
-      <div>
-        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Days of week worked${worked.length?` · usually <span style="color:var(--accent);">${DOW[topDow]}</span>`:''}</div>
-        ${dowBars}
-      </div>
-      <div>
-        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Shift periods taken</div>
-        ${periodBars}
-      </div>
+      <div><div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Days of week worked${worked.length?` · usually <span style="color:var(--accent);">${DOW[topDow]}</span>`:''}</div>${dowBars}</div>
+      <div><div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Shift periods taken</div>${periodBars}</div>
     </div>
     <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Work history (${shifts.length})</div>
-    ${_historyTable(shifts, 'worker')}
-  `;
+    ${_historyTable(shifts, 'worker')}`;
 }
-
 async function openOutletDetail(outletName) {
   const modal = document.getElementById('outlet-detail-modal');
   document.getElementById('outlet-detail-title').textContent = outletName;
   document.getElementById('outlet-detail-body').innerHTML = `<div class="empty-state"><p>Loading work history…</p></div>`;
   modal.classList.add('open');
-
   const shifts = await _fetchOutletShifts(outletName);
   const worked = shifts.filter(s => !s.cancelled && s.clock_in);
   const cancelledCount = shifts.filter(s => s.cancelled).length;
   const lateCount = shifts.filter(s => _isLateShift(s)).length;
   const lastMinCount = shifts.filter(s => !s.cancelled && _isSameDayBooking(s)).length;
   const uniqueWorkers = new Set(worked.map(s => String(s.worker_name||'').trim().toLowerCase()).filter(Boolean)).size;
-
   const periods = { Morning:0, Lunch:0, Dinner:0, Midnight:0, Other:0 };
   worked.forEach(s => { periods[_shiftPeriod(s)]++; });
   const periodMax = Math.max(periods.Morning, periods.Lunch, periods.Dinner, periods.Midnight, 1);
   const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
-
   document.getElementById('outlet-detail-body').innerHTML = `
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
       ${_statCard('Shifts worked', worked.length, 'var(--green)')}
@@ -9670,12 +9929,9 @@ async function openOutletDetail(outletName) {
       ${_statCard('Last-minute', lastMinCount, 'var(--accent)')}
     </div>
     <div style="margin-bottom:16px;max-width:360px;">
-      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Shift periods filled</div>
-      ${periodBars}
-    </div>
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Shift periods filled</div>${periodBars}</div>
     <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">Work history (${shifts.length})</div>
-    ${_historyTable(shifts, 'outlet')}
-  `;
+    ${_historyTable(shifts, 'outlet')}`;
 }
 
 // ── Outlets page ──────────────────────────────────────────────
