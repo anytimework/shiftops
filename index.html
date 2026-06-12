@@ -672,12 +672,9 @@ tr:hover td { background: rgba(91,148,249,0.045); }
   font-size: 9.5px; opacity: 0.65; text-align: right;
 }
 .chat-bubble.theirs .chat-time { color: var(--text3); }
-.chat-ticks { font-size: 10px; line-height: 1; letter-spacing: -1px; opacity: 0.9; cursor: default; }
-.chat-ticks.pending { letter-spacing: 0; opacity: 0.7; }
-.chat-ticks.sent { color: rgba(255,255,255,0.7); }
-.chat-ticks.delivered { color: rgba(255,255,255,0.85); }
-.chat-ticks.read { color: #6fd0ff; opacity: 1; }
-.chat-seen-by { font-size: 9px; color: rgba(255,255,255,0.7); text-align: right; margin-top: 2px; }
+.chat-ticks { font-size: 10px; line-height: 1; opacity: 0.7; cursor: default; }
+.chat-ticks.pending { opacity: 0.7; }
+.chat-seen-by { font-size: 9.5px; color: rgba(255,255,255,0.78); text-align: right; margin-top: 3px; font-style: italic; }
 /* Typing indicator */
 .chat-typing-bubble { display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; }
 .chat-typing-label { font-size: 11px; color: var(--text3); font-style: italic; }
@@ -17408,28 +17405,14 @@ function teamChatKnownMembers() {
   return Array.from(set);
 }
 
-// Build the WhatsApp-style tick for one of MY messages.
-//   single grey ✓  = sent (saved to DB, not yet confirmed on another device)
-//   double grey ✓✓ = delivered (at least one other teammate's client has it)
-//   double blue ✓✓ = read (at least one other teammate has opened/seen it)
-// Tapping the bubble reveals exactly who has read it.
-function chatTicksHtml(m) {
+// While a message hasn't round-tripped to the DB yet, show a small clock so it's
+// clear it's still sending. Once saved, we show nothing here — read state is
+// conveyed by the "Seen by …" names line under the bubble instead of ticks.
+function chatSendingHtml(m) {
   if (String(m.id || '').startsWith('tmp-')) {
-    // optimistic, not yet round-tripped — clock glyph
     return `<span class="chat-ticks pending" title="Sending…">🕓</span>`;
   }
-  const others = teamChatKnownMembers();
-  const readers = (m.read_by || []).filter(n => n !== m.sender);
-  const delivered = (m.delivered_to || []).filter(n => n !== m.sender);
-  let cls = 'sent', glyph = '✓', title = 'Sent';
-  if (readers.length > 0) {
-    cls = 'read'; glyph = '✓✓';
-    title = 'Read by ' + readers.join(', ');
-  } else if (delivered.length > 0) {
-    cls = 'delivered'; glyph = '✓✓';
-    title = 'Delivered to ' + delivered.join(', ');
-  }
-  return `<span class="chat-ticks ${cls}" title="${escapeHtml(title)}">${glyph}</span>`;
+  return '';
 }
 
 function renderTeamChatMessages() {
@@ -17455,14 +17438,14 @@ function renderTeamChatMessages() {
     const mine = m.sender === me;
     const readers = mine ? (m.read_by || []).filter(n => n !== me) : [];
     const seenLine = (mine && readers.length)
-      ? `<div class="chat-seen-by">Read by ${escapeHtml(readers.join(', '))}</div>` : '';
+      ? `<div class="chat-seen-by">👁 Seen by ${escapeHtml(readers.join(', '))}</div>` : '';
     html += `<div class="chat-bubble-row ${mine ? 'mine' : 'theirs'}">
       <div class="chat-bubble ${mine ? 'mine' : 'theirs'}">
         ${mine ? '' : `<div class="chat-sender">${escapeHtml(m.sender || '?')}</div>`}
         <div class="chat-body">${escapeHtml(m.body || '')}</div>
         <div class="chat-meta">
           <span class="chat-time">${chatTimeLabel(m.created_at)}</span>
-          ${mine ? chatTicksHtml(m) : ''}
+          ${mine ? chatSendingHtml(m) : ''}
         </div>
         ${seenLine}
       </div>
