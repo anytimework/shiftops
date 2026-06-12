@@ -14056,8 +14056,14 @@ async function executeAIAction(actionJson) {
       const s = allShifts.find(x => x.id === a.shiftId);
       if (!s) return `❌ Shift not found`;
       const time = a.time || new Date().toTimeString().slice(0,5);
+      const alreadyClockedOut = !!s.clock_out;
       await supabaseClient.from('shifts').update({ clock_out: time, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
       await logActivity('AI: Clocked out', `${a.workerName} clocked out at ${time}`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+      // Payroll WhatsApp alert — mirror the modal/edit-shift paths. Only fire when
+      // this is a NEW clock-out (not re-clocking an already-completed shift).
+      if (!alreadyClockedOut) {
+        notifyPayrollClockOut(buildClockOutMessage({ ...s, clock_out: time }, time));
+      }
       await loadShifts();
       return `✅ Clocked out **${a.workerName}** at ${time}`;
     }
