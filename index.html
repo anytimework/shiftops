@@ -17364,7 +17364,11 @@ async function markChatReceipts({ markRead } = { markRead: false }) {
   const recent = teamChatRecent().filter(m => m.id && !String(m.id).startsWith('tmp-') && m.sender !== me);
 
   const needDelivered = recent.filter(m => !(m.delivered_to || []).includes(me));
-  const chatVisible = markRead && teamChatOpen && !document.hidden;
+  // Mark as READ whenever this user is actively on the app (tab focused) and is
+  // allowed in chat — not only while the panel is expanded. The team uses this as
+  // a docked widget and often collapses it right after reading, so requiring the
+  // panel to be open meant almost nobody was ever recorded as a reader.
+  const chatVisible = markRead && !document.hidden && chatAllowedForCurrentUser();
   const needRead = chatVisible ? recent.filter(m => !(m.read_by || []).includes(me)) : [];
 
   if (!needDelivered.length && !needRead.length) return;
@@ -17393,6 +17397,38 @@ async function markChatReceipts({ markRead } = { markRead: false }) {
     }
   } catch (e) { console.warn('[Chat] receipt write failed:', e); }
   finally { _chatReceiptInFlight = false; }
+}
+
+// One-tap check: does the read_by column exist, and is read-marking working?
+// Surfaces the real reason "Seen by" isn't showing instead of failing silently.
+async function diagnoseChatReceipts() {
+  if (!supabaseClient) { toast('No database connection.', 'error'); return; }
+  // Probe the column directly with a select.
+  const probe = await supabaseClient.from('team_chat').select('id, read_by, delivered_to').limit(1);
+  if (probe.error) {
+    if (/column .*(read_by|delivered_to)/i.test(probe.error.message || '')) {
+      toast('Read receipts need a one-time SQL update — see console.', 'error');
+      console.warn('[Chat] Run this SQL in Supabase to enable “Seen by”:');
+      console.log(`alter table team_chat add column if not exists delivered_to text[] not null default '{}';
+alter table team_chat add column if not exists read_by text[] not null default '{}';`);
+      return;
+    }
+    toast('Chat check failed: ' + probe.error.message, 'error');
+    return;
+  }
+  // Columns exist. Force a read-mark now and report how many were updated.
+  const me = currentInternalUser;
+  const recent = teamChatRecent().filter(m => m.id && !String(m.id).startsWith('tmp-') && m.sender !== me);
+  const unread = recent.filter(m => !(m.read_by || []).includes(me));
+  await markChatReceipts({ markRead: true });
+  if (teamChatOpen) renderTeamChatMessages();
+  if (!recent.length) {
+    toast('Read receipts are set up ✓ — no messages from others in the last 48h to mark yet.');
+  } else if (unread.length) {
+    toast(`Read receipts working ✓ — marked ${unread.length} message(s) as read by you. Teammates will see “Seen by ${me}” shortly.`);
+  } else {
+    toast('Read receipts are set up ✓ — you’ve already read everything recent. Have a teammate open the app to see “Seen by …” appear on your messages.');
+  }
 }
 
 // Who counts as "the team" for read receipts — everyone except me who could be
@@ -17734,6 +17770,9 @@ function installChatAudioUnlock() {
       if (currentInternalUser && supabaseClient && chatAllowedForCurrentUser()) {
         loadTeamChat().then(() => {
           maybePlayChatSound();
+          markChatReceipts({ markRead: true }).then(() => {
+            if (teamChatOpen) renderTeamChatMessages();
+          });
           updateChatUnreadBadge();
           if (teamChatOpen) renderTeamChatMessages();
         }).catch(()=>{});
@@ -17867,7 +17906,7 @@ function startTeamChatPolling() {
     maybePlayChatSound();
     // Always confirm delivery for new messages; confirm read only while the
     // chat is actually open & visible.
-    await markChatReceipts({ markRead: teamChatOpen && !document.hidden });
+    await markChatReceipts({ markRead: true });
     updateChatUnreadBadge();
     if (teamChatOpen) renderTeamChatMessages();
     // Keep the history page live if it's the one being viewed.
@@ -17949,7 +17988,7 @@ async function initTeamChat() {
   startTeamChatPolling();
   startTypingPresence();
   // Confirm delivery for anything already waiting at boot.
-  markChatReceipts({ markRead: false }).catch(()=>{});
+  markChatReceipts({ markRead: true }).catch(()=>{});
 }
 
 </script>
@@ -18177,6 +18216,9 @@ async function initTeamChat() {
       <button id="chat-mute-btn" onclick="toggleChatMute()" onmousedown="event.stopPropagation()"
         style="background:none;border:none;color:#fff;font-size:16px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;"
         title="Sounds on — click to mute">🔔</button>
+      <button id="chat-diag-btn" onclick="diagnoseChatReceipts()" onmousedown="event.stopPropagation()"
+        style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;"
+        title="Check read-receipt setup">👁</button>
       <button id="chat-close-btn" onclick="teamChatHide()" style="background:none;border:none;color:rgba(255,255,255,0.85);
         font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
     </div>
