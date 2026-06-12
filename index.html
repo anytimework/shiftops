@@ -509,16 +509,16 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 
 @media (max-width: 760px) {
   body { font-size: 13px; overflow-x: hidden; }
-  .app { display: block !important; min-height: 100vh; }
+  .app { display: block !important; height: auto !important; min-height: 100vh; overflow: visible !important; }
   .sidebar {
     width: 100%;
-    position: sticky;
-    top: 0;
+    position: static;
+    height: auto;
     z-index: 40;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    max-height: 42vh;
-    overflow-y: auto;
+    max-height: none;
+    overflow: visible;
   }
   .sidebar-logo { padding: 12px 14px; display: grid; grid-template-columns: 42px 1fr auto; gap: 10px; align-items: center; }
   .sidebar-logo img { width: 42px !important; height: 42px !important; margin: 0 !important; }
