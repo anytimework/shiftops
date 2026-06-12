@@ -4186,18 +4186,10 @@ function splitAmountsByCountry(rows, amountFn) {
   }, { Singapore: 0, Malaysia: 0, Philippines: 0 });
 }
 function countrySplitMetric(amounts, cls = 'green') {
-  const scope = (typeof currentCountryScope === 'function') ? currentCountryScope() : null;
-  const rows = {
-    Singapore: `<div class="metric-split-row"><span class="metric-split-country">🇸🇬 Singapore</span><span class="metric-split-amount ${cls}">$${Number(amounts.Singapore || 0).toFixed(2)}</span></div>`,
-    Malaysia:  `<div class="metric-split-row"><span class="metric-split-country">🇲🇾 Malaysia</span><span class="metric-split-amount ${cls}">RM${Number(amounts.Malaysia || 0).toFixed(2)}</span></div>`,
-    Philippines: `<div class="metric-split-row"><span class="metric-split-country">🇵🇭 Philippines</span><span class="metric-split-amount ${cls}">₱${Number(amounts.Philippines || 0).toFixed(2)}</span></div>`
-  };
-  // Country-locked partner (e.g. Hiro → PH): show only their own country's row.
-  if (scope) return `<div class="metric-split">${rows[scope] || ''}</div>`;
   return `<div class="metric-split">
-    ${rows.Singapore}
-    ${rows.Malaysia}
-    ${Number(amounts.Philippines || 0) ? rows.Philippines : ''}
+    <div class="metric-split-row"><span class="metric-split-country">🇸🇬 Singapore</span><span class="metric-split-amount ${cls}">$${Number(amounts.Singapore || 0).toFixed(2)}</span></div>
+    <div class="metric-split-row"><span class="metric-split-country">🇲🇾 Malaysia</span><span class="metric-split-amount ${cls}">RM${Number(amounts.Malaysia || 0).toFixed(2)}</span></div>
+    ${Number(amounts.Philippines || 0) ? `<div class="metric-split-row"><span class="metric-split-country">🇵🇭 Philippines</span><span class="metric-split-amount ${cls}">₱${Number(amounts.Philippines || 0).toFixed(2)}</span></div>` : ''}
   </div>`;
 }
 function updateCurrencyLabels() {
@@ -7075,14 +7067,22 @@ let _pkConfigShared = null;
 function getPeriskopeConfig() {
   let local = null;
   try { local = JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) { local = null; }
-  // If this device has a usable local config, prefer it. Otherwise use the shared
-  // team config pulled from Supabase. Merge so a device-local payroll group choice
-  // still works even when the key/phone come from the shared record.
-  if (local?.apikey && local?.phone) return local;
-  if (_pkConfigShared?.apikey && _pkConfigShared?.phone) {
-    return { ..._pkConfigShared, ...(local || {}) , apikey: _pkConfigShared.apikey, phone: _pkConfigShared.phone };
-  }
-  return local || _pkConfigShared || null;
+  const shared = _pkConfigShared || null;
+  // Always merge shared (team) config UNDER local, so this device's choices win
+  // where present but the team config fills in ANY field this device is missing.
+  // This fixes the recurring "alerts stop" bug: previously, a local config that
+  // had apikey+phone but a blank/stale payrollGroupId or payrollEnabled=false was
+  // returned wholesale, silently ignoring the correct group set on another device.
+  if (!local && !shared) return null;
+  const merged = { ...(shared || {}), ...(local || {}) };
+  // For the fields that gate sending, prefer whichever source actually has a value
+  // rather than letting a local blank/false override a good shared value.
+  merged.apikey         = local?.apikey         || shared?.apikey         || merged.apikey;
+  merged.phone          = local?.phone          || shared?.phone          || merged.phone;
+  merged.payrollGroupId = local?.payrollGroupId || shared?.payrollGroupId || merged.payrollGroupId;
+  merged.payrollEnabled = (local?.payrollEnabled === true) || (shared?.payrollEnabled === true);
+  merged.enabled        = (local?.enabled === true) || (shared?.enabled === true);
+  return merged;
 }
 async function loadPeriskopeConfigShared() {
   if (!supabaseClient) return;
@@ -7220,7 +7220,14 @@ async function sendPeriskopeGroupMessage(groupChatId, message) {
 // Replaces the old CallMeBot clock-out notification. Posts the pay breakdown to
 // the "Payroll (for attendance and clock-out)" group so payroll sees ended shifts.
 async function notifyPayrollClockOut(message) {
-  const pk = getPeriskopeConfig();
+  let pk = getPeriskopeConfig();
+  // If anything required is missing, the shared team config may simply not have
+  // finished loading yet (clock-out fired early, or this device never saved
+  // pk_config locally). Re-pull from Supabase once before giving up.
+  if (!pk?.payrollEnabled || !pk?.payrollGroupId || !pk?.apikey || !pk?.phone) {
+    await loadPeriskopeConfigShared().catch(()=>{});
+    pk = getPeriskopeConfig();
+  }
   if (!pk?.payrollEnabled) {
     console.log('[Payroll] group alert skipped — payroll alerts toggle is OFF');
     toast('Clock-out saved. WhatsApp alert OFF — enable it in WhatsApp Alerts → Payroll clock-out alerts.', 'error');
@@ -10430,42 +10437,6 @@ function setLoggedInUserLabel() {
   if (msgLabel) msgLabel.textContent = currentInternalUser ? `Signed in: ${currentInternalUser}` : '';
   applyRoleVisibility();
 }
-// Show/hide the floating Team Chat + AI Assistant widgets based on login state.
-// These widgets live outside #main-app in the DOM, so they must be gated explicitly.
-function setFloatingWidgetsVisibility() {
-  const authed = !!currentInternalUser;
-  const aiFab = document.getElementById('ai-fab');
-  const aiPanel = document.getElementById('ai-panel');
-  const chatFab = document.getElementById('chat-fab');
-  const chatPanel = document.getElementById('chat-panel');
-  if (!authed) {
-    if (aiFab) aiFab.style.display = 'none';
-    if (aiPanel) { aiPanel.style.display = 'none'; aiChatOpen = false; }
-    if (chatFab) chatFab.style.display = 'none';
-    if (chatPanel) { chatPanel.style.display = 'none'; teamChatOpen = false; }
-    const badge = document.getElementById('chat-unread-badge');
-    if (badge) badge.style.display = 'none';
-    return;
-  }
-  if (aiFab) aiFab.style.display = 'flex';
-  // Team chat respects role gating (e.g. finance is excluded).
-  if (chatFab) chatFab.style.display = chatAllowedForCurrentUser() ? 'flex' : 'none';
-}
-// Re-load the country-scoped datasets AFTER login, because init() loads data
-// before currentInternalUser is set — so the first load runs unscoped. Re-running
-// the loaders now that the user (and their country scope) is known guarantees a
-// scoped partner (e.g. Hiro → Philippines) never retains SG/MY rows in memory.
-async function reloadAfterLogin() {
-  try {
-    await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
-    allStandby = scopeStandbyToCountry(allStandby);
-    await loadShifts();
-    await loadCompletedTasks();
-    updateCompletedNavBadge();
-    try { checkReminderAlerts(); } catch(e){}
-    try { updateTasksNavBadge(); } catch(e){}
-  } catch(e) { console.error('reloadAfterLogin failed', e); }
-}
 function getValidInternalSession() {
   try {
     const session = JSON.parse(localStorage.getItem('internal_session') || 'null');
@@ -10494,8 +10465,6 @@ function requireInternalLogin() {
     document.getElementById('main-app').style.display = 'flex';
     document.getElementById('internal-login-modal').classList.remove('open');
     setLoggedInUserLabel();
-    setFloatingWidgetsVisibility();
-    reloadAfterLogin();
     startMessagePolling();
     return;
   }
@@ -10503,7 +10472,6 @@ function requireInternalLogin() {
   localStorage.removeItem('current_internal_user');
   localStorage.removeItem('internal_session');
   setLoggedInUserLabel();
-  setFloatingWidgetsVisibility();
   updateAnnouncementBadge(0);
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('internal-login-modal').classList.add('open');
@@ -10518,7 +10486,6 @@ function internalLogin() {
     localStorage.removeItem('internal_session');
     currentInternalUser = null;
     document.getElementById('main-app').style.display = 'none';
-    setFloatingWidgetsVisibility();
     document.getElementById('internal-login-modal').classList.add('open');
     toast('Wrong passcode', 'error');
     return;
@@ -10529,8 +10496,6 @@ function internalLogin() {
   document.getElementById('internal-login-modal').classList.remove('open');
   document.getElementById('login-pass').value = '';
   setLoggedInUserLabel();
-  setFloatingWidgetsVisibility();
-  reloadAfterLogin();
   startMessagePolling();
   toast(`Welcome, ${user}`);
   if (users[user].mustChange) document.getElementById('change-pass-modal').classList.add('open');
@@ -10542,7 +10507,6 @@ function internalLogout() {
   localStorage.removeItem('current_internal_user');
   localStorage.removeItem('internal_session');
   setLoggedInUserLabel();
-  setFloatingWidgetsVisibility();
   updateAnnouncementBadge(0);
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('internal-login-modal').classList.add('open');
@@ -13835,7 +13799,6 @@ function renderKnowledgePage() {
 let aiHistory  = []; // {role, content} for Claude API
 
 function toggleAIChat() {
-  if (!currentInternalUser) { return; }
   aiChatOpen = !aiChatOpen;
   const panel = document.getElementById('ai-panel');
   panel.style.display = aiChatOpen ? 'flex' : 'none';
@@ -17855,7 +17818,6 @@ function teamChatHide() {
 }
 
 function toggleTeamChat() {
-  if (!currentInternalUser) return;
   if (!chatAllowedForCurrentUser()) return;
   // Opening the chat is a user gesture — use it to unlock the audio context
   // so notification sounds can play even when the tab is later in the background.
@@ -18390,7 +18352,7 @@ async function initTeamChat() {
 <button id="ai-fab" onclick="toggleAIChat()"
   style="position:fixed;bottom:24px;right:24px;width:68px;height:68px;border-radius:50%;
   background:linear-gradient(135deg,var(--teal),var(--accent));border:none;cursor:pointer;
-  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:29px;display:none;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:29px;display:flex;
   align-items:center;justify-content:center;transition:transform 0.2s;"
   onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'">
   🧑‍💼
@@ -18448,7 +18410,7 @@ async function initTeamChat() {
 <button id="chat-fab" onclick="toggleTeamChat()"
   style="position:fixed;bottom:24px;right:104px;width:60px;height:60px;border-radius:50%;
   background:linear-gradient(135deg,#3a7bd5,#3a6073);border:none;cursor:pointer;
-  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:none;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:flex;
   align-items:center;justify-content:center;transition:transform 0.2s;"
   onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'"
   title="Team chat">
