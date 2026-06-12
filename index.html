@@ -17374,40 +17374,53 @@ async function markChatReceipts({ markRead } = { markRead: false }) {
   if (!needDelivered.length && !needRead.length) return;
   _chatReceiptInFlight = true;
   try {
-    // Delivered pass — one UPDATE per message (array_append via rpc-free pattern:
-    // read row, append, write back only if still missing).
+    // Delivered pass. We .select() back the updated row so we can confirm the
+    // write actually landed (RLS or a missing row can make an UPDATE succeed with
+    // zero rows changed — that must not be treated as success).
     for (const m of needDelivered) {
       const next = Array.from(new Set([...(m.delivered_to || []), me]));
-      const { error } = await supabaseClient
-        .from('team_chat').update({ delivered_to: next }).eq('id', m.id);
-      if (!error) m.delivered_to = next; // optimistic local
-      else if (/column .*delivered_to/i.test(error.message||'')) {
-        console.warn('[Chat] delivered_to column missing — run updated SQL:'); console.log(TEAM_CHAT_SCHEMA_SQL); break;
+      const { data, error } = await supabaseClient
+        .from('team_chat').update({ delivered_to: next }).eq('id', m.id).select('id, delivered_to');
+      if (error) {
+        if (/column .*delivered_to/i.test(error.message||'')) {
+          console.warn('[Chat] delivered_to column missing — run updated SQL:'); console.log(TEAM_CHAT_SCHEMA_SQL); break;
+        }
+        console.warn('[Chat] delivered write error:', error.message); continue;
       }
+      if (data && data[0]) m.delivered_to = data[0].delivered_to || next;
+      else console.warn('[Chat] delivered write changed 0 rows (RLS?) for', m.id);
     }
     for (const m of needRead) {
       const nextRead = Array.from(new Set([...(m.read_by || []), me]));
       const nextDel  = Array.from(new Set([...(m.delivered_to || []), me]));
-      const { error } = await supabaseClient
-        .from('team_chat').update({ read_by: nextRead, delivered_to: nextDel }).eq('id', m.id);
-      if (!error) { m.read_by = nextRead; m.delivered_to = nextDel; }
-      else if (/column .*read_by/i.test(error.message||'')) {
-        console.warn('[Chat] read_by column missing — run updated SQL:'); console.log(TEAM_CHAT_SCHEMA_SQL); break;
+      const { data, error } = await supabaseClient
+        .from('team_chat').update({ read_by: nextRead, delivered_to: nextDel }).eq('id', m.id).select('id, read_by, delivered_to');
+      if (error) {
+        if (/column .*read_by/i.test(error.message||'')) {
+          console.warn('[Chat] read_by column missing — run updated SQL:'); console.log(TEAM_CHAT_SCHEMA_SQL); break;
+        }
+        console.warn('[Chat] read write error:', error.message); continue;
       }
+      if (data && data[0]) { m.read_by = data[0].read_by || nextRead; m.delivered_to = data[0].delivered_to || nextDel; }
+      else console.warn('[Chat] read write changed 0 rows (RLS?) for', m.id);
     }
   } catch (e) { console.warn('[Chat] receipt write failed:', e); }
   finally { _chatReceiptInFlight = false; }
 }
 
-// One-tap check: does the read_by column exist, and is read-marking working?
-// Surfaces the real reason "Seen by" isn't showing instead of failing silently.
+// One-tap check: confirms the columns exist AND that this device can actually
+// WRITE a read receipt (RLS-aware), then explains what to expect. Read receipts
+// are two-sided: the READER's device writes the row, so a teammate must be on the
+// new build for their name to ever appear under your messages.
 async function diagnoseChatReceipts() {
   if (!supabaseClient) { toast('No database connection.', 'error'); return; }
-  // Probe the column directly with a select.
+  const me = currentInternalUser || '(not signed in)';
+
+  // 1. Column probe.
   const probe = await supabaseClient.from('team_chat').select('id, read_by, delivered_to').limit(1);
   if (probe.error) {
     if (/column .*(read_by|delivered_to)/i.test(probe.error.message || '')) {
-      toast('Read receipts need a one-time SQL update — see console.', 'error');
+      toast('Columns missing — run the SQL (see console).', 'error');
       console.warn('[Chat] Run this SQL in Supabase to enable “Seen by”:');
       console.log(`alter table team_chat add column if not exists delivered_to text[] not null default '{}';
 alter table team_chat add column if not exists read_by text[] not null default '{}';`);
@@ -17416,19 +17429,38 @@ alter table team_chat add column if not exists read_by text[] not null default '
     toast('Chat check failed: ' + probe.error.message, 'error');
     return;
   }
-  // Columns exist. Force a read-mark now and report how many were updated.
-  const me = currentInternalUser;
+
+  // 2. Real write test: pick the newest recent message from someone else and try
+  //    to add myself to its read_by, verifying the row actually changes.
   const recent = teamChatRecent().filter(m => m.id && !String(m.id).startsWith('tmp-') && m.sender !== me);
-  const unread = recent.filter(m => !(m.read_by || []).includes(me));
+  if (!recent.length) {
+    toast('Columns OK ✓ — but no messages from others in the last 48h to test on yet.');
+    return;
+  }
+  const target = recent[recent.length - 1];
+  const nextRead = Array.from(new Set([...(target.read_by || []), me]));
+  const { data, error } = await supabaseClient
+    .from('team_chat').update({ read_by: nextRead }).eq('id', target.id).select('id, read_by');
+
+  if (error) {
+    toast('Write blocked: ' + error.message, 'error');
+    console.warn('[Chat] diagnostic write error:', error);
+    return;
+  }
+  if (!data || !data[0]) {
+    // UPDATE succeeded but changed 0 rows → almost always an RLS UPDATE policy gap.
+    toast('Columns exist but the write changed 0 rows — RLS is blocking UPDATEs. See console for the fix.', 'error');
+    console.warn('[Chat] read_by write changed 0 rows — add a permissive UPDATE policy:');
+    console.log(`drop policy if exists "team_chat_all" on team_chat;
+create policy "team_chat_all" on team_chat for all using (true) with check (true);`);
+    return;
+  }
+
+  // Success — sync local + re-render.
+  target.read_by = data[0].read_by || nextRead;
   await markChatReceipts({ markRead: true });
   if (teamChatOpen) renderTeamChatMessages();
-  if (!recent.length) {
-    toast('Read receipts are set up ✓ — no messages from others in the last 48h to mark yet.');
-  } else if (unread.length) {
-    toast(`Read receipts working ✓ — marked ${unread.length} message(s) as read by you. Teammates will see “Seen by ${me}” shortly.`);
-  } else {
-    toast('Read receipts are set up ✓ — you’ve already read everything recent. Have a teammate open the app to see “Seen by …” appear on your messages.');
-  }
+  toast(`Write works ✓ — “${me}” recorded as a reader. NOTE: your teammates must REFRESH their app (Cmd+Shift+R) for THEIR name to appear under your messages — the reader's device writes the receipt.`, 'info');
 }
 
 // Who counts as "the team" for read receipts — everyone except me who could be
