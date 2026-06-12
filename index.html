@@ -2312,8 +2312,19 @@ const INTERNAL_USER_ACCOUNTS = [
   { username:'McBilly', passcode:'9182637450', role:'ops' },
   { username:'Yra', passcode:'3749501826', role:'ops' },
   { username:'Niro', passcode:'6839172045', role:'ops' },
-  { username:'Emmanuel', passcode:'DaantpWBq2niv5', role:'finance' }
+  { username:'Emmanuel', passcode:'DaantpWBq2niv5', role:'finance' },
+  { username:'Hiro', passcode:'PH4465865', role:'ph_partner' }
 ];
+// Countries a user is allowed to see. Empty/undefined = all countries (no scope).
+// ph_partner (Hiro) is locked to the Philippines only — he never sees SG/MY data,
+// outlets, workers, shifts, standby, cancellations, reports, billing or finance.
+const USER_COUNTRY_SCOPE = {
+  'Hiro': 'Philippines'
+};
+function countryScopeForUser(u) { return USER_COUNTRY_SCOPE[u] || null; }
+function currentCountryScope() { return countryScopeForUser(currentInternalUser); }
+// True when the logged-in user is restricted to a single country (e.g. Hiro → PH).
+function isCountryScoped() { return !!currentCountryScope(); }
 const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
 // Role per username, used for nav gating. owner = Jon (sees everything incl. Expenses);
 // finance = Emmanuel (Finance Dashboard + own Salary only, no ops pages);
@@ -2344,7 +2355,8 @@ const TEAM_WHATSAPP = {
   'Jayden':  '6598242977',
   'Yra':     '639454803292',
   'Jon':     '6583416027',
-  'Emmanuel': ''
+  'Emmanuel': '',
+  'Hiro':    '6594465865'
 };
 const INTERNAL_LOGIN_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -2742,6 +2754,10 @@ async function init() {
   seedInternalUsers();
   updateDateLabel();
   await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
+  // loadStandbyList may have run before loadWorkers/loadOutlets resolved (parallel),
+  // so re-apply country scoping now that allWorkers/allOutlets are populated. This
+  // guarantees a PH-scoped partner never sees SG/MY standby rows.
+  allStandby = scopeStandbyToCountry(allStandby);
   await loadShifts();
   // Pull team-wide worker/outlet profile metadata (bans, restrictions, notes)
   // from Supabase, overlaying the localStorage bootstrap. Refresh dependent
@@ -3706,6 +3722,13 @@ function setAttendanceView(view) {
 
 // ── Page switching ────────────────────────────────────────────
 function switchPage(name, btn) {
+  // Hard guard: the PH partner (Hiro) may only open whitelisted Philippine-scoped
+  // pages. Any attempt to reach finance, expenses, salary, billing, import,
+  // rates, activity log or chat history is blocked and redirected to attendance.
+  if (currentUserRole() === 'ph_partner' && !PH_PARTNER_PAGES.includes(name)) {
+    name = 'attendance';
+    btn = navButtonForPage('attendance') || btn;
+  }
   document.querySelectorAll('.main > div').forEach(d => d.style.display = 'none');
   const page = document.getElementById('page-' + name);
   page.style.display = 'block';
@@ -4125,6 +4148,36 @@ function currencySymbolForOutlet(outletName) { return currencySymbolForCountry(o
 function moneyForCountry(n, country) { return currencySymbolForCountry(country) + Number(n || 0).toFixed(2); }
 function moneyForShift(n, s) { return moneyForCountry(n, s?.country || outletCountry(s?.outlet)); }
 function countryForShift(s) { return normaliseCountry(s?.country || outletCountry(s?.outlet)); }
+
+// ── Country-scoped access (PH partner / Hiro) ───────────────────
+// When the logged-in user is locked to a single country, strip every other
+// country's records out of the in-memory arrays right after they load, so all
+// downstream renders (attendance, workers, outlets, standby, reports, analytics,
+// billing, tasks, finance) only ever see the permitted country's data.
+function scopeOutletsToCountry(list) {
+  const scope = currentCountryScope();
+  if (!scope) return list;
+  return (list || []).filter(o => normaliseCountry(o.country) === scope);
+}
+function scopeWorkersToCountry(list) {
+  const scope = currentCountryScope();
+  if (!scope) return list;
+  return (list || []).filter(w => normaliseCountry(w.country) === scope);
+}
+function scopeShiftsToCountry(list) {
+  const scope = currentCountryScope();
+  if (!scope) return list;
+  return (list || []).filter(s => countryForShift(s) === scope);
+}
+function scopeStandbyToCountry(list) {
+  const scope = currentCountryScope();
+  if (!scope) return list;
+  return (list || []).filter(r => {
+    const c = normaliseCountry(r.country || r.preferred_country || outletCountry(r.outlet) || workerCountry(r.worker_name || r.name));
+    // If a standby row has no resolvable country, keep it only when unscoped.
+    return c === scope;
+  });
+}
 function splitAmountsByCountry(rows, amountFn) {
   return rows.reduce((acc, s) => {
     const country = countryForShift(s);
@@ -4587,7 +4640,7 @@ function isWorkerSuspended(workerName) {
 // ── Load data ─────────────────────────────────────────────────
 async function loadOutlets() {
   const { data } = await supabaseClient.from('outlets').select('*').order('name');
-  allOutlets = data || [];
+  allOutlets = scopeOutletsToCountry(data || []);
   allOutlets.forEach(o => ensureOutletRates(o.name));
   const sel = document.getElementById('outlet-filter');
   const fsel = document.getElementById('f-outlet');
@@ -4609,6 +4662,7 @@ async function loadWorkers() {
     const recent = (clog || []).filter(c => c.worker_name === w.name && new Date(c.cancelled_at) >= cutoff).length;
     return { ...w, _recent_cancellations: recent };
   });
+  allWorkers = scopeWorkersToCountry(allWorkers);
   const dl = document.getElementById('worker-datalist');
   updateWorkerDatalist();
   if (document.getElementById('sr-worker')) populateSRWorkerSelect();
@@ -4741,6 +4795,8 @@ async function loadStandbyList() {
     console.warn('Standby list: could not load from Supabase, using this device only:', e?.message || e);
     allStandby = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
   }
+  // Country-scope (PH partner only sees PH standby workers/slots).
+  allStandby = scopeStandbyToCountry(allStandby);
 }
 
 function saveStandbyLocal(record) {
@@ -4916,6 +4972,10 @@ async function loadCancellationLogsForCurrentView() {
     const { data, error } = await q;
     if (error) throw error;
     allCancellations = data || [];
+    if (isCountryScoped()) {
+      const allowed = new Set(allWorkers.map(w => String(w.name || '').toLowerCase()));
+      allCancellations = allCancellations.filter(c => allowed.has(String(c.worker_name || '').toLowerCase()));
+    }
   } catch (e) {
     allCancellations = [];
   }
@@ -4935,6 +4995,10 @@ async function loadRecentCancellations() {
       .limit(200);
     if (error) throw error;
     allCancellationsRecent = data || [];
+    if (isCountryScoped()) {
+      const allowed = new Set(allWorkers.map(w => String(w.name || '').toLowerCase()));
+      allCancellationsRecent = allCancellationsRecent.filter(c => allowed.has(String(c.worker_name || '').toLowerCase()));
+    }
   } catch (e) {
     allCancellationsRecent = [];
   }
@@ -5465,7 +5529,7 @@ async function loadShifts() {
   }
   if (outlet) q = q.eq('outlet', outlet);
   const { data } = await q;
-  allShifts = data || [];
+  allShifts = scopeShiftsToCountry(data || []);
   // Seed localStorage from DB payroll_notes so comments show without needing to re-save
   (allShifts).forEach(s => {
     if (s.payroll_notes && !shiftComments[String(s.id)]) {
@@ -5535,7 +5599,7 @@ async function loadTaskShiftCache() {
 function taskShiftPool() {
   const pool = Object.assign({}, taskShiftCache);
   (allShifts || []).forEach(s => { if (s && s.id != null) pool[String(s.id)] = s; });
-  return Object.values(pool);
+  return scopeShiftsToCountry(Object.values(pool));
 }
 
 // ── Completed Tasks log ───────────────────────────────────────
@@ -5656,7 +5720,7 @@ async function loadAvailableSlots() {
       .order('shift_date', { ascending: true })
       .order('scheduled_start', { ascending: true })
       .limit(2000);
-    if (!error && Array.isArray(data)) availableSlots = data.filter(isOpenSlot);
+    if (!error && Array.isArray(data)) availableSlots = scopeShiftsToCountry(data.filter(isOpenSlot));
   } catch(e) { /* keep whatever we have */ }
   return availableSlots;
 }
@@ -10149,7 +10213,7 @@ async function _fetchWorkerShifts(name) {
     .order('shift_date', { ascending: false })
     .order('scheduled_start', { ascending: false });
   if (error) { console.warn('[Worker detail] query failed', error); return []; }
-  return data || [];
+  return scopeShiftsToCountry(data || []);
 }
 async function _fetchOutletShifts(outletName) {
   const { data, error } = await supabaseClient
@@ -10448,10 +10512,25 @@ function changeInternalPasscode() {
   toast('Passcode changed');
 }
 function fillInternalUserSelects() {
+  const isPhPartner = currentUserRole() === 'ph_partner';
   ['incident-assignee','msg-to'].forEach(id => {
     const el = document.getElementById(id); if (!el) return;
-    const first = id === 'msg-to' ? '<option value="GROUP">Group message - everyone</option>' : '';
-    el.innerHTML = first + INTERNAL_USERS.map(u => `<option>${u}</option>`).join('');
+    if (id === 'msg-to') {
+      if (isPhPartner) {
+        // The PH partner can only post to the PH Ops channel.
+        el.innerHTML = '<option value="PH Ops">PH Ops — Philippine Operations</option>';
+      } else {
+        // Owner/ops/finance: Group, the PH Ops channel, then each teammate.
+        // Hiro is intentionally NOT listed as an individual recipient — he is
+        // only reachable (and only sees) the PH Ops channel.
+        const people = INTERNAL_USERS.filter(u => countryScopeForUser(u) == null);
+        el.innerHTML = '<option value="GROUP">Group message - everyone</option>'
+          + '<option value="PH Ops">PH Ops — Philippine Operations</option>'
+          + people.map(u => `<option>${u}</option>`).join('');
+      }
+    } else {
+      el.innerHTML = INTERNAL_USERS.map(u => `<option>${u}</option>`).join('');
+    }
   });
 }
 
@@ -10489,6 +10568,18 @@ async function loadIncidents() {
   if (error) { document.getElementById('incidents-body').innerHTML = `<div class="empty-state"><p>${error.message}</p><p class="sub-text">Run the SQL patch if the incidents table is not created yet.</p></div>`; return; }
   if (updatesError) { console.warn('Incident updates not loaded:', updatesError.message); }
   allIncidents = data || [];
+  // Country-scope: the PH partner only sees incidents linked to a Philippine outlet
+  // (or unlinked incidents he raised himself). SG/MY incidents stay hidden.
+  if (isCountryScoped()) {
+    const me = currentInternalUser;
+    const phOutlets = new Set(allOutlets.map(o => String(o.name || '').toLowerCase()));
+    allIncidents = allIncidents.filter(i => {
+      const linked = String(i.outlet || '').toLowerCase();
+      if (linked) return phOutlets.has(linked);
+      // Unlinked incident: only show if this partner created/assigned it.
+      return i.created_by === me || i.assigned_to === me;
+    });
+  }
   allIncidentUpdates = updates || [];
   document.getElementById('incident-count').textContent = `${allIncidents.length} incident${allIncidents.length!==1?'s':''}`;
   const msgIncident = document.getElementById('msg-incident');
@@ -10570,10 +10661,20 @@ async function sendAnnouncementWhatsApp(msg, recipient) {
   const pk = getPeriskopeConfig();
   if (!pk?.apikey || !pk?.phone) { toast('⚠️ WhatsApp not sent — Periskope isn’t configured on this device yet. Open WhatsApp settings once so it can sync the team key.', 'error'); return; }
   const sender = currentInternalUser || 'Jon';
-  // Who receives it: GROUP → everyone except the sender; otherwise the single recipient.
-  const targets = (recipient === 'GROUP')
-    ? INTERNAL_USERS.filter(u => u !== sender)
-    : INTERNAL_USERS.filter(u => u === recipient);
+  // Who receives it over WhatsApp:
+  //  • GROUP   → everyone except the sender, EXCLUDING the PH partner (Hiro never
+  //              gets general/group announcements).
+  //  • PH Ops  → the Philippine-Operations members (country-scoped users, e.g. Hiro),
+  //              excluding the sender.
+  //  • else    → the single named recipient.
+  let targets;
+  if (recipient === 'GROUP') {
+    targets = INTERNAL_USERS.filter(u => u !== sender && countryScopeForUser(u) == null);
+  } else if (recipient === 'PH Ops') {
+    targets = INTERNAL_USERS.filter(u => u !== sender && countryScopeForUser(u) === 'Philippines');
+  } else {
+    targets = INTERNAL_USERS.filter(u => u === recipient);
+  }
   const waText = (name) =>
     `📢 *Announcement from ${sender}*\n\n${msg.body}\n\n— \nReply *ACK* (or *acknowledge*) to confirm you've seen this. It'll show as acknowledged in ShiftOps.`;
 
@@ -10651,11 +10752,34 @@ async function registerAnnouncementAcks(messageId, recipients) {
     toast('⚠️ Sent on WhatsApp, but acknowledgements won’t record until the announcement_acks table is created in Supabase (run the schema SQL).', 'error');
   }
 }
+// Who can see a given announcement.
+//  • "PH Ops" is a dedicated Philippine-Operations channel. The PH partner (Hiro)
+//    sees ONLY PH Ops announcements (plus anything he himself sent) — never GROUP,
+//    never direct messages between other staff, never other channels.
+//  • PH Ops announcements are visible to the PH partner, the owner (Jon), and the
+//    sender. Regular ops/finance staff don't see the PH Ops channel.
+//  • Everyone else keeps the normal rule: GROUP, addressed to them, or sent by them.
+function announcementVisibleTo(m, me) {
+  if (!m) return false;
+  const rec = m.recipient;
+  const myRole = roleForUser(me);
+  if (myRole === 'ph_partner') {
+    // PH partner is locked to the PH Ops channel only (plus his own posts).
+    return rec === 'PH Ops' || m.sender === me;
+  }
+  if (rec === 'PH Ops') {
+    // PH Ops channel: owner + sender only (keeps it a private Jon↔PH-Ops channel).
+    return myRole === 'owner' || m.sender === me;
+  }
+  // Normal announcements.
+  return rec === 'GROUP' || rec === me || m.sender === me;
+}
+
 async function loadMessages() {
   const { data, error } = await supabaseClient.from('internal_messages').select('*').order('created_at', { ascending:false }).limit(100);
   if (error) { const b=document.getElementById('messages-body'); if(b) b.innerHTML = `<div class="empty-state"><p>${error.message}</p><p class="sub-text">Run the SQL patch if the announcements table is not created yet.</p></div>`; return; }
   const me = currentInternalUser || 'Jon';
-  allMessages = (data || []).filter(m => m.recipient === 'GROUP' || m.recipient === me || m.sender === me);
+  allMessages = (data || []).filter(m => announcementVisibleTo(m, me));
   // Merge localStorage ack fallbacks (for when acknowledged_by DB column doesn't exist yet)
   const _ackStore = JSON.parse(localStorage.getItem('msg_acks_v1') || '{}');
   allMessages.forEach(m => { if (_ackStore[String(m.id)]) m.acknowledged_by = [...new Set([...(m.acknowledged_by||[]),..._ackStore[String(m.id)]])]; });
@@ -10792,7 +10916,7 @@ async function refreshAnnouncementBadge() {
   // Merge localStorage ack fallbacks
   const store = JSON.parse(localStorage.getItem('msg_acks_v1') || '{}');
   const unacked = (data || []).filter(m => {
-    if (!(m.recipient === 'GROUP' || m.recipient === me || m.sender === me)) return false;
+    if (!announcementVisibleTo(m, me)) return false;
     if (m.sender === me) return false;
     const ackedBy = [...(m.acknowledged_by || []), ...(store[String(m.id)] || [])];
     return !ackedBy.includes(me);
@@ -10868,8 +10992,9 @@ function populateReportOutletSelect() {
   if (!sel) return;
   const prev = sel.value;
   let html = '<option value="">All outlets</option>';
-  if (outletGroups.length) {
-    html += '<optgroup label="Groups">' + outletGroups
+  const groupsForSelect = visibleOutletGroups();
+  if (groupsForSelect.length) {
+    html += '<optgroup label="Groups">' + groupsForSelect
       .slice()
       .sort((a,b) => String(a.name).localeCompare(String(b.name)))
       .map(g => `<option value="group:${escapeAttr(g.id)}">👥 ${escapeHtml(g.name)} (${(g.outlets||[]).length})</option>`)
@@ -10886,13 +11011,30 @@ function populateReportOutletSelect() {
 // Resolve the report-outlet select value into a list of outlet names to include.
 // '' → null (all outlets); 'group:ID' → that group's outlets; otherwise [single outlet].
 function resolveReportOutlets(selectValue) {
-  if (!selectValue) return null; // All outlets
+  if (!selectValue) return null; // All outlets (already country-scoped via allOutlets/allShifts)
   if (selectValue.startsWith('group:')) {
     const id = selectValue.slice(6);
     const g = outletGroups.find(x => String(x.id) === String(id));
-    return g ? (g.outlets || []).slice() : [];
+    let outlets = g ? (g.outlets || []).slice() : [];
+    // Country-scope: a PH partner's group selection only ever resolves to PH outlets.
+    if (isCountryScoped()) {
+      const allowed = new Set(allOutlets.map(o => String(o.name || '').toLowerCase()));
+      outlets = outlets.filter(n => allowed.has(String(n || '').toLowerCase()));
+    }
+    return outlets;
   }
   return [selectValue];
+}
+// Outlet groups visible to the current user: for a country-scoped partner, hide any
+// group that contains an out-of-scope (SG/MY) outlet, so cross-country group names
+// and bundles are never exposed in the report selector.
+function visibleOutletGroups() {
+  if (!isCountryScoped()) return outletGroups;
+  const allowed = new Set(allOutlets.map(o => String(o.name || '').toLowerCase()));
+  return (outletGroups || []).filter(g =>
+    (g.outlets || []).length > 0 &&
+    (g.outlets || []).every(n => allowed.has(String(n || '').toLowerCase()))
+  );
 }
 
 // Human label for the current report-outlet selection (group name, outlet, or All).
@@ -11074,7 +11216,7 @@ async function generateReport() {
   if (worker && currentReportTab === 'worker') q = q.ilike('worker_name', `%${worker}%`);
   const { data, error } = await q;
   if (error) { toast('Failed to generate report: ' + error.message, 'error'); return; }
-  let rows = data || [];
+  let rows = scopeShiftsToCountry(data || []);
   // Apply multi-outlet (group) membership filter client-side.
   if (outletList && outletList.length > 1 && currentReportTab !== 'worker') {
     const set = new Set(outletList.map(n => String(n).toLowerCase()));
@@ -11099,7 +11241,7 @@ async function generateCancellationReport(from, to, outletList, cancelType, selL
   if (outletList && outletList.length === 1) q = q.eq('outlet', outletList[0]);
   const { data, error } = await q;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
-  let rows = data || [];
+  let rows = scopeShiftsToCountry(data || []);
   // Group (multi-outlet) membership filter client-side.
   if (outletList && outletList.length > 1) {
     const set = new Set(outletList.map(n => String(n).toLowerCase()));
@@ -12987,7 +13129,7 @@ async function loadAnalytics() {
     .order('shift_date');
 
   if (error) { el.innerHTML = `<div class="empty-state">Failed to load: ${error.message}</div>`; return; }
-  const rows = data || [];
+  const rows = scopeShiftsToCountry(data || []);
   renderAnalytics(rows, from, to);
 }
 
@@ -16117,6 +16259,11 @@ function startLeavePolling() {
 // ── Role-based nav + page visibility ─────────────────────────────
 // Ops pages that the finance role should NOT see.
 const OPS_ONLY_PAGES = ['attendance','completed','workers','outlets','rates','standby','import','reports','analytics','incidents','messages','activity','chathistory','knowledge','billing'];
+// Pages the PH partner (Hiro) is allowed to open. Everything else is hidden and
+// blocked. He gets the Philippine-scoped operational views only — no finance,
+// expenses, salary, SGD/Xero billing, bulk import, cross-country activity log,
+// rates config, or cross-country team chat history.
+const PH_PARTNER_PAGES = ['attendance','completed','workers','outlets','standby','reports','analytics','incidents','messages','knowledge'];
 function navButtonForPage(page) {
   return Array.from(document.querySelectorAll('.nav-item')).find(b => {
     const oc = b.getAttribute('onclick') || '';
@@ -16130,6 +16277,35 @@ function applyRoleVisibility() {
   const salNav = document.getElementById('nav-salary');
   const waNav  = document.getElementById('nav-whatsapp');
   const tasksNav = document.querySelector('.nav-item-tasks');
+  const isPhPartner = (role === 'ph_partner');
+
+  // ── PH partner (Hiro): show ONLY the whitelisted Philippine-scoped pages ──
+  if (isPhPartner) {
+    if (finNav) finNav.style.display = 'none';
+    if (expNav) expNav.style.display = 'none';
+    if (salNav) salNav.style.display = 'none';
+    if (waNav)  waNav.style.display = 'none';
+    if (tasksNav) tasksNav.style.display = '';
+    // Hide every ops page that isn't on the PH whitelist.
+    OPS_ONLY_PAGES.forEach(p => {
+      const b = navButtonForPage(p);
+      if (b) b.style.display = PH_PARTNER_PAGES.includes(p) ? '' : 'none';
+    });
+    // Leave nav (separate id) — allowed.
+    const leaveNav = document.getElementById('nav-leave');
+    if (leaveNav) leaveNav.style.display = PH_PARTNER_PAGES.includes('leave') ? '' : 'none';
+    // No cross-country team chat history for the PH partner.
+    try { const chNav = document.querySelector('.nav-item-chathistory'); if (chNav) chNav.style.display = 'none'; } catch(e){}
+    try { updateLeaveNavBadge(); } catch(e){}
+    // Redirect to a safe PH page if the current page isn't allowed.
+    const visiblePage = Array.from(document.querySelectorAll('.main > div')).find(d => d.style.display === 'block');
+    const currentPageId = visiblePage ? visiblePage.id.replace('page-','') : null;
+    if (!currentPageId || !PH_PARTNER_PAGES.includes(currentPageId)) {
+      const btn = navButtonForPage('attendance');
+      if (btn) switchPage('attendance', btn);
+    }
+    return;
+  }
 
   // Finance Dashboard: owner + finance
   if (finNav) finNav.style.display = (role === 'owner' || role === 'finance') ? '' : 'none';
