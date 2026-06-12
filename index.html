@@ -639,6 +639,54 @@ tr:hover td { background: rgba(91,148,249,0.045); }
   .metric-card { padding: 11px; }
   .metric-val { font-size: 20px; }
 }
+
+/* ── Team chat widget ─────────────────────────────────────────── */
+#chat-unread-badge {
+  position: absolute; top: -3px; right: -3px; min-width: 20px; height: 20px;
+  padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff;
+  font-size: 11px; font-weight: 700; font-family: var(--mono);
+  display: none; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px var(--bg2);
+}
+.chat-day-divider { text-align: center; margin: 6px 0; position: relative; }
+.chat-day-divider span {
+  font-size: 10px; color: var(--text3); background: var(--bg2);
+  padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border2);
+}
+.chat-bubble-row { display: flex; width: 100%; }
+.chat-bubble-row.mine { justify-content: flex-end; }
+.chat-bubble-row.theirs { justify-content: flex-start; }
+.chat-bubble {
+  max-width: 80%; padding: 7px 11px; border-radius: 12px; font-size: 12.5px;
+  line-height: 1.45; word-break: break-word; position: relative;
+}
+.chat-bubble.theirs { background: var(--bg3); color: var(--text); border-bottom-left-radius: 3px; }
+.chat-bubble.mine { background: var(--teal); color: #fff; border-bottom-right-radius: 3px; }
+.chat-sender { font-size: 10.5px; font-weight: 700; color: var(--accent); margin-bottom: 2px; }
+.chat-bubble .chat-body { white-space: pre-wrap; }
+.chat-bubble .chat-time {
+  font-size: 9.5px; opacity: 0.65; margin-top: 3px; text-align: right;
+}
+.chat-bubble.theirs .chat-time { color: var(--text3); }
+/* History page */
+.chat-hist-day {
+  font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 12px 16px 4px; position: sticky; top: 0;
+  background: var(--bg2); z-index: 1;
+}
+.chat-hist-row {
+  display: grid; grid-template-columns: 90px 1fr auto; gap: 10px; align-items: baseline;
+  padding: 6px 16px; border-bottom: 1px solid var(--border); font-size: 12.5px;
+}
+.chat-hist-row:hover { background: var(--bg3); }
+.chat-hist-sender { font-weight: 700; color: var(--teal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-hist-body { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.chat-hist-time { color: var(--text3); font-size: 11px; white-space: nowrap; font-family: var(--mono); }
+@media (max-width: 760px) {
+  #chat-panel { left: 8px !important; right: 8px !important; bottom: 84px !important; top: auto !important; width: auto !important; }
+  .chat-hist-row { grid-template-columns: 1fr; gap: 2px; }
+  .chat-hist-time { grid-row: 1; justify-self: end; }
+}
 </style>
 </head>
 <body>
@@ -720,6 +768,9 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       <button class="nav-item" onclick="switchPage('activity',this)">
         <span class="nav-icon">🕘</span> Activity Log
       </button>
+      <button class="nav-item nav-item-chathistory" onclick="switchPage('chathistory',this)">
+        <span class="nav-icon">💬</span> Chat History
+      </button>
       <button class="nav-item" onclick="switchPage('knowledge',this)">
         <span class="nav-icon">📚</span> Business Knowledge
       </button>
@@ -735,7 +786,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       </button>
       <button class="nav-item" id="nav-leave" onclick="switchPage('leave',this)">
         <span class="nav-icon">🌴</span><span class="nav-label">Leave Calendar</span>
-        <span class="nav-badge" id="leave-nav-badge" style="background:var(--amber);display:none;" title="Pending leave requests awaiting approval">0</span>
+        <span class="nav-badge" id="leave-nav-badge" style="background:var(--amber);" title="Pending leave requests awaiting approval">0</span>
       </button>
       <button class="nav-item" id="nav-salary" onclick="switchPage('salary',this)" style="display:none;">
         <span class="nav-icon">💸</span><span class="nav-label">My Salary</span>
@@ -1054,6 +1105,19 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         <div class="table-wrap">
           <div class="table-header"><span class="table-title">Recent activity</span><span class="table-count" id="activity-count"></span></div>
           <div id="activity-body"><div class="empty-state"><div class="empty-icon">🕘</div><p>No activity yet.</p></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="page-chathistory" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left"><h2>💬 Chat History</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Full team chat archive. The floating chat shows the last 48 hours; everything is kept here.</p></div>
+        <div class="topbar-right"><button class="btn btn-ghost btn-sm" onclick="renderChatHistoryPage()">↻ Refresh</button></div>
+      </div>
+      <div class="content">
+        <div class="table-wrap">
+          <div class="table-header"><span class="table-title">All messages</span><span class="table-count" id="chat-history-count"></span></div>
+          <div id="chat-history-body"><div class="empty-state"><div class="spinner"></div></div></div>
         </div>
       </div>
     </div>
@@ -2689,6 +2753,8 @@ async function init() {
   // approvals / new requests appear cross-device without a reload.
   loadLeaveRequests().then(() => { updateLeaveNavBadge(); }).catch(()=>{});
   startLeavePolling();
+  // Team chat: load history, wire dragging, start near-live polling + unread badge.
+  initTeamChat().catch(()=>{});
   checkReminderAlerts();
   updateTasksNavBadge();
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
@@ -3632,6 +3698,7 @@ function switchPage(name, btn) {
   if (name === 'incidents') loadIncidents();
   if (name === 'messages') loadMessagesPage();
   if (name === 'activity') { loadActivityLog(); }
+  if (name === 'chathistory') { renderChatHistoryPage(); }
   if (name === 'completed') { loadCompletedTasks().then(() => renderCompletedTasksPage()); }
   if (name === 'knowledge') { renderKnowledgePage(); }
   if (name === 'analytics') { loadAnalytics(); }
@@ -15947,10 +16014,12 @@ function escapeLeave(s) {
 function updateLeaveNavBadge() {
   const badge = document.getElementById('leave-nav-badge');
   if (!badge) return;
-  if (!isOwnerUser()) { badge.style.display = 'none'; return; }
+  // Clear the inline display:none baked into the markup so the .show class can win.
+  badge.style.display = '';
+  if (!isOwnerUser()) { badge.classList.remove('show'); return; }
   const n = leaveRequests.filter(r => r.status === 'pending').length;
-  if (n > 0) { badge.textContent = n; badge.style.display = ''; }
-  else badge.style.display = 'none';
+  badge.textContent = n;
+  badge.classList.toggle('show', n > 0);
 }
 
 // Background sync so approvals/new requests appear without a manual reload.
@@ -15968,7 +16037,7 @@ function startLeavePolling() {
 
 // ── Role-based nav + page visibility ─────────────────────────────
 // Ops pages that the finance role should NOT see.
-const OPS_ONLY_PAGES = ['attendance','completed','workers','outlets','rates','standby','import','reports','analytics','incidents','messages','activity','knowledge','billing'];
+const OPS_ONLY_PAGES = ['attendance','completed','workers','outlets','rates','standby','import','reports','analytics','incidents','messages','activity','chathistory','knowledge','billing'];
 function navButtonForPage(page) {
   return Array.from(document.querySelectorAll('.nav-item')).find(b => {
     const oc = b.getAttribute('onclick') || '';
@@ -16000,6 +16069,12 @@ function applyRoleVisibility() {
   if (tasksNav) tasksNav.style.display = hideOps ? 'none' : '';
   // Leave Calendar is available to everyone; its pending-count badge is owner-only.
   try { updateLeaveNavBadge(); } catch(e){}
+  // Team chat widget + Chat History are ops/owner only; hide for finance.
+  try { updateChatUnreadBadge(); } catch(e){}
+  try {
+    const chNav = document.querySelector('.nav-item-chathistory');
+    if (chNav) chNav.style.display = (role === 'finance') ? 'none' : '';
+  } catch(e){}
 
   // If the currently shown page is not allowed for this role, redirect to a safe landing page.
   const landing = (role === 'finance') ? 'finance' : 'attendance';
@@ -17052,6 +17127,363 @@ async function saveSalaryProfile() {
   renderSalaryPage();
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+//  TEAM CHAT  —  movable popup, owner + ops only (finance excluded)
+//  Messages live in Supabase table `team_chat`. The popup shows the
+//  last 48h; anything older rolls into the "Chat History" sidebar page.
+// ══════════════════════════════════════════════════════════════════
+
+// Run this SQL in Supabase if the table doesn't exist yet:
+const TEAM_CHAT_SCHEMA_SQL = `create table if not exists team_chat (
+  id uuid primary key default gen_random_uuid(),
+  sender text not null,
+  body text not null,
+  created_at timestamptz not null default now()
+);
+alter table team_chat enable row level security;
+create policy "team_chat_all" on team_chat for all using (true) with check (true);`;
+
+let teamChatMessages = [];        // cached rows (newest-last)
+let teamChatOpen = false;
+let teamChatPollTimer = null;
+let teamChatLastSeenId = localStorage.getItem('team_chat_last_seen') || null;
+let teamChatLastSeenTs = localStorage.getItem('team_chat_last_seen_ts') || null;
+const TEAM_CHAT_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+// Finance role must never see or use the chat.
+function chatAllowedForCurrentUser() {
+  const role = (typeof currentUserRole === 'function') ? currentUserRole() : 'ops';
+  return role === 'owner' || role === 'ops';
+}
+
+function chatTimeLabel(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const t = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  if (sameDay) return t;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Yesterday ' + t;
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' ' + t;
+}
+
+function chatDayLabel(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return 'Today';
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+// Pull all chat rows (we keep history too; the popup just filters to 48h).
+async function loadTeamChat() {
+  if (!supabaseClient) { teamChatMessages = []; return; }
+  try {
+    const { data, error } = await supabaseClient
+      .from('team_chat')
+      .select('*')
+      .order('created_at', { ascending: true })
+      .limit(1000);
+    if (error) {
+      if (/relation .*does not exist/i.test(error.message || '')) {
+        console.warn('[Chat] team_chat table missing. Run setup SQL:');
+        console.log(TEAM_CHAT_SCHEMA_SQL);
+      } else {
+        console.warn('[Chat] load error:', error.message || error);
+      }
+      return;
+    }
+    teamChatMessages = data || [];
+  } catch (e) {
+    console.warn('[Chat] load exception:', e);
+  }
+}
+
+// Messages within the rolling 48h window (shown in the popup).
+function teamChatRecent() {
+  const cutoff = Date.now() - TEAM_CHAT_WINDOW_MS;
+  return teamChatMessages.filter(m => new Date(m.created_at).getTime() >= cutoff);
+}
+
+// Unread = recent messages from someone else, newer than what we last saw.
+function teamChatUnreadCount() {
+  if (!chatAllowedForCurrentUser()) return 0;
+  const me = currentInternalUser;
+  const seenTs = teamChatLastSeenTs ? new Date(teamChatLastSeenTs).getTime() : 0;
+  return teamChatRecent().filter(m =>
+    m.sender !== me && new Date(m.created_at).getTime() > seenTs
+  ).length;
+}
+
+function updateChatUnreadBadge() {
+  const fab = document.getElementById('chat-fab');
+  const badge = document.getElementById('chat-unread-badge');
+  if (!fab || !badge) return;
+  // Hide the whole widget for finance.
+  if (!chatAllowedForCurrentUser()) {
+    fab.style.display = 'none';
+    const panel = document.getElementById('chat-panel');
+    if (panel) { panel.style.display = 'none'; teamChatOpen = false; }
+    badge.style.display = 'none';
+    return;
+  }
+  fab.style.display = 'flex';
+  const n = teamChatUnreadCount();
+  if (n > 0 && !teamChatOpen) {
+    badge.textContent = n > 99 ? '99+' : String(n);
+    badge.style.display = 'flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function markChatSeen() {
+  const recent = teamChatRecent();
+  const last = recent[recent.length - 1];
+  if (last) {
+    teamChatLastSeenId = last.id;
+    teamChatLastSeenTs = last.created_at;
+    localStorage.setItem('team_chat_last_seen', String(last.id));
+    localStorage.setItem('team_chat_last_seen_ts', String(last.created_at));
+  } else {
+    // No recent messages — mark "now" so future ones count as unread.
+    teamChatLastSeenTs = new Date().toISOString();
+    localStorage.setItem('team_chat_last_seen_ts', teamChatLastSeenTs);
+  }
+  updateChatUnreadBadge();
+}
+
+function renderTeamChatMessages() {
+  const wrap = document.getElementById('chat-messages');
+  if (!wrap) return;
+  const recent = teamChatRecent();
+  if (!recent.length) {
+    wrap.innerHTML = `<div style="margin:auto;text-align:center;color:var(--text3);font-size:12px;padding:24px 12px;">
+      No messages in the last 48 hours.<br>Say hi to the team 👋<br>
+      <span style="font-size:11px;">Older messages live in <b>Chat History</b> in the sidebar.</span></div>`;
+    return;
+  }
+  const me = currentInternalUser;
+  let html = '';
+  let lastDay = '';
+  recent.forEach(m => {
+    const day = chatDayLabel(m.created_at);
+    if (day !== lastDay) {
+      html += `<div class="chat-day-divider"><span>${escapeHtml(day)}</span></div>`;
+      lastDay = day;
+    }
+    const mine = m.sender === me;
+    html += `<div class="chat-bubble-row ${mine ? 'mine' : 'theirs'}">
+      <div class="chat-bubble ${mine ? 'mine' : 'theirs'}">
+        ${mine ? '' : `<div class="chat-sender">${escapeHtml(m.sender || '?')}</div>`}
+        <div class="chat-body">${escapeHtml(m.body || '')}</div>
+        <div class="chat-time">${chatTimeLabel(m.created_at)}</div>
+      </div>
+    </div>`;
+  });
+  wrap.innerHTML = html;
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function sendTeamChat() {
+  const input = document.getElementById('chat-input');
+  if (!input) return;
+  const body = input.value.trim();
+  if (!body) return;
+  if (!chatAllowedForCurrentUser()) { toast('Chat is for the ops team.', 'error'); return; }
+  if (!supabaseClient) { toast('No database connection', 'error'); return; }
+  const sender = currentInternalUser || 'Unknown';
+  input.value = '';
+  input.style.height = 'auto';
+
+  // Optimistic echo so it feels instant.
+  const optimistic = { id: 'tmp-' + Date.now(), sender, body, created_at: new Date().toISOString() };
+  teamChatMessages.push(optimistic);
+  renderTeamChatMessages();
+
+  try {
+    const { data, error } = await supabaseClient
+      .from('team_chat')
+      .insert({ sender, body })
+      .select();
+    if (error) {
+      // Roll back optimistic message and surface the real reason (no silent fallback).
+      teamChatMessages = teamChatMessages.filter(m => m.id !== optimistic.id);
+      renderTeamChatMessages();
+      if (/relation .*does not exist/i.test(error.message || '')) {
+        toast('Chat table missing — run the setup SQL (see console).', 'error');
+        console.log(TEAM_CHAT_SCHEMA_SQL);
+      } else if (/row-level security|permission|policy/i.test(error.message || '')) {
+        toast('Chat insert blocked by RLS — add a permissive policy (see console).', 'error');
+        console.log(TEAM_CHAT_SCHEMA_SQL);
+      } else {
+        toast('Could not send: ' + (error.message || 'unknown error'), 'error');
+      }
+      return;
+    }
+    // Replace the temp row with the real one.
+    if (data && data[0]) {
+      teamChatMessages = teamChatMessages.filter(m => m.id !== optimistic.id);
+      teamChatMessages.push(data[0]);
+    }
+    markChatSeen();
+    renderTeamChatMessages();
+  } catch (e) {
+    teamChatMessages = teamChatMessages.filter(m => m.id !== optimistic.id);
+    renderTeamChatMessages();
+    toast('Could not send (network).', 'error');
+  }
+}
+
+function teamChatShow() {
+  const panel = document.getElementById('chat-panel');
+  if (!panel) return;
+  teamChatOpen = true;
+  panel.style.display = 'flex';
+  renderTeamChatMessages();
+  markChatSeen();
+  setTimeout(() => document.getElementById('chat-input')?.focus(), 50);
+}
+
+function teamChatHide() {
+  const panel = document.getElementById('chat-panel');
+  if (!panel) return;
+  teamChatOpen = false;
+  panel.style.display = 'none';
+  updateChatUnreadBadge();
+}
+
+function toggleTeamChat() {
+  if (!chatAllowedForCurrentUser()) return;
+  if (teamChatOpen) teamChatHide();
+  else teamChatShow();
+}
+
+// Auto-grow the input as the user types.
+function chatInputResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 90) + 'px';
+}
+
+// ── Drag-to-move (mirrors a draggable floating window) ───────────────
+function initChatDrag() {
+  const panel = document.getElementById('chat-panel');
+  const handle = document.getElementById('chat-drag-handle');
+  if (!panel || !handle) return;
+  let dragging = false, sx = 0, sy = 0, startLeft = 0, startTop = 0;
+
+  function onDown(e) {
+    // Don't start a drag from the close button.
+    if (e.target.closest('#chat-close-btn')) return;
+    dragging = true;
+    const pt = e.touches ? e.touches[0] : e;
+    const rect = panel.getBoundingClientRect();
+    // Switch from right/bottom anchoring to left/top so we can move freely.
+    panel.style.left = rect.left + 'px';
+    panel.style.top = rect.top + 'px';
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    startLeft = rect.left; startTop = rect.top;
+    sx = pt.clientX; sy = pt.clientY;
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('touchend', onUp);
+    e.preventDefault();
+  }
+  function onMove(e) {
+    if (!dragging) return;
+    const pt = e.touches ? e.touches[0] : e;
+    let nl = startLeft + (pt.clientX - sx);
+    let nt = startTop + (pt.clientY - sy);
+    // Keep it on screen.
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    nl = Math.max(6, Math.min(nl, window.innerWidth - w - 6));
+    nt = Math.max(6, Math.min(nt, window.innerHeight - h - 6));
+    panel.style.left = nl + 'px';
+    panel.style.top = nt + 'px';
+    if (e.cancelable) e.preventDefault();
+  }
+  function onUp() {
+    dragging = false;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('touchend', onUp);
+  }
+  handle.addEventListener('mousedown', onDown);
+  handle.addEventListener('touchstart', onDown, { passive: false });
+}
+
+// ── Chat History sidebar page (everything, grouped by day) ───────────
+async function renderChatHistoryPage() {
+  const body = document.getElementById('chat-history-body');
+  const countEl = document.getElementById('chat-history-count');
+  if (!body) return;
+  await loadTeamChat();
+  const msgs = teamChatMessages.slice().reverse(); // newest first
+  if (countEl) countEl.textContent = `${teamChatMessages.length} message${teamChatMessages.length === 1 ? '' : 's'}`;
+  if (!msgs.length) {
+    body.innerHTML = `<div class="empty-state"><div class="empty-icon">💬</div><p>No chat history yet.</p></div>`;
+    return;
+  }
+  const me = currentInternalUser;
+  let html = '<div style="padding:8px 0;">';
+  let lastDay = '';
+  // Render oldest-first within each day for readability, but days newest-first.
+  const chrono = teamChatMessages.slice();
+  let buf = [];
+  let curDay = '';
+  const flush = () => {
+    if (!buf.length) return;
+    html += `<div class="chat-hist-day">${escapeHtml(curDay)}</div>`;
+    buf.forEach(m => {
+      html += `<div class="chat-hist-row">
+        <span class="chat-hist-sender">${escapeHtml(m.sender || '?')}</span>
+        <span class="chat-hist-body">${escapeHtml(m.body || '')}</span>
+        <span class="chat-hist-time">${new Date(m.created_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
+      </div>`;
+    });
+    buf = [];
+  };
+  chrono.forEach(m => {
+    const day = chatDayLabel(m.created_at);
+    if (day !== curDay) { flush(); curDay = day; }
+    buf.push(m);
+  });
+  flush();
+  html += '</div>';
+  body.innerHTML = html;
+}
+
+// ── Background sync ──────────────────────────────────────────────────
+function startTeamChatPolling() {
+  if (teamChatPollTimer) clearInterval(teamChatPollTimer);
+  teamChatPollTimer = setInterval(async () => {
+    if (!currentInternalUser || !supabaseClient) return;
+    if (!chatAllowedForCurrentUser()) return;
+    await loadTeamChat();
+    updateChatUnreadBadge();
+    if (teamChatOpen) renderTeamChatMessages();
+    // Keep the history page live if it's the one being viewed.
+    if (document.getElementById('page-chathistory')?.style.display === 'block') {
+      try { renderChatHistoryPage(); } catch (e) {}
+    }
+  }, 8000); // chat wants to feel near-live
+}
+
+// Called once after login/init.
+async function initTeamChat() {
+  if (!supabaseClient) return;
+  await loadTeamChat();
+  initChatDrag();
+  updateChatUnreadBadge();
+  startTeamChatPolling();
+}
+
 </script>
 
 <!-- Cancellation log modal -->
@@ -17241,6 +17673,50 @@ async function saveSalaryProfile() {
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAIMessage();}">
     <button onclick="sendAIMessage()" style="background:var(--teal);border:none;border-radius:8px;
       padding:8px 14px;color:#fff;font-size:13px;cursor:pointer;font-weight:600;white-space:nowrap;">Send</button>
+  </div>
+</div>
+
+<!-- Team Chat -->
+<button id="chat-fab" onclick="toggleTeamChat()"
+  style="position:fixed;bottom:24px;right:104px;width:60px;height:60px;border-radius:50%;
+  background:linear-gradient(135deg,#3a7bd5,#3a6073);border:none;cursor:pointer;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:flex;
+  align-items:center;justify-content:center;transition:transform 0.2s;"
+  onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'"
+  title="Team chat">
+  💬
+  <span id="chat-unread-badge">0</span>
+</button>
+
+<div id="chat-panel" style="display:none;position:fixed;bottom:96px;right:24px;width:360px;height:520px;max-height:78vh;
+  background:var(--bg2);border:1px solid var(--border);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  z-index:1001;flex-direction:column;overflow:hidden;">
+  <!-- Header (drag handle) -->
+  <div id="chat-drag-handle" style="padding:12px 14px;background:linear-gradient(135deg,#3a7bd5,#3a6073);
+    display:flex;align-items:center;justify-content:space-between;flex-shrink:0;cursor:move;user-select:none;">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <span style="font-size:22px;">💬</span>
+      <div>
+        <div style="font-weight:700;color:#fff;font-size:14px;">Team Chat</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.75);">Ops team · last 48h shown</div>
+      </div>
+    </div>
+    <button id="chat-close-btn" onclick="teamChatHide()" style="background:none;border:none;color:rgba(255,255,255,0.85);
+      font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
+  </div>
+  <!-- Messages -->
+  <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;
+    flex-direction:column;gap:7px;min-height:0;"></div>
+  <!-- Input -->
+  <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end;flex-shrink:0;">
+    <textarea id="chat-input" rows="1" placeholder="Message the team…"
+      oninput="chatInputResize(this)"
+      style="flex:1;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;
+      padding:9px 12px;color:var(--text);font-size:13px;font-family:var(--font);resize:none;
+      max-height:90px;line-height:1.4;"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTeamChat();}"></textarea>
+    <button onclick="sendTeamChat()" style="background:#3a7bd5;border:none;border-radius:10px;
+      padding:9px 14px;color:#fff;font-size:13px;cursor:pointer;font-weight:600;white-space:nowrap;">Send</button>
   </div>
 </div>
 
