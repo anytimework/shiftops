@@ -664,10 +664,34 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .chat-bubble.mine { background: var(--teal); color: #fff; border-bottom-right-radius: 3px; }
 .chat-sender { font-size: 10.5px; font-weight: 700; color: var(--accent); margin-bottom: 2px; }
 .chat-bubble .chat-body { white-space: pre-wrap; }
+.chat-bubble .chat-meta {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 4px; margin-top: 3px;
+}
 .chat-bubble .chat-time {
-  font-size: 9.5px; opacity: 0.65; margin-top: 3px; text-align: right;
+  font-size: 9.5px; opacity: 0.65; text-align: right;
 }
 .chat-bubble.theirs .chat-time { color: var(--text3); }
+.chat-ticks { font-size: 10px; line-height: 1; letter-spacing: -1px; opacity: 0.9; cursor: default; }
+.chat-ticks.pending { letter-spacing: 0; opacity: 0.7; }
+.chat-ticks.sent { color: rgba(255,255,255,0.7); }
+.chat-ticks.delivered { color: rgba(255,255,255,0.85); }
+.chat-ticks.read { color: #6fd0ff; opacity: 1; }
+.chat-seen-by { font-size: 9px; color: rgba(255,255,255,0.7); text-align: right; margin-top: 2px; }
+/* Typing indicator */
+.chat-typing-bubble { display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; }
+.chat-typing-label { font-size: 11px; color: var(--text3); font-style: italic; }
+.typing-dots { display: inline-flex; gap: 3px; align-items: center; }
+.typing-dots span {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--text3);
+  display: inline-block; animation: typing-bounce 1.2s infinite ease-in-out;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.18s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
 /* History page */
 .chat-hist-day {
   font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase;
@@ -1701,6 +1725,10 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         </div>
         <div id="pk-groups-list" style="margin-top:6px;"></div>
         <div id="pk-payroll-test-result" style="font-size:11.5px;margin-top:6px;min-height:16px;"></div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border2);">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="diagnosePayrollAlerts()">🩺 Why aren't clock-out alerts sending?</button>
+          <div id="pk-payroll-diagnose" style="font-size:11.5px;margin-top:6px;line-height:1.7;"></div>
+        </div>
       </div>
       <div style="background:rgba(79,142,247,0.06);border:1px solid rgba(79,142,247,0.2);border-radius:10px;padding:12px;margin:12px 0;font-size:11px;color:var(--text2);line-height:1.7;">
         <strong>Webhook URL</strong> (paste this into Periskope → Settings → Webhooks → message.created):<br>
@@ -7147,6 +7175,60 @@ async function notifyPayrollClockOut(message) {
     console.log('[Payroll] group alert sent ✓');
   }
   return ok;
+}
+
+// Walks every gate notifyPayrollClockOut() checks and reports exactly which one
+// is blocking, so a silent "no notification" becomes a visible, fixable reason.
+async function diagnosePayrollAlerts() {
+  const out = document.getElementById('pk-payroll-diagnose');
+  if (!out) return;
+  const pk = getPeriskopeConfig();
+  const rows = [];
+  const ok   = (t) => `<div style="color:var(--green);">✓ ${t}</div>`;
+  const bad  = (t) => `<div style="color:var(--red);">✗ ${t}</div>`;
+  const warn = (t) => `<div style="color:var(--amber,#f59e0b);">⚠ ${t}</div>`;
+
+  if (!pk) { out.innerHTML = bad('No Periskope config found at all. Fill in the API key + org phone above and Save.'); return; }
+
+  // 1. Toggle
+  if (pk.payrollEnabled) rows.push(ok('Payroll alerts toggle is ON.'));
+  else rows.push(bad('Payroll alerts toggle is OFF — tick “Send clock-out alerts to this group”, then Save.'));
+
+  // 2. Group ID
+  if (pk.payrollGroupId) {
+    const looksGroup = String(pk.payrollGroupId).includes('@g.us');
+    rows.push(looksGroup
+      ? ok('Payroll group set: ' + pk.payrollGroupId)
+      : warn('Group set but doesn’t end in @g.us: “' + pk.payrollGroupId + '” — use “Fetch my groups” to pick the real ID.'));
+  } else {
+    rows.push(bad('No payroll group chat ID set — paste one or use “Fetch my groups”, then Save.'));
+  }
+
+  // 3. Key + phone
+  rows.push(pk.apikey ? ok('Periskope API key present.') : bad('Periskope API key missing.'));
+  rows.push(pk.phone  ? ok('Org phone present: ' + pk.phone) : bad('Org phone missing.'));
+
+  // 4. Team-sync check — alerts fire from whatever device clocks out, so the
+  // shared app_settings copy must also have key + phone.
+  if (_pkConfigShared?.apikey && _pkConfigShared?.phone) {
+    rows.push(ok('Team-synced config found (other devices can send too).'));
+  } else {
+    rows.push(warn('No team-synced config in Supabase — only THIS device can send. If clock-outs happen on another device, no alert goes out. Save here to push the shared copy.'));
+  }
+
+  out.innerHTML = rows.join('');
+
+  // 5. Live send probe — only if the basics are in place.
+  if (pk.payrollEnabled && pk.payrollGroupId && pk.apikey && pk.phone) {
+    out.innerHTML += `<div style="color:var(--text3);margin-top:4px;">Sending a live test to the group…</div>`;
+    const sent = await sendPeriskopeGroupMessage(pk.payrollGroupId,
+      '🩺 ShiftOps diagnostic — if you see this, clock-out alerts are wired correctly.');
+    out.innerHTML += sent
+      ? ok('Live test accepted by Periskope. Check the group — clock-out alerts should work.')
+      : bad('Live test REJECTED by Periskope. Key/phone/group is wrong, or the number isn’t connected in Periskope.');
+  } else {
+    out.innerHTML += `<div style="color:var(--amber,#f59e0b);margin-top:4px;">Fix the ✗ items above, Save, then run this again to send a live test.</div>`;
+  }
 }
 
 // Test the payroll group from the settings modal (uses the unsaved field values).
@@ -17139,8 +17221,13 @@ const TEAM_CHAT_SCHEMA_SQL = `create table if not exists team_chat (
   id uuid primary key default gen_random_uuid(),
   sender text not null,
   body text not null,
+  delivered_to text[] not null default '{}',
+  read_by text[] not null default '{}',
   created_at timestamptz not null default now()
 );
+-- If the table already exists, add the receipt columns:
+alter table team_chat add column if not exists delivered_to text[] not null default '{}';
+alter table team_chat add column if not exists read_by text[] not null default '{}';
 alter table team_chat enable row level security;
 create policy "team_chat_all" on team_chat for all using (true) with check (true);`;
 
@@ -17150,6 +17237,16 @@ let teamChatPollTimer = null;
 let teamChatLastSeenId = localStorage.getItem('team_chat_last_seen') || null;
 let teamChatLastSeenTs = localStorage.getItem('team_chat_last_seen_ts') || null;
 const TEAM_CHAT_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+// ── Typing presence (ephemeral, via Supabase Realtime broadcast — no DB writes) ──
+let teamChatTypingChannel = null;          // the realtime channel
+let teamChatTypingUsers = {};              // { name: lastSeenMs } of people currently typing
+let teamChatTypingTimer = null;            // debounce for broadcasting my own "typing"
+let teamChatTypingStopTimer = null;        // auto-stop my "typing" after a pause
+let teamChatAmTyping = false;
+const TYPING_TTL_MS = 4000;                // a typing signal is "live" for 4s
+// Receipt write throttling — avoid hammering the DB on every poll.
+let _chatReceiptInFlight = false;
 
 // Finance role must never see or use the chat.
 function chatAllowedForCurrentUser() {
@@ -17256,6 +17353,85 @@ function markChatSeen() {
   updateChatUnreadBadge();
 }
 
+// ── Delivery + read receipts ─────────────────────────────────────────────────
+// Called after each load/poll. Two passes against messages from OTHER people:
+//   • delivered: my client now has the row → add me to delivered_to.
+//   • read: the chat is open & visible (or I just opened it) → add me to read_by.
+// Uses array append guarded by a NOT-contains filter so concurrent writers from
+// different devices don't clobber each other. We update local cache optimistically
+// so my own ticks/others' "Read by" reflect instantly without waiting for a poll.
+async function markChatReceipts({ markRead } = { markRead: false }) {
+  if (!supabaseClient || !currentInternalUser) return;
+  if (_chatReceiptInFlight) return;
+  const me = currentInternalUser;
+  const recent = teamChatRecent().filter(m => m.id && !String(m.id).startsWith('tmp-') && m.sender !== me);
+
+  const needDelivered = recent.filter(m => !(m.delivered_to || []).includes(me));
+  const chatVisible = markRead && teamChatOpen && !document.hidden;
+  const needRead = chatVisible ? recent.filter(m => !(m.read_by || []).includes(me)) : [];
+
+  if (!needDelivered.length && !needRead.length) return;
+  _chatReceiptInFlight = true;
+  try {
+    // Delivered pass — one UPDATE per message (array_append via rpc-free pattern:
+    // read row, append, write back only if still missing).
+    for (const m of needDelivered) {
+      const next = Array.from(new Set([...(m.delivered_to || []), me]));
+      const { error } = await supabaseClient
+        .from('team_chat').update({ delivered_to: next }).eq('id', m.id);
+      if (!error) m.delivered_to = next; // optimistic local
+      else if (/column .*delivered_to/i.test(error.message||'')) {
+        console.warn('[Chat] delivered_to column missing — run updated SQL:'); console.log(TEAM_CHAT_SCHEMA_SQL); break;
+      }
+    }
+    for (const m of needRead) {
+      const nextRead = Array.from(new Set([...(m.read_by || []), me]));
+      const nextDel  = Array.from(new Set([...(m.delivered_to || []), me]));
+      const { error } = await supabaseClient
+        .from('team_chat').update({ read_by: nextRead, delivered_to: nextDel }).eq('id', m.id);
+      if (!error) { m.read_by = nextRead; m.delivered_to = nextDel; }
+      else if (/column .*read_by/i.test(error.message||'')) {
+        console.warn('[Chat] read_by column missing — run updated SQL:'); console.log(TEAM_CHAT_SCHEMA_SQL); break;
+      }
+    }
+  } catch (e) { console.warn('[Chat] receipt write failed:', e); }
+  finally { _chatReceiptInFlight = false; }
+}
+
+// Who counts as "the team" for read receipts — everyone except me who could be
+// reading. We derive it from people who've ever appeared as a sender, so it grows
+// naturally without a hardcoded roster.
+function teamChatKnownMembers() {
+  const set = new Set();
+  teamChatMessages.forEach(m => { if (m.sender) set.add(m.sender); });
+  set.delete(currentInternalUser);
+  return Array.from(set);
+}
+
+// Build the WhatsApp-style tick for one of MY messages.
+//   single grey ✓  = sent (saved to DB, not yet confirmed on another device)
+//   double grey ✓✓ = delivered (at least one other teammate's client has it)
+//   double blue ✓✓ = read (at least one other teammate has opened/seen it)
+// Tapping the bubble reveals exactly who has read it.
+function chatTicksHtml(m) {
+  if (String(m.id || '').startsWith('tmp-')) {
+    // optimistic, not yet round-tripped — clock glyph
+    return `<span class="chat-ticks pending" title="Sending…">🕓</span>`;
+  }
+  const others = teamChatKnownMembers();
+  const readers = (m.read_by || []).filter(n => n !== m.sender);
+  const delivered = (m.delivered_to || []).filter(n => n !== m.sender);
+  let cls = 'sent', glyph = '✓', title = 'Sent';
+  if (readers.length > 0) {
+    cls = 'read'; glyph = '✓✓';
+    title = 'Read by ' + readers.join(', ');
+  } else if (delivered.length > 0) {
+    cls = 'delivered'; glyph = '✓✓';
+    title = 'Delivered to ' + delivered.join(', ');
+  }
+  return `<span class="chat-ticks ${cls}" title="${escapeHtml(title)}">${glyph}</span>`;
+}
+
 function renderTeamChatMessages() {
   const wrap = document.getElementById('chat-messages');
   if (!wrap) return;
@@ -17264,6 +17440,7 @@ function renderTeamChatMessages() {
     wrap.innerHTML = `<div style="margin:auto;text-align:center;color:var(--text3);font-size:12px;padding:24px 12px;">
       No messages in the last 48 hours.<br>Say hi to the team 👋<br>
       <span style="font-size:11px;">Older messages live in <b>Chat History</b> in the sidebar.</span></div>`;
+    renderTypingIndicator();
     return;
   }
   const me = currentInternalUser;
@@ -17276,15 +17453,54 @@ function renderTeamChatMessages() {
       lastDay = day;
     }
     const mine = m.sender === me;
+    const readers = mine ? (m.read_by || []).filter(n => n !== me) : [];
+    const seenLine = (mine && readers.length)
+      ? `<div class="chat-seen-by">Read by ${escapeHtml(readers.join(', '))}</div>` : '';
     html += `<div class="chat-bubble-row ${mine ? 'mine' : 'theirs'}">
       <div class="chat-bubble ${mine ? 'mine' : 'theirs'}">
         ${mine ? '' : `<div class="chat-sender">${escapeHtml(m.sender || '?')}</div>`}
         <div class="chat-body">${escapeHtml(m.body || '')}</div>
-        <div class="chat-time">${chatTimeLabel(m.created_at)}</div>
+        <div class="chat-meta">
+          <span class="chat-time">${chatTimeLabel(m.created_at)}</span>
+          ${mine ? chatTicksHtml(m) : ''}
+        </div>
+        ${seenLine}
       </div>
     </div>`;
   });
   wrap.innerHTML = html;
+  renderTypingIndicator();
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+// Renders the "X is typing…" row at the bottom of the message list.
+function renderTypingIndicator() {
+  const wrap = document.getElementById('chat-messages');
+  if (!wrap) return;
+  const now = Date.now();
+  // Expire stale typers.
+  Object.keys(teamChatTypingUsers).forEach(n => {
+    if (now - teamChatTypingUsers[n] > TYPING_TTL_MS) delete teamChatTypingUsers[n];
+  });
+  const typers = Object.keys(teamChatTypingUsers).filter(n => n !== currentInternalUser);
+  let row = document.getElementById('chat-typing-row');
+  if (!typers.length) { if (row) row.remove(); return; }
+  const label = typers.length === 1
+    ? `${typers[0]} is typing`
+    : (typers.length === 2 ? `${typers[0]} and ${typers[1]} are typing`
+                           : `${typers.length} people are typing`);
+  const dots = `<span class="typing-dots"><span></span><span></span><span></span></span>`;
+  if (!row) {
+    row = document.createElement('div');
+    row.id = 'chat-typing-row';
+    row.className = 'chat-bubble-row theirs';
+    wrap.appendChild(row);
+  } else {
+    // keep it last
+    wrap.appendChild(row);
+  }
+  row.innerHTML = `<div class="chat-bubble theirs chat-typing-bubble">
+    <span class="chat-typing-label">${escapeHtml(label)}</span> ${dots}</div>`;
   wrap.scrollTop = wrap.scrollHeight;
 }
 
@@ -17298,6 +17514,7 @@ async function sendTeamChat() {
   const sender = currentInternalUser || 'Unknown';
   input.value = '';
   input.style.height = 'auto';
+  stopTypingNow();
 
   // Optimistic echo so it feels instant.
   const optimistic = { id: 'tmp-' + Date.now(), sender, body, created_at: new Date().toISOString() };
@@ -17345,6 +17562,8 @@ function teamChatShow() {
   panel.style.display = 'flex';
   renderTeamChatMessages();
   markChatSeen();
+  markChatReceipts({ markRead: true }).then(() => renderTeamChatMessages());
+  startTypingPresence();
   setTimeout(() => document.getElementById('chat-input')?.focus(), 50);
 }
 
@@ -17663,6 +17882,9 @@ function startTeamChatPolling() {
     if (!chatAllowedForCurrentUser()) return;
     await loadTeamChat();
     maybePlayChatSound();
+    // Always confirm delivery for new messages; confirm read only while the
+    // chat is actually open & visible.
+    await markChatReceipts({ markRead: teamChatOpen && !document.hidden });
     updateChatUnreadBadge();
     if (teamChatOpen) renderTeamChatMessages();
     // Keep the history page live if it's the one being viewed.
@@ -17670,6 +17892,63 @@ function startTeamChatPolling() {
       try { renderChatHistoryPage(); } catch (e) {}
     }
   }, 5000); // poll for near-live chat + sound notifications
+}
+
+// ── Typing presence ──────────────────────────────────────────────────────────
+// Uses a Supabase Realtime broadcast channel — purely ephemeral, no DB rows.
+// Each keystroke (throttled) broadcasts {user, typing:true}; we auto-send
+// {typing:false} after a short pause or on send.
+function startTypingPresence() {
+  if (!supabaseClient || teamChatTypingChannel) return;
+  try {
+    teamChatTypingChannel = supabaseClient.channel('team_chat_typing', {
+      config: { broadcast: { self: false } }
+    });
+    teamChatTypingChannel.on('broadcast', { event: 'typing' }, ({ payload }) => {
+      if (!payload || !payload.user || payload.user === currentInternalUser) return;
+      if (payload.typing) teamChatTypingUsers[payload.user] = Date.now();
+      else delete teamChatTypingUsers[payload.user];
+      renderTypingIndicator();
+    });
+    teamChatTypingChannel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') console.log('✅ Chat typing presence active');
+    });
+    // Expire stale typers on a steady tick even if no new broadcasts arrive.
+    setInterval(renderTypingIndicator, 1500);
+  } catch (e) { console.warn('[Chat] typing channel failed:', e); }
+}
+
+function broadcastTyping(isTyping) {
+  if (!teamChatTypingChannel) return;
+  try {
+    teamChatTypingChannel.send({
+      type: 'broadcast', event: 'typing',
+      payload: { user: currentInternalUser || 'Someone', typing: !!isTyping }
+    });
+  } catch (e) {}
+}
+
+// Called from the input's oninput. Throttles "typing:true" to once per ~2s and
+// schedules a "typing:false" after the user pauses.
+function onChatInputTyping() {
+  startTypingPresence();
+  if (!teamChatAmTyping) {
+    teamChatAmTyping = true;
+    broadcastTyping(true);
+  }
+  clearTimeout(teamChatTypingStopTimer);
+  teamChatTypingStopTimer = setTimeout(() => {
+    teamChatAmTyping = false;
+    broadcastTyping(false);
+  }, 2500);
+}
+
+function stopTypingNow() {
+  clearTimeout(teamChatTypingStopTimer);
+  if (teamChatAmTyping) {
+    teamChatAmTyping = false;
+    broadcastTyping(false);
+  }
 }
 
 // Called once after login/init.
@@ -17685,6 +17964,9 @@ async function initTeamChat() {
   if (!teamChatLastHeardTs) { teamChatLastHeardTs = mostRecentChatTs(); persistHeard(); }
   updateChatUnreadBadge();
   startTeamChatPolling();
+  startTypingPresence();
+  // Confirm delivery for anything already waiting at boot.
+  markChatReceipts({ markRead: false }).catch(()=>{});
 }
 
 </script>
@@ -17922,7 +18204,8 @@ async function initTeamChat() {
   <!-- Input -->
   <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end;flex-shrink:0;">
     <textarea id="chat-input" rows="1" placeholder="Message the team…"
-      oninput="chatInputResize(this)"
+      oninput="chatInputResize(this);onChatInputTyping();"
+      onblur="stopTypingNow()"
       style="flex:1;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;
       padding:9px 12px;color:var(--text);font-size:13px;font-family:var(--font);resize:none;
       max-height:90px;line-height:1.4;"
