@@ -17358,6 +17358,9 @@ function teamChatHide() {
 
 function toggleTeamChat() {
   if (!chatAllowedForCurrentUser()) return;
+  // Opening the chat is a user gesture — use it to unlock the audio context
+  // so notification sounds can play even when the tab is later in the background.
+  try { getChatAudioCtx(); } catch (e) {}
   if (teamChatOpen) teamChatHide();
   else teamChatShow();
 }
@@ -17376,8 +17379,8 @@ function initChatDrag() {
   let dragging = false, sx = 0, sy = 0, startLeft = 0, startTop = 0;
 
   function onDown(e) {
-    // Don't start a drag from the close button.
-    if (e.target.closest('#chat-close-btn')) return;
+    // Don't start a drag from the header controls (close, mute, sound picker).
+    if (e.target.closest('#chat-close-btn, #chat-mute-btn, #chat-sound-select')) return;
     dragging = true;
     const pt = e.touches ? e.touches[0] : e;
     const rect = panel.getBoundingClientRect();
@@ -17460,12 +17463,137 @@ async function renderChatHistoryPage() {
 }
 
 // ── Background sync ──────────────────────────────────────────────────
+// ── Chat notification sounds (Web Audio, no files needed) ────────────
+// Picker + mute persist per device. Sounds are synthesized so they work
+// offline and keep this a single-file app.
+
+let chatAudioCtx = null;
+let chatSoundChoice = localStorage.getItem('team_chat_sound') || 'pop';
+let chatSoundMuted = localStorage.getItem('team_chat_muted') === '1';
+// Tracks the newest message id we've already "heard", so we only ding on truly new ones.
+let teamChatLastHeardTs = localStorage.getItem('team_chat_last_heard_ts') || null;
+
+const CHAT_SOUNDS = {
+  pop:     { label: 'Soft pop' },
+  chime:   { label: 'Two-tone chime' },
+  marimba: { label: 'Marimba tap' },
+  tick:    { label: 'Subtle tick' },
+};
+
+function getChatAudioCtx() {
+  if (!chatAudioCtx) {
+    try { chatAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { return null; }
+  }
+  // Browsers suspend audio until a user gesture; resume opportunistically.
+  if (chatAudioCtx.state === 'suspended') { chatAudioCtx.resume().catch(()=>{}); }
+  return chatAudioCtx;
+}
+
+// One short tone with an envelope.
+function chatTone(ctx, { freq, start = 0, dur = 0.12, type = 'sine', gain = 0.18, glideTo = null }) {
+  const t0 = ctx.currentTime + start;
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (glideTo) osc.frequency.exponentialRampToValueAtTime(glideTo, t0 + dur);
+  // Quick attack, smooth decay so it never clicks.
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(gain, t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(g); g.connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
+}
+
+function playChatSound(name) {
+  const ctx = getChatAudioCtx();
+  if (!ctx) return;
+  const choice = name || chatSoundChoice;
+  switch (choice) {
+    case 'chime':
+      chatTone(ctx, { freq: 660, start: 0,    dur: 0.12, type: 'sine', gain: 0.16 });
+      chatTone(ctx, { freq: 880, start: 0.11, dur: 0.16, type: 'sine', gain: 0.16 });
+      break;
+    case 'marimba':
+      chatTone(ctx, { freq: 523.25, start: 0,    dur: 0.18, type: 'triangle', gain: 0.20 });
+      chatTone(ctx, { freq: 783.99, start: 0.10, dur: 0.22, type: 'triangle', gain: 0.16 });
+      break;
+    case 'tick':
+      chatTone(ctx, { freq: 1200, start: 0, dur: 0.05, type: 'square', gain: 0.08 });
+      break;
+    case 'pop':
+    default:
+      // Rounded "bloop" — a quick upward glide on a sine.
+      chatTone(ctx, { freq: 420, start: 0, dur: 0.13, type: 'sine', gain: 0.22, glideTo: 720 });
+      break;
+  }
+}
+
+function setChatSound(name) {
+  chatSoundChoice = name;
+  localStorage.setItem('team_chat_sound', name);
+  // Preview it so the picker is self-explanatory.
+  playChatSound(name);
+}
+
+function toggleChatMute() {
+  chatSoundMuted = !chatSoundMuted;
+  localStorage.setItem('team_chat_muted', chatSoundMuted ? '1' : '0');
+  const btn = document.getElementById('chat-mute-btn');
+  if (btn) {
+    btn.textContent = chatSoundMuted ? '🔇' : '🔔';
+    btn.title = chatSoundMuted ? 'Sounds off — click to enable' : 'Sounds on — click to mute';
+  }
+  if (!chatSoundMuted) playChatSound(); // confirm with a sound when turning on
+}
+
+function renderChatSoundControls() {
+  const muteBtn = document.getElementById('chat-mute-btn');
+  if (muteBtn) {
+    muteBtn.textContent = chatSoundMuted ? '🔇' : '🔔';
+    muteBtn.title = chatSoundMuted ? 'Sounds off — click to enable' : 'Sounds on — click to mute';
+  }
+  const sel = document.getElementById('chat-sound-select');
+  if (sel && !sel.dataset.filled) {
+    sel.innerHTML = Object.entries(CHAT_SOUNDS)
+      .map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+    sel.dataset.filled = '1';
+  }
+  if (sel) sel.value = chatSoundChoice;
+}
+
+// Decide whether a fresh batch of messages should trigger a sound, then play it.
+// Called after each poll. `me` is excluded so I never ding on my own messages.
+function maybePlayChatSound() {
+  if (chatSoundMuted) { teamChatLastHeardTs = mostRecentChatTs(); persistHeard(); return; }
+  const me = currentInternalUser;
+  const heardTs = teamChatLastHeardTs ? new Date(teamChatLastHeardTs).getTime() : 0;
+  const fresh = teamChatRecent().filter(m =>
+    m.sender !== me && new Date(m.created_at).getTime() > heardTs
+  );
+  // Advance the marker regardless so we don't replay old ones.
+  teamChatLastHeardTs = mostRecentChatTs();
+  persistHeard();
+  if (fresh.length > 0) playChatSound();
+}
+
+function mostRecentChatTs() {
+  if (!teamChatMessages.length) return new Date().toISOString();
+  return teamChatMessages[teamChatMessages.length - 1].created_at;
+}
+function persistHeard() {
+  if (teamChatLastHeardTs) localStorage.setItem('team_chat_last_heard_ts', String(teamChatLastHeardTs));
+}
+
 function startTeamChatPolling() {
   if (teamChatPollTimer) clearInterval(teamChatPollTimer);
   teamChatPollTimer = setInterval(async () => {
     if (!currentInternalUser || !supabaseClient) return;
     if (!chatAllowedForCurrentUser()) return;
     await loadTeamChat();
+    maybePlayChatSound();
     updateChatUnreadBadge();
     if (teamChatOpen) renderTeamChatMessages();
     // Keep the history page live if it's the one being viewed.
@@ -17480,6 +17608,10 @@ async function initTeamChat() {
   if (!supabaseClient) return;
   await loadTeamChat();
   initChatDrag();
+  renderChatSoundControls();
+  // Seed the "last heard" marker to the newest existing message so we don't
+  // ding for the whole backlog the moment the app loads.
+  if (!teamChatLastHeardTs) { teamChatLastHeardTs = mostRecentChatTs(); persistHeard(); }
   updateChatUnreadBadge();
   startTeamChatPolling();
 }
@@ -17701,8 +17833,17 @@ async function initTeamChat() {
         <div style="font-size:10.5px;color:rgba(255,255,255,0.75);">Ops team · last 48h shown</div>
       </div>
     </div>
-    <button id="chat-close-btn" onclick="teamChatHide()" style="background:none;border:none;color:rgba(255,255,255,0.85);
-      font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <select id="chat-sound-select" onchange="setChatSound(this.value)" onmousedown="event.stopPropagation()"
+        title="Notification sound"
+        style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);border-radius:6px;
+        color:#fff;font-size:11px;font-family:var(--font);padding:3px 5px;cursor:pointer;max-width:118px;"></select>
+      <button id="chat-mute-btn" onclick="toggleChatMute()" onmousedown="event.stopPropagation()"
+        style="background:none;border:none;color:#fff;font-size:16px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;"
+        title="Sounds on — click to mute">🔔</button>
+      <button id="chat-close-btn" onclick="teamChatHide()" style="background:none;border:none;color:rgba(255,255,255,0.85);
+        font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
+    </div>
   </div>
   <!-- Messages -->
   <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;
