@@ -17468,10 +17468,13 @@ async function renderChatHistoryPage() {
 // offline and keep this a single-file app.
 
 let chatAudioCtx = null;
+let chatAudioUnlocked = false;
 let chatSoundChoice = localStorage.getItem('team_chat_sound') || 'pop';
 let chatSoundMuted = localStorage.getItem('team_chat_muted') === '1';
 // Tracks the newest message id we've already "heard", so we only ding on truly new ones.
 let teamChatLastHeardTs = localStorage.getItem('team_chat_last_heard_ts') || null;
+// IDs we've already played a sound for — immune to timestamp ties / clock skew.
+let teamChatHeardIds = new Set();
 
 const CHAT_SOUNDS = {
   pop:     { label: 'Soft pop' },
@@ -17485,9 +17488,56 @@ function getChatAudioCtx() {
     try { chatAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
     catch (e) { return null; }
   }
-  // Browsers suspend audio until a user gesture; resume opportunistically.
   if (chatAudioCtx.state === 'suspended') { chatAudioCtx.resume().catch(()=>{}); }
   return chatAudioCtx;
+}
+
+// Browsers won't let audio play until the user has interacted with the page at
+// least once. We listen for the FIRST interaction anywhere in the app (not just
+// opening the chat) and unlock + warm up the audio context then. This is the
+// main reason some teammates heard nothing: they never opened the chat popup.
+function unlockChatAudio() {
+  if (chatAudioUnlocked) return;
+  const ctx = getChatAudioCtx();
+  if (!ctx) return;
+  const finish = () => {
+    // Play a near-silent blip to fully "warm" the context on iOS/Safari.
+    try {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(); o.stop(ctx.currentTime + 0.02);
+    } catch (e) {}
+    chatAudioUnlocked = true;
+  };
+  if (ctx.state === 'suspended') ctx.resume().then(finish).catch(finish);
+  else finish();
+}
+
+function installChatAudioUnlock() {
+  const handler = () => { unlockChatAudio(); };
+  // Capture the very first gesture of any kind. Listeners stay (cheap) but
+  // unlockChatAudio() no-ops after the first success.
+  ['pointerdown', 'keydown', 'touchstart', 'click'].forEach(ev =>
+    document.addEventListener(ev, handler, { capture: true, passive: true })
+  );
+  // If the tab regains focus, make sure the context is running again and
+  // immediately re-check chat so any messages that arrived while backgrounded
+  // (where polling is throttled) get caught up and dinged right away.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      if (chatAudioCtx && chatAudioCtx.state === 'suspended') {
+        chatAudioCtx.resume().catch(()=>{});
+      }
+      if (currentInternalUser && supabaseClient && chatAllowedForCurrentUser()) {
+        loadTeamChat().then(() => {
+          maybePlayChatSound();
+          updateChatUnreadBadge();
+          if (teamChatOpen) renderTeamChatMessages();
+        }).catch(()=>{});
+      }
+    }
+  });
 }
 
 // One short tone with an envelope.
@@ -17511,23 +17561,32 @@ function playChatSound(name) {
   const ctx = getChatAudioCtx();
   if (!ctx) return;
   const choice = name || chatSoundChoice;
-  switch (choice) {
-    case 'chime':
-      chatTone(ctx, { freq: 660, start: 0,    dur: 0.12, type: 'sine', gain: 0.16 });
-      chatTone(ctx, { freq: 880, start: 0.11, dur: 0.16, type: 'sine', gain: 0.16 });
-      break;
-    case 'marimba':
-      chatTone(ctx, { freq: 523.25, start: 0,    dur: 0.18, type: 'triangle', gain: 0.20 });
-      chatTone(ctx, { freq: 783.99, start: 0.10, dur: 0.22, type: 'triangle', gain: 0.16 });
-      break;
-    case 'tick':
-      chatTone(ctx, { freq: 1200, start: 0, dur: 0.05, type: 'square', gain: 0.08 });
-      break;
-    case 'pop':
-    default:
-      // Rounded "bloop" — a quick upward glide on a sine.
-      chatTone(ctx, { freq: 420, start: 0, dur: 0.13, type: 'sine', gain: 0.22, glideTo: 720 });
-      break;
+  const schedule = () => {
+    switch (choice) {
+      case 'chime':
+        chatTone(ctx, { freq: 660, start: 0,    dur: 0.12, type: 'sine', gain: 0.16 });
+        chatTone(ctx, { freq: 880, start: 0.11, dur: 0.16, type: 'sine', gain: 0.16 });
+        break;
+      case 'marimba':
+        chatTone(ctx, { freq: 523.25, start: 0,    dur: 0.18, type: 'triangle', gain: 0.20 });
+        chatTone(ctx, { freq: 783.99, start: 0.10, dur: 0.22, type: 'triangle', gain: 0.16 });
+        break;
+      case 'tick':
+        chatTone(ctx, { freq: 1200, start: 0, dur: 0.05, type: 'square', gain: 0.08 });
+        break;
+      case 'pop':
+      default:
+        // Rounded "bloop" — a quick upward glide on a sine.
+        chatTone(ctx, { freq: 420, start: 0, dur: 0.13, type: 'sine', gain: 0.22, glideTo: 720 });
+        break;
+    }
+  };
+  // If the context is suspended (e.g. tab was backgrounded), resume FIRST so the
+  // tones aren't scheduled into a dead context and dropped silently.
+  if (ctx.state === 'suspended') {
+    ctx.resume().then(schedule).catch(()=>{ try { schedule(); } catch(e){} });
+  } else {
+    schedule();
   }
 }
 
@@ -17567,16 +17626,26 @@ function renderChatSoundControls() {
 // Decide whether a fresh batch of messages should trigger a sound, then play it.
 // Called after each poll. `me` is excluded so I never ding on my own messages.
 function maybePlayChatSound() {
-  if (chatSoundMuted) { teamChatLastHeardTs = mostRecentChatTs(); persistHeard(); return; }
   const me = currentInternalUser;
-  const heardTs = teamChatLastHeardTs ? new Date(teamChatLastHeardTs).getTime() : 0;
+  // Find recent messages from others that we have NOT already dinged for, by id.
   const fresh = teamChatRecent().filter(m =>
-    m.sender !== me && new Date(m.created_at).getTime() > heardTs
+    m.sender !== me && m.id != null && !teamChatHeardIds.has(String(m.id))
   );
-  // Advance the marker regardless so we don't replay old ones.
+  // Mark them all heard regardless of mute, so unmuting later doesn't replay them.
+  fresh.forEach(m => teamChatHeardIds.add(String(m.id)));
+  // Keep the legacy timestamp marker in sync (used elsewhere) + persist.
   teamChatLastHeardTs = mostRecentChatTs();
   persistHeard();
+  if (chatSoundMuted) return;
+  // One ding per poll batch is plenty — avoids a machine-gun of tones if several
+  // messages land at once.
   if (fresh.length > 0) playChatSound();
+}
+
+// Seed the heard-set with every id currently loaded, so opening the app doesn't
+// ding for the whole backlog. Call once after the first load.
+function seedChatHeardIds() {
+  teamChatMessages.forEach(m => { if (m.id != null) teamChatHeardIds.add(String(m.id)); });
 }
 
 function mostRecentChatTs() {
@@ -17600,7 +17669,7 @@ function startTeamChatPolling() {
     if (document.getElementById('page-chathistory')?.style.display === 'block') {
       try { renderChatHistoryPage(); } catch (e) {}
     }
-  }, 8000); // chat wants to feel near-live
+  }, 5000); // poll for near-live chat + sound notifications
 }
 
 // Called once after login/init.
@@ -17609,6 +17678,8 @@ async function initTeamChat() {
   await loadTeamChat();
   initChatDrag();
   renderChatSoundControls();
+  installChatAudioUnlock();   // unlock audio on the first interaction anywhere
+  seedChatHeardIds();         // don't ding for messages already on screen at load
   // Seed the "last heard" marker to the newest existing message so we don't
   // ding for the whole backlog the moment the app loads.
   if (!teamChatLastHeardTs) { teamChatLastHeardTs = mostRecentChatTs(); persistHeard(); }
