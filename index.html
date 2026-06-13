@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v36 — Client booking requirements. Each outlet can now hold a requirements checklist (e.g. "Is the worker 18+?", "Has formal black long-sleeve shirt?", add/delete in the outlet profile or via the AI chatbot). When booking a worker into an outlet that has requirements, a checklist modal appears; EVERY item must be ticked or the booking is blocked. The system remembers who passed which requirements at which outlet (profileMeta.workers[key].passed_requirements[outletKey]) and auto-ticks those on future bookings, with a "met all requirements in a previous shift" disclaimer — if you ADD a new requirement later, prior passers keep their ticks and only the new item needs verifying. Gating is enforced on ALL assignment paths via assignmentRestriction(): interactive paths (Add Shift form, inline Available-slot assign) pop the checklist; non-interactive paths (AI createShift/forceCreateShift/batchCreateSlots, standby auto-accept) safely refuse with a clear message. New AI actions: addOutletRequirement, removeOutletRequirement, listOutletRequirements. Stored team-wide in app_settings/profile_meta; mergeProfileMeta extended (requirements replaced so edits/deletes propagate; passed_requirements deep-unioned so no device loses pass history). saveOutlet/saveWorker now preserve existing meta (no longer wipe requirements/pass-history) and carry it across renames. -->
 <!-- Build patch: v35 — Business Knowledge is now TEAM-WIDE for everyone. Previously, if the shared Supabase `business_knowledge` read failed (missing table / RLS blocking the anon role), the page silently fell back to a per-device localStorage copy — so an entry was visible ONLY to the person/device that uploaded it. loadKnowledge() now reads the shared Supabase table as the single source of truth, mirrors it to localStorage only as a read cache, and shows an honest error toast (instead of silently hiding the team's data) if the read fails. kbSaveEntry() now warns clearly when a save lands on this device only and won't reach the team, with the fix (run the business_knowledge SQL / check RLS). No new columns. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
@@ -2032,6 +2033,23 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 </div>
 
 <!-- ADD OUTLET MODAL -->
+<!-- ── Client booking requirements checklist ─────────────────────────────────── -->
+<div class="modal-overlay" id="req-checklist-modal">
+  <div class="modal">
+    <h3 id="req-checklist-title">Booking requirements</h3>
+    <div id="req-checklist-sub" class="sub-text" style="margin-bottom:10px;"></div>
+    <div id="req-checklist-passed-note" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:6px;background:rgba(111,221,155,0.12);border:1px solid rgba(111,221,155,0.4);font-size:12px;color:#6fdd9b;">
+      ✅ This worker met all of this client's requirements in a previous shift — pre-ticked below. Untick anything that no longer holds.
+    </div>
+    <div id="req-checklist-body" style="display:flex;flex-direction:column;gap:8px;margin-bottom:6px;"></div>
+    <div id="req-checklist-warn" class="sub-text" style="color:var(--red);min-height:16px;margin-top:4px;"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="cancelRequirementsChecklist()">Cancel booking</button>
+      <button class="btn btn-primary btn-sm" id="req-checklist-confirm" onclick="confirmRequirementsChecklist()">Confirm &amp; proceed</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="add-outlet-modal">
   <div class="modal">
     <h3 id="outlet-modal-title">Add outlet</h3>
@@ -2041,6 +2059,14 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
+    <div class="form-row">
+      <label>Booking requirements <span style="font-weight:400;color:var(--text3);font-size:11px;">— each must be ticked before a worker can be booked here</span></label>
+      <div id="of-req-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="of-req-new" placeholder="e.g. Has formal black long-sleeve shirt?" style="flex:1;" onkeydown="if(event.key==='Enter'){event.preventDefault();ofAddRequirement();}">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="ofAddRequirement()">+ Add</button>
+      </div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="outlet-save-btn" onclick="saveOutlet()">Add outlet</button>
@@ -2428,11 +2454,32 @@ function mergeProfileMeta(primary, secondary) {
     keys.forEach(k => {
       const pe = p[k] || {};
       const se = s[k] || {};
-      out[sectionName][k] = {
+      const merged = {
         ...se,            // remote/secondary defaults
         ...pe,            // primary (local) overrides scalars like notes/commission
         [listField]: unionList(pe[listField], se[listField])
       };
+      // ── Client booking requirements (outlets only) ──
+      // requirements is an ordered list of {id,label}. It is REPLACED, not unioned,
+      // so that an edit/delete on one device propagates (primary wins when present).
+      // passed_requirements (workers only) is an object keyed by outlet-key → array
+      // of requirement-ids the worker has been verified to pass at that outlet; it
+      // is DEEP-UNIONED so neither device ever loses a worker's pass history.
+      if (sectionName === 'outlets') {
+        if (Array.isArray(pe.requirements)) merged.requirements = pe.requirements;
+        else if (Array.isArray(se.requirements)) merged.requirements = se.requirements;
+      }
+      if (sectionName === 'workers') {
+        const pp = (pe.passed_requirements && typeof pe.passed_requirements === 'object') ? pe.passed_requirements : {};
+        const sp = (se.passed_requirements && typeof se.passed_requirements === 'object') ? se.passed_requirements : {};
+        const oKeys = new Set([...Object.keys(pp), ...Object.keys(sp)]);
+        if (oKeys.size) {
+          const out2 = {};
+          oKeys.forEach(ok => { out2[ok] = unionList(pp[ok], sp[ok]); });
+          merged.passed_requirements = out2;
+        }
+      }
+      out[sectionName][k] = merged;
     });
   };
   mergeSection('workers', 'disliked_outlets');
@@ -2675,7 +2722,136 @@ function assignmentRestriction(workerName, outletName) {
   if ((outletProfile(outlet).banned_workers || []).map(normProfileKey).includes(wk)) {
     return `${worker} is banned from ${outlet}.`;
   }
+  // ── Client booking requirements (e.g. age 18+, formal black attire) ──
+  // If the outlet has requirements the worker has NOT yet been verified to pass,
+  // the booking is blocked. The interactive Add-shift / inline-assign flows catch
+  // this *before* calling assignmentRestriction and pop the checklist modal so ops
+  // can tick them off; the message below is prefixed with REQUIREMENTS_SENTINEL so
+  // those flows can tell it apart from a hard ban. Non-interactive paths (AI,
+  // standby auto-accept) surface the message and refuse, which is the safe default.
+  const unmet = unmetRequirements(worker, outlet);
+  if (unmet.length) {
+    return REQUIREMENTS_SENTINEL + `${worker} hasn't met ${outlet}'s booking requirements yet (${unmet.length} unticked): ${unmet.map(r => r.label).join('; ')}.`;
+  }
   return null;
+}
+
+// ── Client booking requirements helpers ───────────────────────────────────────
+// Marker so interactive booking flows can distinguish a (resolvable) requirements
+// block from a hard ban. Never shown to the user (stripped before display).
+const REQUIREMENTS_SENTINEL = '\u0001REQ\u0001';
+function isRequirementsRestriction(msg) { return typeof msg === 'string' && msg.startsWith(REQUIREMENTS_SENTINEL); }
+function stripRequirementsSentinel(msg) { return isRequirementsRestriction(msg) ? msg.slice(REQUIREMENTS_SENTINEL.length) : msg; }
+
+// The list of {id,label} requirements configured for an outlet (empty if none).
+function outletRequirements(outletName) {
+  const reqs = outletProfile(outletName).requirements;
+  return Array.isArray(reqs) ? reqs.filter(r => r && r.id && r.label) : [];
+}
+// Requirement-ids a worker has already been verified to pass at an outlet.
+function workerPassedRequirementIds(workerName, outletName) {
+  const pr = workerProfile(workerName).passed_requirements;
+  const ok = normProfileKey(outletName);
+  const arr = pr && typeof pr === 'object' ? pr[ok] : null;
+  return Array.isArray(arr) ? arr : [];
+}
+// Requirements the worker has NOT yet passed at the outlet (subset of the list).
+function unmetRequirements(workerName, outletName) {
+  const reqs = outletRequirements(outletName);
+  if (!reqs.length) return [];
+  const passed = new Set(workerPassedRequirementIds(workerName, outletName));
+  return reqs.filter(r => !passed.has(r.id));
+}
+// True if the worker has passed every CURRENT requirement at the outlet before.
+function workerHasPassedAllRequirements(workerName, outletName) {
+  return outletRequirements(outletName).length > 0 && unmetRequirements(workerName, outletName).length === 0;
+}
+// Record that a worker has been verified against a set of requirement-ids at an
+// outlet (team-wide, deep-union-merged), then persist. Used when ops ticks the
+// checklist on booking. Returns nothing; saves in the background.
+async function recordPassedRequirements(workerName, outletName, requirementIds) {
+  const wk = normProfileKey(workerName);
+  const ok = normProfileKey(outletName);
+  if (!wk || !ok || !Array.isArray(requirementIds) || !requirementIds.length) return;
+  const existing = profileMeta.workers[wk] || {};
+  const pr = (existing.passed_requirements && typeof existing.passed_requirements === 'object') ? { ...existing.passed_requirements } : {};
+  const prev = Array.isArray(pr[ok]) ? pr[ok] : [];
+  const set = new Set(prev);
+  requirementIds.forEach(id => set.add(id));
+  pr[ok] = Array.from(set);
+  profileMeta.workers[wk] = { ...existing, passed_requirements: pr };
+  await saveProfileMeta();
+}
+function newRequirementId() {
+  return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+}
+
+// ── Requirements checklist modal (interactive booking gate) ───────────────────
+// gateRequirements() returns a Promise<boolean>. If the outlet has requirements
+// that aren't all pre-passed, it shows the checklist and resolves true only when
+// ops ticks every box and confirms (recording the passes team-wide); false if
+// they cancel. If there are no requirements, or the worker already passed them
+// all, it still surfaces the checklist pre-ticked (with a "met previously" note)
+// per the configured behaviour — quick one-tap confirm — but never blocks.
+let _reqChecklistState = null; // { worker, outlet, reqs:[{id,label,checked}], resolve }
+function gateRequirements(workerName, outletName) {
+  return new Promise(resolve => {
+    const worker = String(workerName || '').trim();
+    const outlet = String(outletName || '').trim();
+    if (!worker || worker.toLowerCase() === 'available' || !outlet) { resolve(true); return; }
+    const reqs = outletRequirements(outlet);
+    if (!reqs.length) { resolve(true); return; }                 // no requirements → proceed
+    const passed = new Set(workerPassedRequirementIds(worker, outlet));
+    const allPassed = reqs.every(r => passed.has(r.id));
+    _reqChecklistState = {
+      worker, outlet, resolve,
+      reqs: reqs.map(r => ({ id: r.id, label: r.label, checked: passed.has(r.id) }))
+    };
+    document.getElementById('req-checklist-title').textContent = `${outlet} — booking requirements`;
+    document.getElementById('req-checklist-sub').textContent = `Confirm ${worker} meets every requirement below. All must be ticked or the booking can't proceed.`;
+    document.getElementById('req-checklist-passed-note').style.display = allPassed ? 'block' : 'none';
+    renderRequirementsChecklist();
+    document.getElementById('req-checklist-modal').classList.add('open');
+  });
+}
+function renderRequirementsChecklist() {
+  if (!_reqChecklistState) return;
+  const body = document.getElementById('req-checklist-body');
+  body.innerHTML = _reqChecklistState.reqs.map((r, i) => `
+    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);">
+      <input type="checkbox" data-reqidx="${i}" ${r.checked ? 'checked' : ''} onchange="toggleRequirementCheck(${i}, this.checked)" style="margin-top:2px;flex-shrink:0;">
+      <span style="font-size:13px;color:var(--text);line-height:1.4;">${escapeHtml(r.label)}</span>
+    </label>`).join('');
+  updateRequirementsConfirmState();
+}
+function toggleRequirementCheck(i, checked) {
+  if (!_reqChecklistState || !_reqChecklistState.reqs[i]) return;
+  _reqChecklistState.reqs[i].checked = checked;
+  updateRequirementsConfirmState();
+}
+function updateRequirementsConfirmState() {
+  if (!_reqChecklistState) return;
+  const all = _reqChecklistState.reqs.every(r => r.checked);
+  const btn = document.getElementById('req-checklist-confirm');
+  const warn = document.getElementById('req-checklist-warn');
+  btn.disabled = !all; btn.style.opacity = all ? '1' : '0.4';
+  warn.textContent = all ? '' : 'Tick every requirement to proceed — bookings cannot continue with unmet requirements.';
+}
+function cancelRequirementsChecklist() {
+  document.getElementById('req-checklist-modal').classList.remove('open');
+  const st = _reqChecklistState; _reqChecklistState = null;
+  if (st && st.resolve) st.resolve(false);
+}
+async function confirmRequirementsChecklist() {
+  if (!_reqChecklistState) return;
+  const st = _reqChecklistState;
+  if (!st.reqs.every(r => r.checked)) { updateRequirementsConfirmState(); return; }
+  // Remember this worker has passed these requirements at this outlet (team-wide),
+  // so future bookings auto-tick them.
+  try { await recordPassedRequirements(st.worker, st.outlet, st.reqs.map(r => r.id)); } catch(e) { console.warn('recordPassedRequirements failed', e); }
+  document.getElementById('req-checklist-modal').classList.remove('open');
+  _reqChecklistState = null;
+  st.resolve(true);
 }
 function profileNoteBlock(text, tone = 'blue') {
   const clean = String(text || '').trim();
@@ -8063,7 +8239,7 @@ async function offerSlotToStandby(shiftId, workerName) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
   const restriction = assignmentRestriction(workerName, slot.outlet || '');
-  if (restriction) { toast(restriction, 'error'); return; }
+  if (restriction) { toast(stripRequirementsSentinel(restriction), 'error'); return; }
   // Live double-check: never offer to someone already booked that day with a shift
   // whose time overlaps this slot (guards against a stale rendered chip).
   try {
@@ -8204,7 +8380,7 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
     || (function(){ const s = (allShifts||[]).find(x=>String(x.id)===String(shiftId)) || taskShiftCache?.[String(shiftId)]; return s ? { id:s.id, outlet:s.outlet||'', date:s.shift_date||'' } : null; })();
   if (!slot) { toast('Slot no longer open', 'error'); return false; }
   const restriction = assignmentRestriction(worker, slot.outlet || '');
-  if (restriction) { toast(restriction, 'error'); return false; }
+  if (restriction) { toast(stripRequirementsSentinel(restriction), 'error'); return false; }
   // Safety net: never assign a worker into a slot that clashes with another
   // shift they already have that day. allShifts only holds the focused day/week
   // (and maybe one outlet), so check the DB directly for the slot's actual date —
@@ -8649,6 +8825,13 @@ async function confirmAssignWorker(id) {
   if (!typed) { toast('Please enter a worker name', 'error'); return; }
   const matched = allWorkers.find(w => w.name.toLowerCase() === typed.toLowerCase());
   const name = matched ? matched.name : typed;
+  // Enforce bans / do-not-assign + client booking requirements before assigning.
+  const inlineRestriction = assignmentRestriction(name, s.outlet || '');
+  if (inlineRestriction && !isRequirementsRestriction(inlineRestriction)) { toast(stripRequirementsSentinel(inlineRestriction), 'error'); return; }
+  if (s.outlet && name.toLowerCase() !== 'available' && outletRequirements(s.outlet).length) {
+    const ok = await gateRequirements(name, s.outlet);
+    if (!ok) { toast('Assignment cancelled — requirements not met.', 'error'); return; }
+  }
   const { error } = await supabaseClient.from('shifts').update({ worker_name: name, updated_at: new Date().toISOString() }).eq('id', id);
   if (error) { toast('Failed to assign: ' + error.message, 'error'); return; }
   if (!matched) {
@@ -9475,8 +9658,14 @@ function onWorkerInput() {
   const selectedOutlet = document.getElementById('f-outlet')?.value || '';
   const selectedCountry = outletCountry(selectedOutlet);
   const restriction = assignmentRestriction(name, selectedOutlet);
-  if (restriction) {
-    document.getElementById('add-block-text').textContent = restriction;
+  if (restriction && isRequirementsRestriction(restriction)) {
+    // Requirements aren't a hard block here — ops resolves them via the checklist
+    // on confirm. Show an informational note but keep the button enabled.
+    const n = unmetRequirements(name, selectedOutlet).length;
+    document.getElementById('add-block-text').textContent = `${selectedOutlet} has ${n} booking requirement${n!==1?'s':''} to verify for ${name} — you'll confirm them on booking.`;
+    warn.style.display = 'flex'; btn.disabled = false; btn.style.opacity = '1';
+  } else if (restriction) {
+    document.getElementById('add-block-text').textContent = stripRequirementsSentinel(restriction);
     warn.style.display = 'flex'; btn.disabled = true; btn.style.opacity = '0.4';
   } else if (rawName && w && normaliseCountry(w.country) !== selectedCountry) {
     document.getElementById('add-block-text').textContent = `${w.name} is registered under ${normaliseCountry(w.country)}, but this outlet is under ${selectedCountry}.`;
@@ -9536,7 +9725,18 @@ async function addShift() {
   if (!isThirdParty && name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const selectedWorker = allWorkers.find(x => String(x.name || '').toLowerCase() === String(name || '').toLowerCase());
   const restriction = !isThirdParty ? assignmentRestriction(name, outletName) : null;
-  if (restriction) { toast(restriction, 'error'); return; }
+  if (restriction && !isRequirementsRestriction(restriction)) { toast(stripRequirementsSentinel(restriction), 'error'); return; }
+  // Requirements restriction → resolve via the interactive checklist. If ops
+  // cancels or doesn't tick everything, the booking does not proceed.
+  if (restriction && isRequirementsRestriction(restriction)) {
+    const ok = await gateRequirements(name, outletName);
+    if (!ok) { toast('Booking cancelled — requirements not met.', 'error'); return; }
+  } else if (!isThirdParty && name !== 'Available' && outletRequirements(outletName).length) {
+    // All requirements already passed previously: still surface the checklist
+    // (pre-ticked, with a "met previously" note) for a quick one-tap confirm.
+    const ok = await gateRequirements(name, outletName);
+    if (!ok) { toast('Booking cancelled.', 'error'); return; }
+  }
   if (!isThirdParty && selectedWorker && normaliseCountry(selectedWorker.country) !== selectedCountry) { toast(`${name} is registered under ${normaliseCountry(selectedWorker.country)}, not ${selectedCountry}`, 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
@@ -10194,8 +10394,14 @@ async function saveWorker() {
   const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldWorker = editingWorkerId ? allWorkers.find(x => x.id === editingWorkerId) : null;
-  if (oldWorker && normProfileKey(oldWorker.name) !== normProfileKey(name)) delete profileMeta.workers[normProfileKey(oldWorker.name)];
-  profileMeta.workers[normProfileKey(name)] = {
+  const oldWKey = oldWorker ? normProfileKey(oldWorker.name) : null;
+  const newWKey = normProfileKey(name);
+  // Preserve fields we don't edit here — notably passed_requirements (the per-outlet
+  // requirement-verification history) — and carry it across a rename.
+  const prevWMeta = (oldWKey && profileMeta.workers[oldWKey]) ? profileMeta.workers[oldWKey] : (profileMeta.workers[newWKey] || {});
+  if (oldWorker && oldWKey !== newWKey) delete profileMeta.workers[oldWKey];
+  profileMeta.workers[newWKey] = {
+    ...prevWMeta,
     notes: document.getElementById('wf-notes').value.trim(),
     disliked_outlets: wfDislikedOutlets.slice()
   };
@@ -10356,7 +10562,9 @@ function loadOutletsList() {
     <tbody>${filteredOutlets.map(o => {
       const meta = outletProfile(o.name);
       const banned = (meta.banned_workers || []).length ? `<div class="sub-text" style="color:var(--red);margin-top:4px;">Banned: ${escapeHtml(meta.banned_workers.join(', '))}</div>` : '';
-      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      const reqCount = (Array.isArray(meta.requirements) ? meta.requirements.filter(r => r && r.label) : []).length;
+      const reqBadge = reqCount ? `<div class="sub-text" style="color:var(--accent);margin-top:4px;">📋 ${reqCount} booking requirement${reqCount!==1?'s':''}</div>` : '';
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}${reqBadge}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
 }
@@ -10371,6 +10579,8 @@ function resetOutletModal() {
   document.getElementById('of-commission').value = '20';
   document.getElementById('of-notes').value = '';
   document.getElementById('of-banned-workers').value = '';
+  ofRequirements = [];
+  renderOfRequirements();
 }
 function openAddOutletModal() { resetOutletModal(); document.getElementById('add-outlet-modal').classList.add('open'); }
 function editOutlet(id) {
@@ -10386,7 +10596,38 @@ function editOutlet(id) {
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
   document.getElementById('of-notes').value = meta.notes || '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
+  ofRequirements = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
+  renderOfRequirements();
   document.getElementById('add-outlet-modal').classList.add('open');
+}
+
+// ── Outlet requirements editor (in the outlet modal) ──────────────────────────
+let ofRequirements = []; // working copy [{id,label}] while the modal is open
+function renderOfRequirements() {
+  const wrap = document.getElementById('of-req-list');
+  if (!wrap) return;
+  if (!ofRequirements.length) {
+    wrap.innerHTML = '<div class="sub-text" style="font-style:italic;">No requirements yet. Bookings here proceed without a checklist.</div>';
+    return;
+  }
+  wrap.innerHTML = ofRequirements.map((r, i) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);">
+      <span style="flex:1;font-size:13px;color:var(--text);">${escapeHtml(r.label)}</span>
+      <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red);" title="Delete requirement" onclick="ofRemoveRequirement(${i})">Delete</button>
+    </div>`).join('');
+}
+function ofAddRequirement() {
+  const input = document.getElementById('of-req-new');
+  const label = (input?.value || '').trim();
+  if (!label) { toast('Type a requirement first', 'error'); return; }
+  if (ofRequirements.some(r => r.label.toLowerCase() === label.toLowerCase())) { toast('That requirement is already listed', 'error'); return; }
+  ofRequirements.push({ id: newRequirementId(), label });
+  if (input) input.value = '';
+  renderOfRequirements();
+}
+function ofRemoveRequirement(i) {
+  ofRequirements.splice(i, 1);
+  renderOfRequirements();
 }
 
 async function saveOutlet() {
@@ -10397,11 +10638,26 @@ async function saveOutlet() {
   const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldOutlet = editingOutletId ? allOutlets.find(x => x.id === editingOutletId) : null;
-  if (oldOutlet && normProfileKey(oldOutlet.name) !== normProfileKey(name)) delete profileMeta.outlets[normProfileKey(oldOutlet.name)];
-  profileMeta.outlets[normProfileKey(name)] = {
+  const oldKey = oldOutlet ? normProfileKey(oldOutlet.name) : null;
+  const newKey = normProfileKey(name);
+  const prevMeta = (oldKey && profileMeta.outlets[oldKey]) ? profileMeta.outlets[oldKey] : (profileMeta.outlets[newKey] || {});
+  if (oldOutlet && oldKey !== newKey) {
+    delete profileMeta.outlets[oldKey];
+    // Migrate every worker's passed-requirements history from the old outlet key
+    // to the new one so a rename doesn't silently reset everyone's verifications.
+    Object.values(profileMeta.workers || {}).forEach(wm => {
+      if (wm && wm.passed_requirements && Object.prototype.hasOwnProperty.call(wm.passed_requirements, oldKey)) {
+        wm.passed_requirements[newKey] = wm.passed_requirements[oldKey];
+        delete wm.passed_requirements[oldKey];
+      }
+    });
+  }
+  profileMeta.outlets[newKey] = {
+    ...prevMeta, // preserve any fields we don't explicitly edit here
     commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
     notes: document.getElementById('of-notes').value.trim(),
-    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value)
+    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
+    requirements: ofRequirements.map(r => ({ id: r.id, label: r.label }))
   };
   await saveProfileMeta();
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
@@ -12952,7 +13208,7 @@ async function confirmImportBookings() {
     const restriction = assignmentRestriction(r.worker_name, r.outlet);
     if (restriction) {
       skipped++;
-      toast(`Skipped ${r.worker_name}: ${restriction}`, 'error');
+      toast(`Skipped ${r.worker_name}: ${stripRequirementsSentinel(restriction)}`, 'error');
       continue;
     }
 
@@ -13608,18 +13864,16 @@ let aiChatOpen = false;
 async function loadKnowledge() {
   // Business knowledge is TEAM-WIDE: every internal user must see every entry,
   // regardless of who uploaded it or which device they're on. The authoritative
-  // store is the shared Supabase `business_knowledge` table.
-  //
-  // The old code silently fell back to a per-device localStorage copy whenever
-  // the Supabase read failed (table missing / RLS blocking the anon role). That
-  // made entries appear ONLY to the device that uploaded them — never universal.
-  // We now surface an honest error instead of silently hiding the team's data.
+  // store is the shared Supabase `business_knowledge` table. The old code silently
+  // fell back to a per-device localStorage copy whenever the Supabase read failed
+  // (table missing / RLS blocking the anon role) — making entries visible ONLY to
+  // the device that uploaded them. We now read the shared table as the single
+  // source of truth and surface an honest error instead of hiding the team's data.
   if (supabaseClient) {
     try {
       const { data, error } = await supabaseClient.from('business_knowledge').select('*').order('updated_at', { ascending: false });
       if (!error && data) {
         allKnowledge = data;
-        // Mirror to localStorage purely as an offline read cache (never the source of truth).
         try { localStorage.setItem('business_knowledge_local', JSON.stringify(data)); } catch(e) {}
         return;
       }
@@ -13627,11 +13881,8 @@ async function loadKnowledge() {
         console.warn('Business knowledge: Supabase read failed —', error.message);
         toast('⚠️ Could not load team knowledge from Supabase — showing cached copy only. Run the business_knowledge SQL / check RLS.', 'error');
       }
-    } catch(e) {
-      console.warn('Business knowledge: Supabase read threw —', e?.message || e);
-    }
+    } catch(e) { console.warn('Business knowledge: Supabase read threw —', e?.message || e); }
   }
-  // Read-only cache fallback (last successful team pull on this device).
   allKnowledge = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]');
 }
 
@@ -13649,8 +13900,8 @@ async function kbSaveEntry(entry) {
       }
     } catch(e) { console.warn('Business knowledge save threw —', e?.message || e); }
   }
-  // localStorage fallback — NOT team-visible. Tell the user honestly so they
-  // know this entry won't reach the rest of the team until Supabase is fixed.
+  // localStorage fallback — NOT team-visible. Be honest so the user knows it
+  // won't reach the rest of the team until Supabase is fixed.
   toast('⚠️ Saved on this device only — NOT visible to your team. Run the business_knowledge SQL / check RLS so it syncs universally.', 'error');
   const rows = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]');
   if (entry.id) {
@@ -13928,6 +14179,19 @@ function buildSystemContext() {
   });
   const restrictionList = restrictionLines.length ? restrictionLines.join('\n') : 'None on record.';
 
+  // Per-outlet client booking requirements (checklist that must be ticked before
+  // a worker can be assigned there). Surfaced so the AI knows a booking may be
+  // gated and can list/add/remove them.
+  const reqLines = [];
+  Object.entries(profileMeta.outlets || {}).forEach(([key, meta]) => {
+    const reqs = Array.isArray(meta.requirements) ? meta.requirements.filter(r => r && r.label) : [];
+    if (reqs.length) {
+      const outletName = (allOutlets.find(o => normProfileKey(o.name) === key) || {}).name || key;
+      reqLines.push(`${outletName}: ${reqs.map(r => r.label).join(' | ')}`);
+    }
+  });
+  const requirementsList = reqLines.length ? reqLines.join('\n') : 'None on record.';
+
   return `
 === SYSTEM CONTEXT (live data) ===
 Current user: ${currentInternalUser || 'Unknown'}
@@ -13954,6 +14218,9 @@ OUTLETS: ${outletList}
 
 ASSIGNMENT RESTRICTIONS (bans / do-not-assign — NEVER create a shift that violates these):
 ${restrictionList}
+
+OUTLET BOOKING REQUIREMENTS (must be verified/ticked in-app before a worker can be booked there):
+${requirementsList}
 
 BUSINESS KNOWLEDGE (${allKnowledge.length} entries):
 ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e.outlet+')':''} ${e.topic}: ${e.content}`).join('\n')||'No entries yet.'}
@@ -13992,6 +14259,9 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
 {"type": "banWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
 {"type": "unbanWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
+{"type": "addOutletRequirement", "outlet": "<exact outlet name from DB>", "requirement": "<requirement text, phrased as a yes/no check, e.g. Is the worker 18 or above?>"}
+{"type": "removeOutletRequirement", "outlet": "<exact outlet name from DB>", "requirement": "<the requirement text to remove>"}
+{"type": "listOutletRequirements", "outlet": "<exact outlet name from DB>"}
 {"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
 \`\`\`
@@ -14041,6 +14311,7 @@ RULES:
 - IMPORTANT: saveKnowledge is ONLY for general business knowledge (SOPs, rules, policies). For updating a specific worker's phone, payment method, country, or notes, ALWAYS use updateWorkerProfile instead — never save personal worker data to business knowledge.
 - BANNING: When the user says a worker is banned, barred, blacklisted, or "should not / cannot be assigned" to a specific outlet (e.g. "Ahn Duc is banned from Les Bouchons"), use the banWorkerFromOutlet action with the exact worker and outlet names. To lift a ban ("unban", "allow again", "remove the ban"), use unbanWorkerFromOutlet. This is NOT business knowledge — do not use saveKnowledge for bans. If either the worker or the outlet name is ambiguous or not in context, look them up first (searchWorker / searchOutlet) before banning.
 - ENFORCING BANS: NEVER create or offer to create a shift (createShift, forceCreateShift, batchCreateSlots) that assigns a worker to an outlet they're banned from or marked do-not-assign for — check ASSIGNMENT RESTRICTIONS above first. If asked to do so, refuse and explain the worker is restricted there, and offer to lift the restriction if that's what they want. The system will also hard-block it, but you should catch it before proposing the booking.
+- CLIENT BOOKING REQUIREMENTS: Some outlets have a requirements checklist (e.g. "Is the worker 18 or above?", "Has formal black long-sleeve shirt?") — see OUTLET BOOKING REQUIREMENTS above. To add one, use addOutletRequirement; to remove one, use removeOutletRequirement; to see them, use listOutletRequirements. Phrase added requirements as a clear yes/no check. A worker can only be booked at such an outlet once every requirement has been verified (ticked) at least once; the system remembers who has passed and auto-applies it next time. You CANNOT tick the checklist yourself — it requires a human in the app — so if you try to book a worker who hasn't passed an outlet's requirements, the booking is blocked and you should tell the user to confirm the checklist in the app (it appears automatically when they book). If a user adds a new requirement, existing passers keep their prior ticks and only need the new item verified.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - Speak naturally, like a helpful colleague.`;
 
@@ -14177,6 +14448,9 @@ async function executeAIAction(actionJson) {
       // that outlet, and this is NOT overridable via "confirm override".
       const restriction = assignmentRestriction(w.name, outlet.name);
       if (restriction) {
+        if (isRequirementsRestriction(restriction)) {
+          return `🚫 **Blocked — ${stripRequirementsSentinel(restriction)}** I can't book ${w.name} until those requirements are verified. Open the booking in the app and tick the requirements checklist, or confirm them there once — after that ${w.name} will auto-pass for future bookings at ${outlet.name}.`;
+        }
         return `🚫 **Blocked — ${restriction}** I won't create this shift. To allow it, lift the restriction first (e.g. tell me "unban ${w.name} from ${outlet.name}" or update it in the worker/outlet settings).`;
       }
       if (isWorkerSuspended(w.name)) {
@@ -14237,6 +14511,9 @@ async function executeAIAction(actionJson) {
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
       const fcRestriction = assignmentRestriction(w.name, outlet.name);
       if (fcRestriction) {
+        if (isRequirementsRestriction(fcRestriction)) {
+          return `🚫 **Blocked — ${stripRequirementsSentinel(fcRestriction)}** A conflict override doesn't bypass booking requirements. Tick ${w.name}'s requirements checklist for ${outlet.name} in the app first.`;
+        }
         return `🚫 **Blocked — ${fcRestriction}** A conflict override doesn't lift a ban. Lift the restriction first if you really want to assign them here.`;
       }
       if (isWorkerSuspended(w.name)) {
@@ -14297,7 +14574,7 @@ async function executeAIAction(actionJson) {
           const wMatch = allWorkers.find(x => x.name.toLowerCase() === wn.toLowerCase());
           const realName = wMatch ? wMatch.name : wn;
           const r = assignmentRestriction(realName, outlet.name);
-          if (r) return `🚫 **Blocked — ${r}** No slots created. Lift the restriction first.`;
+          if (r) return `🚫 **Blocked — ${stripRequirementsSentinel(r)}** No slots created. ${isRequirementsRestriction(r) ? 'Verify the requirements checklist in the app first.' : 'Lift the restriction first.'}`;
           if (isWorkerSuspended(realName)) return `🚫 **Blocked — ${realName} is suspended.** No slots created.`;
         }
       }
@@ -14420,6 +14697,47 @@ async function executeAIAction(actionJson) {
       return banning
         ? `🚫 **${worker.name}** is now banned from **${outlet.name}** — they won't be suggested or assignable there (a warning shows if anyone tries).`
         : `✅ Ban lifted — **${worker.name}** can be assigned to **${outlet.name}** again.`;
+    }
+
+    case 'addOutletRequirement':
+    case 'removeOutletRequirement': {
+      const adding = a.type === 'addOutletRequirement';
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const label = String(a.requirement || '').trim();
+      if (!label) return `❌ Please specify the requirement text.`;
+      const oKey = normProfileKey(outlet.name);
+      const existing = profileMeta.outlets[oKey] || {};
+      const list = Array.isArray(existing.requirements) ? existing.requirements.slice() : [];
+      if (adding) {
+        if (list.some(r => r.label.toLowerCase() === label.toLowerCase())) {
+          return `ℹ️ **${outlet.name}** already has the requirement "${label}".`;
+        }
+        list.push({ id: newRequirementId(), label });
+        profileMeta.outlets[oKey] = { ...existing, requirements: list };
+        await saveProfileMeta();
+        try { loadOutletsList(); } catch(e) {}
+        return `✅ Added requirement to **${outlet.name}**: "${label}". It must now be ticked before anyone can be booked there. Workers who already passed the existing requirements keep those ticks — only this new one needs verifying.`;
+      } else {
+        // Remove by fuzzy label match (case-insensitive contains).
+        const idx = list.findIndex(r => r.label.toLowerCase() === label.toLowerCase())
+          ;
+        const idx2 = idx > -1 ? idx : list.findIndex(r => r.label.toLowerCase().includes(label.toLowerCase()));
+        if (idx2 === -1) return `ℹ️ Couldn't find a requirement matching "${label}" at **${outlet.name}". Current requirements: ${list.length ? list.map(r=>`"${r.label}"`).join(', ') : 'none'}.`;
+        const removed = list.splice(idx2, 1)[0];
+        profileMeta.outlets[oKey] = { ...existing, requirements: list };
+        await saveProfileMeta();
+        try { loadOutletsList(); } catch(e) {}
+        return `✅ Removed requirement from **${outlet.name}**: "${removed.label}".`;
+      }
+    }
+
+    case 'listOutletRequirements': {
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const reqs = outletRequirements(outlet.name);
+      if (!reqs.length) return `**${outlet.name}** has no booking requirements set.`;
+      return `**${outlet.name}** booking requirements (all must be ticked to book):\n${reqs.map((r,i)=>`${i+1}. ${r.label}`).join('\n')}`;
     }
 
     case 'saveKnowledge': {
