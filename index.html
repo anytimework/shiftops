@@ -14164,6 +14164,23 @@ function buildSystemContext() {
     today14.push(`${ds}: ${filled} filled, ${avail} available slots`);
   }
 
+  // Explicit per-slot detail for OPEN/AVAILABLE shifts so the assistant can name
+  // each one (outlet/time/role/id) when asked "what available shifts do you have".
+  // The aggregate counts above only give totals; this gives the actual rows.
+  // Sourced from the dedicated availableSlots array (loadAvailableSlots), which
+  // is the authoritative list of unfilled future slots — RECENT SHIFTS above is
+  // assigned-first and truncates open slots out.
+  const openSlotPool = (typeof availableSlots !== 'undefined' && Array.isArray(availableSlots) && availableSlots.length)
+    ? availableSlots.slice(0, 60)
+    : allShifts.filter(s => isOpenSlot(s) && s.shift_date >= todayStr)
+        .sort((a,b) => a.shift_date.localeCompare(b.shift_date)).slice(0, 60);
+  const openSlotList = openSlotPool.length
+    ? openSlotPool.map(s =>
+        `[${s.shift_date} ${s.scheduled_start?.slice(0,5)||'?'}-${s.scheduled_end?.slice(0,5)||'?'}] ` +
+        `${s.outlet||'?'} | role:${s.role||'Any'} | id:${s.id}`
+      ).join('\n')
+    : 'No open/available slots on record.';
+
   const outletList = allOutlets.map(o => `${o.name} (${normaliseCountry(o.country||'')})`).join(', ');
 
   // Assignment restrictions (bans / do-not-assign) so the assistant can refuse
@@ -14209,6 +14226,9 @@ TODAY OVERVIEW (${today}):
 SHIFT AVAILABILITY (next 14 days):
 ${today14.join('\n')}
 
+OPEN / AVAILABLE SLOTS (unfilled future shifts — these ARE the available shifts; cite outlet, time, role, id when asked):
+${openSlotList}
+
 RECENT SHIFTS (up to 40):
 ${shiftList}
 
@@ -14231,6 +14251,9 @@ ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e
 // Claude API call via Anthropic
 async function callClaude(userMessage) {
   aiHistory.push({ role: 'user', content: userMessage });
+
+  // Make sure the open-slot list the assistant sees is current.
+  try { await loadAvailableSlots(); } catch(e) {}
 
   const systemPrompt = `You are a helpful operations assistant embedded in "Anytime Work Operations", an F&B payroll and shift management system used in Singapore, Malaysia, and the Philippines.
 
@@ -14255,7 +14278,7 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "forceCreateShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
 {"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
 {"type": "batchCreateSlots", "outlet": "<exact outlet name from DB>", "role": "<default role for all slots>", "slots": [{"date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<override role or omit>"}, ...]}
-{"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
+{"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "preferredTime": "Any time|Morning|Afternoon|Evening|Full day", "preferredRole": "<role or Any role>", "area": "<optional area/outlet>", "note": "<optional note>"}
 {"type": "searchWorker", "query": "<partial or full name to search>"}
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
 {"type": "banWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
@@ -14606,22 +14629,33 @@ async function executeAIAction(actionJson) {
     case 'addStandby': {
       const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
       if (!w) return `❌ Worker "${a.workerName}" not found`;
+      // Match the columns the manual "Add standby" form writes (saveStandbyWorker)
+      // so the row is shaped identically and shows up on the Standby page.
       const record = {
+        id: (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now())),
         worker_name: w.name,
         available_date: a.availableDate,
-        note: a.note || '',
+        preferred_time: a.preferredTime || 'Any time',
+        preferred_role: a.preferredRole || 'Any role',
+        area: a.area || null,
+        notes: a.note || a.notes || null,
+        created_by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) || 'AI',
         created_at: new Date().toISOString()
       };
+      let syncedToDb = false;
       try {
         const { error } = await supabaseClient.from('standby_workers').insert(record);
         if (error) throw error;
+        syncedToDb = true;
       } catch(e) {
-        // fallback to localStorage
-        const rows = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
-        rows.push({ ...record, id: Date.now() });
-        localStorage.setItem('standby_workers_local', JSON.stringify(rows));
+        // Surface the real failure instead of a silent localStorage fallback with
+        // a fake success — schema/RLS gaps must not look like a successful save.
+        try { saveStandbyLocal(record); } catch(_) {}
+        await loadStandbyList(); renderStandbyPage(); renderTable();
+        return `⚠️ Could not save **${w.name}** to the team standby list — the database rejected it (${e?.message || 'standby_workers insert failed; check the table columns / RLS policy'}). Saved on this device only as a fallback; it will NOT be visible to the team until the table is fixed.`;
       }
-      return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby list for ${a.availableDate}`;
+      await loadStandbyList(); renderStandbyPage(); renderTable();
+      return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby for ${a.availableDate}${record.preferred_time && record.preferred_time!=='Any time' ? ' · '+record.preferred_time : ''}${record.preferred_role && record.preferred_role!=='Any role' ? ' · '+record.preferred_role : ''}.`;
     }
 
     case 'updateWorkerProfile': {
