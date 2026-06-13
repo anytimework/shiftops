@@ -7028,9 +7028,13 @@ function buildClockOutMessage(s, co) {
     lines.push(`Hours: ${hours}h`);
     lines.push(`Rate: ${sym}${rate.toFixed(2)}/hr${isOwnSR ? ` (SR: ${sym}${parseFloat(s.sr_rate).toFixed(2)}/hr)` : ''}`);
     lines.push('---');
+    // Total deductions = penalties + overpayment recovery (transport is an addition, not a deduction)
+    const totalDeduct = penalty + opDeduct;
     lines.push(`Gross pay: ${fmt(grossPay)}`);
-    if (penalty > 0)    lines.push(`Penalty: -${fmt(penalty)}`);
-    if (opDeduct > 0)   lines.push(`OP recovery: -${fmt(opDeduct)}`);
+    lines.push(`Deductions: ${totalDeduct > 0 ? '-' : ''}${fmt(totalDeduct)}`);
+    if (penalty > 0)    lines.push(`  • Penalty: -${fmt(penalty)}`);
+    if (opDeduct > 0)   lines.push(`  • OP recovery: -${fmt(opDeduct)}`);
+    if (tc > 0)         lines.push(`Transport: +${fmt(tc)}`);
     if (isSRWorker && s.sr_worker) lines.push(`SR (3rd party): ${s.sr_worker}`);
     if (isSRWorker && srAbsorbed > 0) lines.push(`SR absorbed: ${fmt(srAbsorbed)}`);
     if (isOwnSR) {
@@ -7038,8 +7042,13 @@ function buildClockOutMessage(s, co) {
       try { srPay = parseFloat(calcShiftHours(ts) || 0) * parseFloat(s.sr_rate || 0); } catch(e) {}
       lines.push(`SR payout: ${fmt(srPay)}`);
     }
-    if (tc > 0) lines.push(`Transport: +${fmt(tc)}`);
     lines.push(`*Net payout: ${fmt(netPay)}*`);
+    lines.push('');
+    // Payment description (currency-aware via simplePayrollText)
+    try {
+      const desc = simplePayrollText(ts);
+      if (desc && desc !== '—') lines.push(desc);
+    } catch(e) {}
     lines.push('---');
     lines.push(`Pay to: ${payInfo}`);
     return lines.join('\n');
