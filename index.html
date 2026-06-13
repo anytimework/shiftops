@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v35 — Business Knowledge is now TEAM-WIDE for everyone. Previously, if the shared Supabase `business_knowledge` read failed (missing table / RLS blocking the anon role), the page silently fell back to a per-device localStorage copy — so an entry was visible ONLY to the person/device that uploaded it. loadKnowledge() now reads the shared Supabase table as the single source of truth, mirrors it to localStorage only as a read cache, and shows an honest error toast (instead of silently hiding the team's data) if the read fails. kbSaveEntry() now warns clearly when a save lands on this device only and won't reach the team, with the fix (run the business_knowledge SQL / check RLS). No new columns. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -13605,24 +13606,52 @@ let aiChatOpen = false;
 // ══════════════════════════════════════════════════════════════
 // ── Business Knowledge ────────────────────────────────────────
 async function loadKnowledge() {
-  try {
-    const { data, error } = await supabaseClient.from('business_knowledge').select('*').order('updated_at', { ascending: false });
-    if (!error && data) { allKnowledge = data; return; }
-  } catch(e) {}
+  // Business knowledge is TEAM-WIDE: every internal user must see every entry,
+  // regardless of who uploaded it or which device they're on. The authoritative
+  // store is the shared Supabase `business_knowledge` table.
+  //
+  // The old code silently fell back to a per-device localStorage copy whenever
+  // the Supabase read failed (table missing / RLS blocking the anon role). That
+  // made entries appear ONLY to the device that uploaded them — never universal.
+  // We now surface an honest error instead of silently hiding the team's data.
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient.from('business_knowledge').select('*').order('updated_at', { ascending: false });
+      if (!error && data) {
+        allKnowledge = data;
+        // Mirror to localStorage purely as an offline read cache (never the source of truth).
+        try { localStorage.setItem('business_knowledge_local', JSON.stringify(data)); } catch(e) {}
+        return;
+      }
+      if (error) {
+        console.warn('Business knowledge: Supabase read failed —', error.message);
+        toast('⚠️ Could not load team knowledge from Supabase — showing cached copy only. Run the business_knowledge SQL / check RLS.', 'error');
+      }
+    } catch(e) {
+      console.warn('Business knowledge: Supabase read threw —', e?.message || e);
+    }
+  }
+  // Read-only cache fallback (last successful team pull on this device).
   allKnowledge = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]');
 }
 
 async function kbSaveEntry(entry) {
-  try {
-    if (entry.id) {
-      const { error } = await supabaseClient.from('business_knowledge').update({ ...entry, updated_at: new Date().toISOString() }).eq('id', entry.id);
-      if (!error) { await loadKnowledge(); renderKnowledgePage(); return entry.id; }
-    } else {
-      const { data, error } = await supabaseClient.from('business_knowledge').insert({ ...entry, created_by: currentInternalUser, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }).select();
-      if (!error && data) { await loadKnowledge(); renderKnowledgePage(); return data[0].id; }
-    }
-  } catch(e) {}
-  // localStorage fallback
+  if (supabaseClient) {
+    try {
+      if (entry.id) {
+        const { error } = await supabaseClient.from('business_knowledge').update({ ...entry, updated_at: new Date().toISOString() }).eq('id', entry.id);
+        if (!error) { await loadKnowledge(); renderKnowledgePage(); return entry.id; }
+        console.warn('Business knowledge update failed —', error.message);
+      } else {
+        const { data, error } = await supabaseClient.from('business_knowledge').insert({ ...entry, created_by: currentInternalUser, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }).select();
+        if (!error && data) { await loadKnowledge(); renderKnowledgePage(); return data[0].id; }
+        if (error) console.warn('Business knowledge insert failed —', error.message);
+      }
+    } catch(e) { console.warn('Business knowledge save threw —', e?.message || e); }
+  }
+  // localStorage fallback — NOT team-visible. Tell the user honestly so they
+  // know this entry won't reach the rest of the team until Supabase is fixed.
+  toast('⚠️ Saved on this device only — NOT visible to your team. Run the business_knowledge SQL / check RLS so it syncs universally.', 'error');
   const rows = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]');
   if (entry.id) {
     const idx = rows.findIndex(r => r.id === entry.id);
