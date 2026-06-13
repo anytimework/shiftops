@@ -1697,7 +1697,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.7;color:var(--text2);">
         <strong>🌙 Night reminders</strong> — auto-sent to workers between 7 PM–10 PM for tomorrow's shifts<br>
         <strong>⏰ Clock-in reminders</strong> — auto-sent ~3 hours before shift starts<br>
-        <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
+        <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / 👌 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
         <strong>🚨 Dispute &amp; cancellation detection</strong> — when a worker replies that they <em>can't make it</em> or <em>want to cancel</em> (e.g. “cancel”, “can't make it”, “sick”, “MC”), ShiftOps flags the shift as <strong>disputed</strong> and surfaces a red alert + Process-cancellation button
       </div>
       <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
@@ -1739,7 +1739,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border2);">
           <strong>The webhook classifies each inbound reply</strong> and updates the worker's most recent pending reminder shift:
           <div style="margin-top:6px;">• <span style="color:var(--green);">ACK</span> → sets <code>night_acked</code> / <code>clockin_responded = true</code><br>
-          &nbsp;&nbsp;<span style="color:var(--text3);">keywords: ok, okay, yes, y, confirm, confirmed, noted, sure, 👍, ✓, ✅, can, will be there</span><br>
+          &nbsp;&nbsp;<span style="color:var(--text3);">keywords: ok, okay, yes, y, confirm, confirmed, noted, sure, 👍, 👌, ✓, ✅, can, will be there</span><br>
           • <span style="color:var(--red);">DISPUTE</span> → sets <code>disputed = true</code>, <code>dispute_kind</code>, <code>dispute_reason</code> (the raw message)<br>
           &nbsp;&nbsp;<span style="color:var(--text3);">keywords: cancel, can't make it, cannot make, not coming, won't come, sick, mc, emergency, reschedule, can't come, drop</span></div>
           <button class="btn btn-ghost btn-sm" style="margin-top:8px;font-size:11px;" onclick="showReminderSchemaSQL()">📋 Show required Supabase SQL</button>
@@ -8634,7 +8634,7 @@ create index if not exists completed_tasks_completed_at_idx on public.completed_
 --    pending reminder shift, then classify the message body:
 --
 --    const body = msg.body.toLowerCase().trim();
---    const ACK = /\\b(ok|okay|yes|y|confirm|confirmed|noted|sure|can|coming|will be there)\\b|👍|✓|✅/;
+--    const ACK = /\\b(ok|okay|yes|y|confirm|confirmed|noted|sure|can|coming|will be there)\\b|👍|👌|✓|✅/;
 --    const DISPUTE = /\\b(cancel|can.?t make|cannot make|not coming|won.?t come|sick|mc|emergency|reschedule|can.?t come|drop)\\b/;
 --    const LATE = /\\b(late|delay|delayed|running late|caught up|stuck|traffic|jam|be there by|reach by|reaching late|slightly late|bit late|few mins late|15 ?min|20 ?min|30 ?min)\\b/;
 --
