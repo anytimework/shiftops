@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v37 — AI chatbot now shows WHAT it changed for batched actions. Previously, when 4+ actions ran at once (e.g. adding 4 booking requirements), the chat only showed "X of Y actions completed" and discarded each action's detail — so you couldn't see which requirements were recorded or on which outlet. The large-batch summary now lists each successful action's confirmation line. addOutletRequirement / removeOutletRequirement confirmations now echo the exact outlet name plus the full updated requirement list, so there's no ambiguity about which outlet received what. -->
 <!-- Build patch: v36 — Client booking requirements. Each outlet can now hold a requirements checklist (e.g. "Is the worker 18+?", "Has formal black long-sleeve shirt?", add/delete in the outlet profile or via the AI chatbot). When booking a worker into an outlet that has requirements, a checklist modal appears; EVERY item must be ticked or the booking is blocked. The system remembers who passed which requirements at which outlet (profileMeta.workers[key].passed_requirements[outletKey]) and auto-ticks those on future bookings, with a "met all requirements in a previous shift" disclaimer — if you ADD a new requirement later, prior passers keep their ticks and only the new item needs verifying. Gating is enforced on ALL assignment paths via assignmentRestriction(): interactive paths (Add Shift form, inline Available-slot assign) pop the checklist; non-interactive paths (AI createShift/forceCreateShift/batchCreateSlots, standby auto-accept) safely refuse with a clear message. New AI actions: addOutletRequirement, removeOutletRequirement, listOutletRequirements. Stored team-wide in app_settings/profile_meta; mergeProfileMeta extended (requirements replaced so edits/deletes propagate; passed_requirements deep-unioned so no device loses pass history). saveOutlet/saveWorker now preserve existing meta (no longer wipe requirements/pass-history) and carry it across renames. -->
 <!-- Build patch: v35 — Business Knowledge is now TEAM-WIDE for everyone. Previously, if the shared Supabase `business_knowledge` read failed (missing table / RLS blocking the anon role), the page silently fell back to a per-device localStorage copy — so an entry was visible ONLY to the person/device that uploaded it. loadKnowledge() now reads the shared Supabase table as the single source of truth, mirrors it to localStorage only as a read cache, and shows an honest error toast (instead of silently hiding the team's data) if the read fails. kbSaveEntry() now warns clearly when a save lands on this device only and won't reach the team, with the fix (run the business_knowledge SQL / check RLS). No new columns. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
@@ -14717,18 +14718,17 @@ async function executeAIAction(actionJson) {
         profileMeta.outlets[oKey] = { ...existing, requirements: list };
         await saveProfileMeta();
         try { loadOutletsList(); } catch(e) {}
-        return `✅ Added requirement to **${outlet.name}**: "${label}". It must now be ticked before anyone can be booked there. Workers who already passed the existing requirements keep those ticks — only this new one needs verifying.`;
+        return `✅ Added to **${outlet.name}**: "${label}" (now ${list.length} requirement${list.length!==1?'s':''}: ${list.map(r=>`"${r.label}"`).join(', ')}). It must be ticked before booking. Existing passers keep their ticks — only this new item needs verifying.`;
       } else {
-        // Remove by fuzzy label match (case-insensitive contains).
-        const idx = list.findIndex(r => r.label.toLowerCase() === label.toLowerCase())
-          ;
+        // Remove by fuzzy label match (case-insensitive exact, then contains).
+        const idx = list.findIndex(r => r.label.toLowerCase() === label.toLowerCase());
         const idx2 = idx > -1 ? idx : list.findIndex(r => r.label.toLowerCase().includes(label.toLowerCase()));
-        if (idx2 === -1) return `ℹ️ Couldn't find a requirement matching "${label}" at **${outlet.name}". Current requirements: ${list.length ? list.map(r=>`"${r.label}"`).join(', ') : 'none'}.`;
+        if (idx2 === -1) return `ℹ️ Couldn't find a requirement matching "${label}" at **${outlet.name}**. Current requirements: ${list.length ? list.map(r=>`"${r.label}"`).join(', ') : 'none'}.`;
         const removed = list.splice(idx2, 1)[0];
         profileMeta.outlets[oKey] = { ...existing, requirements: list };
         await saveProfileMeta();
         try { loadOutletsList(); } catch(e) {}
-        return `✅ Removed requirement from **${outlet.name}**: "${removed.label}".`;
+        return `✅ Removed from **${outlet.name}**: "${removed.label}" (${list.length} requirement${list.length!==1?'s':''} left${list.length?': '+list.map(r=>`"${r.label}"`).join(', '):''}).`;
       }
     }
 
@@ -14779,13 +14779,14 @@ async function renderAIReply(reply) {
 
   let successCount = 0;
   const errors = [];
+  const successes = [];
   for (let i = 0; i < actionMatches.length; i++) {
     try {
       const result = await executeAIAction(actionMatches[i][1].trim());
       if (result) {
-        if (result.startsWith('✅')) successCount++;
+        if (result.startsWith('✅')) { successCount++; successes.push(result); }
         else errors.push(result);
-        // Only show individual results for small batches (≤3)
+        // Only show individual results inline for small batches (≤3)
         if (actionMatches.length <= 3) {
           const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
           aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
@@ -14796,11 +14797,15 @@ async function renderAIReply(reply) {
     }
   }
 
-  // For large batches, show a summary instead of individual messages
+  // For large batches, show a summary that STILL lists what each action did
+  // (previously only the count survived, so e.g. added requirements were invisible).
   if (actionMatches.length > 3) {
     if (progressEl) progressEl.remove();
     let summary = `✅ **${successCount} of ${actionMatches.length} actions completed successfully.**`;
-    if (errors.length) summary += `<br>⚠️ ${errors.length} error(s):<br>` + errors.map(e => escapeHtml(e)).join('<br>');
+    if (successes.length) {
+      summary += `<br><br>` + successes.map(s => '• ' + s.replace(/^✅\s*/, '')).join('<br>');
+    }
+    if (errors.length) summary += `<br><br>⚠️ ${errors.length} error(s):<br>` + errors.map(e => escapeHtml(e)).join('<br>');
     aiAddMsg(summary.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'), successCount > 0 ? 'bot' : 'error');
   } else if (errors.length && actionMatches.length <= 3) {
     errors.forEach(e => aiAddMsg(e, 'error'));
