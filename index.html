@@ -1171,6 +1171,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       <div class="topbar">
         <div class="topbar-left"><h2>📚 Business Knowledge</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Store SOPs, attire rules, outlet info — the AI learns from this too</p></div>
         <div class="topbar-right" style="gap:8px;">
+          <button class="btn btn-ghost btn-sm" onclick="kbDiagnoseSync()" title="Check whether knowledge is syncing team-wide via Supabase">🩺 Fix sync</button>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('kb-upload-input').click()">⬆️ Attach file</button>
           <input type="file" id="kb-upload-input" accept=".txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp" style="display:none" onchange="kbUploadFile(this)">
           <button class="btn btn-primary btn-sm" onclick="kbOpenAddModal()">+ Add Entry</button>
@@ -1696,7 +1697,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.7;color:var(--text2);">
         <strong>🌙 Night reminders</strong> — auto-sent to workers between 7 PM–10 PM for tomorrow's shifts<br>
-        <strong>⏰ Clock-in reminders</strong> — auto-sent ~60 min before shift starts<br>
+        <strong>⏰ Clock-in reminders</strong> — auto-sent 3 hours before shift starts<br>
         <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
         <strong>🚨 Dispute &amp; cancellation detection</strong> — when a worker replies that they <em>can't make it</em> or <em>want to cancel</em> (e.g. “cancel”, “can't make it”, “sick”, “MC”), ShiftOps flags the shift as <strong>disputed</strong> and surfaces a red alert + Process-cancellation button
       </div>
@@ -7671,11 +7672,13 @@ async function autoSendShiftReminders() {
       }
     }
 
-    // ⏰ Clock-in reminder: send 60-90 min before shift start on the day
+    // ⏰ Clock-in reminder: auto-send 3 hours before shift start on the day.
+    // Window opens at exactly 180 min before and stays open until 15 min before,
+    // so a worker still gets one even if the app wasn't open right at the 3h mark.
     if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
-      if (nowMins >= shiftMins - 90 && nowMins < shiftMins - 15) {
+      if (nowMins >= shiftMins - 180 && nowMins < shiftMins - 15) {
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
@@ -13862,6 +13865,83 @@ function buildTop10Cancellations(cancelled) {
 let aiChatOpen = false;
 // ══════════════════════════════════════════════════════════════
 // ── Business Knowledge ────────────────────────────────────────
+// Run this SQL in Supabase if knowledge isn't syncing team-wide. The most common
+// cause is that the `business_knowledge` table doesn't exist, or RLS is enabled
+// with no permissive policy for the anon role — so every read fails and each
+// device silently falls back to its own localStorage copy (the bug you saw:
+// one person uploads, nobody else can see it).
+const BUSINESS_KNOWLEDGE_SCHEMA_SQL = `create table if not exists public.business_knowledge (
+  id uuid primary key default gen_random_uuid(),
+  title text,
+  category text,
+  content text,
+  created_by text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.business_knowledge enable row level security;
+drop policy if exists "business_knowledge_all" on public.business_knowledge;
+create policy "business_knowledge_all" on public.business_knowledge
+  for all using (true) with check (true);`;
+
+// One-tap diagnosis from the Business Knowledge page. Tells you in plain language
+// whether the shared table is reachable and writable, and copies the fix SQL to
+// the clipboard if it isn't — so you can resolve the "not universal" problem
+// without digging through the console.
+async function kbDiagnoseSync() {
+  if (!supabaseClient) {
+    alert('No Supabase connection configured, so Business Knowledge can only ever live on this one device. Connect Supabase first.');
+    return;
+  }
+  // 1) Can we READ the shared table?
+  let readOk = false, readErr = null;
+  try {
+    const { error } = await supabaseClient.from('business_knowledge').select('id').limit(1);
+    if (error) readErr = error; else readOk = true;
+  } catch (e) { readErr = e; }
+
+  if (!readOk) {
+    const msg = (readErr && readErr.message) || String(readErr);
+    const missing = /relation .*does not exist|could not find the table/i.test(msg);
+    const rls = /row-level security|permission|policy/i.test(msg);
+    let diag = '❌ The shared Business Knowledge table is NOT readable, which is exactly why an upload by one person isn\'t visible to the rest of the team — every device is falling back to its own local copy.\n\n';
+    diag += missing
+      ? 'Cause: the `business_knowledge` table doesn\'t exist in Supabase yet.\n\n'
+      : (rls ? 'Cause: Row-Level Security is blocking the anon role (no permissive policy).\n\n'
+             : 'Supabase said: ' + msg + '\n\n');
+    diag += 'FIX: run the SQL below in your Supabase SQL editor (it\'s been copied to your clipboard), then everyone refreshes once.';
+    try { await navigator.clipboard.writeText(BUSINESS_KNOWLEDGE_SCHEMA_SQL); } catch (e) {}
+    console.log('%c[Business Knowledge] Run this SQL in Supabase:', 'font-weight:bold', '\n' + BUSINESS_KNOWLEDGE_SCHEMA_SQL);
+    alert(diag);
+    return;
+  }
+
+  // 2) Read works — confirm WRITE works too (RLS can allow select but block insert).
+  let writeOk = false, writeErr = null, probeId = null;
+  try {
+    const { data, error } = await supabaseClient.from('business_knowledge')
+      .insert({ title: '__sync_probe__', category: 'General', content: 'connectivity probe — safe to delete', created_by: currentInternalUser || 'probe' })
+      .select();
+    if (error) { writeErr = error; }
+    else { writeOk = true; probeId = data && data[0] && data[0].id; }
+  } catch (e) { writeErr = e; }
+  // Clean up the probe row regardless.
+  if (probeId) { try { await supabaseClient.from('business_knowledge').delete().eq('id', probeId); } catch (e) {} }
+
+  if (!writeOk) {
+    const msg = (writeErr && writeErr.message) || String(writeErr);
+    try { await navigator.clipboard.writeText(BUSINESS_KNOWLEDGE_SCHEMA_SQL); } catch (e) {}
+    console.log('%c[Business Knowledge] Run this SQL in Supabase:', 'font-weight:bold', '\n' + BUSINESS_KNOWLEDGE_SCHEMA_SQL);
+    alert('⚠️ The table is readable but NOT writable (RLS is blocking inserts for the anon role).\n\nSupabase said: ' + msg + '\n\nFIX: the policy SQL has been copied to your clipboard — run it in Supabase, then everyone refreshes once.');
+    return;
+  }
+
+  // 3) All good — reload so the page reflects the live shared data.
+  await loadKnowledge();
+  renderKnowledgePage();
+  alert('✅ Business Knowledge is syncing team-wide. The shared Supabase table is readable AND writable, and this page now shows ' + (allKnowledge.length) + ' entr' + (allKnowledge.length === 1 ? 'y' : 'ies') + '.\n\nIf a teammate still can\'t see an entry, ask them to hard-refresh (Cmd/Ctrl+Shift+R) once.');
+}
+
 async function loadKnowledge() {
   // Business knowledge is TEAM-WIDE: every internal user must see every entry,
   // regardless of who uploaded it or which device they're on. The authoritative
@@ -17810,18 +17890,24 @@ const TEAM_CHAT_SCHEMA_SQL = `create table if not exists team_chat (
   id uuid primary key default gen_random_uuid(),
   sender text not null,
   body text not null,
+  recipient text,
   delivered_to text[] not null default '{}',
   read_by text[] not null default '{}',
   created_at timestamptz not null default now()
 );
--- If the table already exists, add the receipt columns:
+-- If the table already exists, add the receipt + DM columns:
 alter table team_chat add column if not exists delivered_to text[] not null default '{}';
 alter table team_chat add column if not exists read_by text[] not null default '{}';
+alter table team_chat add column if not exists recipient text;
 alter table team_chat enable row level security;
 create policy "team_chat_all" on team_chat for all using (true) with check (true);`;
 
 let teamChatMessages = [];        // cached rows (newest-last)
 let teamChatOpen = false;
+// Active conversation: null = the group "Team" channel; a username string = a 1:1
+// DM thread with that person. DMs are stored in the same team_chat table with a
+// `recipient` column set (group messages leave recipient NULL).
+let teamChatActiveConvo = null;
 let teamChatPollTimer = null;
 let teamChatLastSeenId = localStorage.getItem('team_chat_last_seen') || null;
 let teamChatLastSeenTs = localStorage.getItem('team_chat_last_seen_ts') || null;
@@ -17888,19 +17974,51 @@ async function loadTeamChat() {
   }
 }
 
-// Messages within the rolling 48h window (shown in the popup).
-function teamChatRecent() {
+// Messages within the rolling 48h window (all conversations — used for the badge).
+function teamChatRecentAll() {
   const cutoff = Date.now() - TEAM_CHAT_WINDOW_MS;
   return teamChatMessages.filter(m => new Date(m.created_at).getTime() >= cutoff);
 }
 
-// Unread = recent messages from someone else, newer than what we last saw.
+// Does a message belong to the currently-open conversation?
+// Group thread = recipient empty/null. DM thread with X = sender/recipient are me&X.
+function chatMsgInConvo(m, convo) {
+  const rcpt = m.recipient || null;
+  if (!convo) return !rcpt;                       // group channel
+  const me = currentInternalUser;
+  if (!rcpt) return false;                          // group msg, not this DM
+  return (m.sender === me && rcpt === convo) ||
+         (m.sender === convo && rcpt === me);
+}
+
+// Messages within the rolling 48h window for the ACTIVE conversation (shown in popup).
+function teamChatRecent() {
+  return teamChatRecentAll().filter(m => chatMsgInConvo(m, teamChatActiveConvo));
+}
+
+// Unread = recent messages from someone else, newer than what we last saw —
+// across every conversation visible to me (the group channel + any DM addressed
+// to me). DMs between two other people never count toward my badge.
 function teamChatUnreadCount() {
   if (!chatAllowedForCurrentUser()) return 0;
   const me = currentInternalUser;
   const seenTs = teamChatLastSeenTs ? new Date(teamChatLastSeenTs).getTime() : 0;
-  return teamChatRecent().filter(m =>
-    m.sender !== me && new Date(m.created_at).getTime() > seenTs
+  return teamChatRecentAll().filter(m => {
+    if (m.sender === me) return false;
+    const rcpt = m.recipient || null;
+    if (rcpt && rcpt !== me) return false;        // a DM not meant for me
+    return new Date(m.created_at).getTime() > seenTs;
+  }).length;
+}
+
+// Per-conversation unread count, for the dots next to each thread in the switcher.
+function teamChatConvoUnread(convo) {
+  const me = currentInternalUser;
+  const seenTs = teamChatLastSeenTs ? new Date(teamChatLastSeenTs).getTime() : 0;
+  return teamChatRecentAll().filter(m =>
+    m.sender !== me &&
+    chatMsgInConvo(m, convo) &&
+    new Date(m.created_at).getTime() > seenTs
   ).length;
 }
 
@@ -18055,14 +18173,22 @@ create policy "team_chat_all" on team_chat for all using (true) with check (true
   toast(`Write works ✓ — “${me}” recorded as a reader. NOTE: your teammates must REFRESH their app (Cmd+Shift+R) for THEIR name to appear under your messages — the reader's device writes the receipt.`, 'info');
 }
 
-// Who counts as "the team" for read receipts — everyone except me who could be
-// reading. We derive it from people who've ever appeared as a sender, so it grows
-// naturally without a hardcoded roster.
+// Who counts as "the team" — the full internal roster (so you can start a DM with
+// anyone, even before they've spoken), unioned with anyone who has ever appeared
+// as a sender. Finance is excluded since they have no chat access. Me removed.
 function teamChatKnownMembers() {
   const set = new Set();
-  teamChatMessages.forEach(m => { if (m.sender) set.add(m.sender); });
+  try {
+    (INTERNAL_USER_ACCOUNTS || []).forEach(u => {
+      if (u && u.username && (u.role === 'owner' || u.role === 'ops')) set.add(u.username);
+    });
+  } catch (e) {}
+  teamChatMessages.forEach(m => {
+    if (m.sender) set.add(m.sender);
+    if (m.recipient) set.add(m.recipient);
+  });
   set.delete(currentInternalUser);
-  return Array.from(set);
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
 // While a message hasn't round-tripped to the DB yet, show a small clock so it's
@@ -18116,7 +18242,41 @@ function renderTeamChatMessages() {
   wrap.scrollTop = wrap.scrollHeight;
 }
 
-// Renders the "X is typing…" row at the bottom of the message list.
+// Renders the Team + DM tabs along the top of the chat panel.
+function renderChatConvoBar() {
+  const bar = document.getElementById('chat-convo-bar');
+  if (!bar) return;
+  const me = currentInternalUser;
+  const tabStyle = (active) => `flex-shrink:0;cursor:pointer;border:1px solid ${active ? '#3a7bd5' : 'var(--border2)'};
+    background:${active ? 'rgba(58,123,213,0.18)' : 'var(--bg2)'};color:${active ? '#7fb0f0' : 'var(--text2)'};
+    border-radius:999px;padding:4px 11px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:5px;position:relative;`;
+  const dot = (n) => n > 0
+    ? `<span style="min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;">${n > 9 ? '9+' : n}</span>`
+    : '';
+  let html = `<div onclick="switchChatConvo(null)" style="${tabStyle(teamChatActiveConvo === null)}" title="Group channel — everyone on the ops team">👥 Team ${dot(teamChatConvoUnread(null))}</div>`;
+  teamChatKnownMembers().forEach(name => {
+    const initials = name.slice(0, 2).toUpperCase();
+    html += `<div onclick="switchChatConvo('${name.replace(/'/g, "\\'")}')" style="${tabStyle(teamChatActiveConvo === name)}" title="Direct message ${escapeHtml(name)}">
+      <span style="width:18px;height:18px;border-radius:50%;background:var(--grad-accent);color:#fff;font-size:9px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;">${escapeHtml(initials)}</span>
+      ${escapeHtml(name)} ${dot(teamChatConvoUnread(name))}</div>`;
+  });
+  bar.innerHTML = html;
+}
+
+// Switch the active conversation (null = group, or a username for a 1:1 DM).
+function switchChatConvo(convo) {
+  teamChatActiveConvo = convo;
+  // Update the input placeholder + header subtitle to reflect the thread.
+  const input = document.getElementById('chat-input');
+  if (input) input.placeholder = convo ? `Message ${convo}…` : 'Message the team…';
+  const sub = document.getElementById('chat-header-sub');
+  if (sub) sub.textContent = convo ? `Direct message · ${convo}` : 'Ops team · last 48h shown';
+  renderChatConvoBar();
+  renderTeamChatMessages();
+  markChatSeen();
+  markChatReceipts({ markRead: true }).then(() => { renderTeamChatMessages(); renderChatConvoBar(); });
+  setTimeout(() => document.getElementById('chat-input')?.focus(), 30);
+}
 function renderTypingIndicator() {
   const wrap = document.getElementById('chat-messages');
   if (!wrap) return;
@@ -18155,19 +18315,20 @@ async function sendTeamChat() {
   if (!chatAllowedForCurrentUser()) { toast('Chat is for the ops team.', 'error'); return; }
   if (!supabaseClient) { toast('No database connection', 'error'); return; }
   const sender = currentInternalUser || 'Unknown';
+  const recipient = teamChatActiveConvo || null; // null = group channel
   input.value = '';
   input.style.height = 'auto';
   stopTypingNow();
 
   // Optimistic echo so it feels instant.
-  const optimistic = { id: 'tmp-' + Date.now(), sender, body, created_at: new Date().toISOString() };
+  const optimistic = { id: 'tmp-' + Date.now(), sender, body, recipient, created_at: new Date().toISOString() };
   teamChatMessages.push(optimistic);
   renderTeamChatMessages();
 
   try {
     const { data, error } = await supabaseClient
       .from('team_chat')
-      .insert({ sender, body })
+      .insert(recipient ? { sender, body, recipient } : { sender, body })
       .select();
     if (error) {
       // Roll back optimistic message and surface the real reason (no silent fallback).
@@ -18203,6 +18364,7 @@ function teamChatShow() {
   if (!panel) return;
   teamChatOpen = true;
   panel.style.display = 'flex';
+  renderChatConvoBar();
   renderTeamChatMessages();
   markChatSeen();
   markChatReceipts({ markRead: true }).then(() => renderTeamChatMessages());
@@ -18289,25 +18451,36 @@ async function renderChatHistoryPage() {
   const countEl = document.getElementById('chat-history-count');
   if (!body) return;
   await loadTeamChat();
-  const msgs = teamChatMessages.slice().reverse(); // newest first
-  if (countEl) countEl.textContent = `${teamChatMessages.length} message${teamChatMessages.length === 1 ? '' : 's'}`;
+  const me = currentInternalUser;
+  // DM privacy: only show the group channel + DMs that involve me. Other people's
+  // private 1:1 threads must never appear in my history view.
+  const visible = teamChatMessages.filter(m => {
+    const rcpt = m.recipient || null;
+    if (!rcpt) return true;                 // group channel
+    return m.sender === me || rcpt === me;  // a DM I'm part of
+  });
+  const msgs = visible.slice().reverse(); // newest first
+  if (countEl) countEl.textContent = `${visible.length} message${visible.length === 1 ? '' : 's'}`;
   if (!msgs.length) {
     body.innerHTML = `<div class="empty-state"><div class="empty-icon">💬</div><p>No chat history yet.</p></div>`;
     return;
   }
-  const me = currentInternalUser;
   let html = '<div style="padding:8px 0;">';
   let lastDay = '';
   // Render oldest-first within each day for readability, but days newest-first.
-  const chrono = teamChatMessages.slice();
+  const chrono = visible.slice();
   let buf = [];
   let curDay = '';
   const flush = () => {
     if (!buf.length) return;
     html += `<div class="chat-hist-day">${escapeHtml(curDay)}</div>`;
     buf.forEach(m => {
+      const rcpt = m.recipient || null;
+      const dmTag = rcpt
+        ? `<span class="badge" style="background:rgba(58,123,213,0.15);color:#7fb0f0;margin-left:6px;">DM → ${escapeHtml(rcpt)}</span>`
+        : '';
       html += `<div class="chat-hist-row">
-        <span class="chat-hist-sender">${escapeHtml(m.sender || '?')}</span>
+        <span class="chat-hist-sender">${escapeHtml(m.sender || '?')}${dmTag}</span>
         <span class="chat-hist-body">${escapeHtml(m.body || '')}</span>
         <span class="chat-hist-time">${new Date(m.created_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
       </div>`;
@@ -18492,10 +18665,15 @@ function renderChatSoundControls() {
 // Called after each poll. `me` is excluded so I never ding on my own messages.
 function maybePlayChatSound() {
   const me = currentInternalUser;
-  // Find recent messages from others that we have NOT already dinged for, by id.
-  const fresh = teamChatRecent().filter(m =>
-    m.sender !== me && m.id != null && !teamChatHeardIds.has(String(m.id))
-  );
+  // Find recent messages addressed to me (group channel OR a DM to me) from others
+  // that we have NOT already dinged for, by id. Using teamChatRecentAll (not the
+  // convo-scoped list) so a DM in another thread still notifies me.
+  const fresh = teamChatRecentAll().filter(m => {
+    if (m.sender === me || m.id == null || teamChatHeardIds.has(String(m.id))) return false;
+    const rcpt = m.recipient || null;
+    if (rcpt && rcpt !== me) return false;        // a DM not meant for me
+    return true;
+  });
   // Mark them all heard regardless of mute, so unmuting later doesn't replay them.
   fresh.forEach(m => teamChatHeardIds.add(String(m.id)));
   // Keep the legacy timestamp marker in sync (used elsewhere) + persist.
@@ -18532,7 +18710,7 @@ function startTeamChatPolling() {
     // chat is actually open & visible.
     await markChatReceipts({ markRead: true });
     updateChatUnreadBadge();
-    if (teamChatOpen) renderTeamChatMessages();
+    if (teamChatOpen) { renderTeamChatMessages(); renderChatConvoBar(); }
     // Keep the history page live if it's the one being viewed.
     if (document.getElementById('page-chathistory')?.style.display === 'block') {
       try { renderChatHistoryPage(); } catch (e) {}
@@ -18829,7 +19007,7 @@ async function initTeamChat() {
       <span style="font-size:22px;">💬</span>
       <div>
         <div style="font-weight:700;color:#fff;font-size:14px;">Team Chat</div>
-        <div style="font-size:10.5px;color:rgba(255,255,255,0.75);">Ops team · last 48h shown</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.75);" id="chat-header-sub">Ops team · last 48h shown</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:6px;">
@@ -18847,6 +19025,9 @@ async function initTeamChat() {
         font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
     </div>
   </div>
+  <!-- Conversation switcher: Team channel + per-person DMs -->
+  <div id="chat-convo-bar" style="display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);
+    background:var(--bg3);overflow-x:auto;flex-shrink:0;white-space:nowrap;"></div>
   <!-- Messages -->
   <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;
     flex-direction:column;gap:7px;min-height:0;"></div>
