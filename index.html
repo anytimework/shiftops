@@ -1696,7 +1696,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.7;color:var(--text2);">
         <strong>🌙 Night reminders</strong> — auto-sent to workers between 7 PM–10 PM for tomorrow's shifts<br>
-        <strong>⏰ Clock-in reminders</strong> — auto-sent ~60 min before shift starts<br>
+        <strong>⏰ Clock-in reminders</strong> — auto-sent ~3 hours before shift starts<br>
         <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
         <strong>🚨 Dispute &amp; cancellation detection</strong> — when a worker replies that they <em>can't make it</em> or <em>want to cancel</em> (e.g. “cancel”, “can't make it”, “sick”, “MC”), ShiftOps flags the shift as <strong>disputed</strong> and surfaces a red alert + Process-cancellation button
       </div>
@@ -7652,7 +7652,28 @@ async function autoSendShiftReminders() {
   const tomorrowStr = tomorrowDate.toISOString().slice(0,10);
   const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
 
-  for (const s of (allShifts || [])) {
+  // CRITICAL: never iterate `allShifts` here. That array only holds the shifts for
+  // whatever date/week/outlet is currently being *viewed*. The clock-in reminder
+  // window opens ~3h before a shift, and if ops happens to be looking at any other
+  // date at that moment, today's shifts aren't in memory and nothing ever sends —
+  // which is exactly why auto clock-in reminders "stop working". Query the DB fresh
+  // every tick so today's + tomorrow's shifts are always the source of truth,
+  // independent of the dashboard view. (Same fix pattern as checkPaymentFollowups.)
+  let rows = [];
+  try {
+    const { data, error } = await supabaseClient
+      .from('shifts')
+      .select('*')
+      .in('shift_date', [todayStr, tomorrowStr])
+      .not('cancelled', 'is', true);
+    if (error) { console.warn('[auto-remind] shift query failed', error); return; }
+    rows = data || [];
+  } catch (e) {
+    console.warn('[auto-remind] shift query exception', e);
+    return;
+  }
+
+  for (const s of rows) {
     const workerName = String(s.worker_name || '').trim();
     if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) continue;
     const phone = workerPhone(workerName);
@@ -7671,11 +7692,14 @@ async function autoSendShiftReminders() {
       }
     }
 
-    // ⏰ Clock-in reminder: send 60-90 min before shift start on the day
+    // ⏰ Clock-in reminder: send ~3 hours before shift start on the day.
+    // Window is 180→150 min before start (a 30-min catch window so a tick is never
+    // missed even if the app was closed at exactly the 3h mark). One send per shift,
+    // deduped team-wide via shift_reminders.clockin_sent.
     if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
-      if (nowMins >= shiftMins - 90 && nowMins < shiftMins - 15) {
+      if (nowMins >= shiftMins - 180 && nowMins < shiftMins - 150) {
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
