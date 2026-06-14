@@ -7692,14 +7692,18 @@ async function autoSendShiftReminders() {
       }
     }
 
-    // ⏰ Clock-in reminder: send ~3 hours before shift start on the day.
-    // Window is 180→150 min before start (a 30-min catch window so a tick is never
-    // missed even if the app was closed at exactly the 3h mark). One send per shift,
-    // deduped team-wide via shift_reminders.clockin_sent.
+    // ⏰ Clock-in reminder: send from ~3 hours before shift start up until the
+    // shift actually starts. This is an OPEN window (not a narrow 30-min slot):
+    // this runs in the browser and only ticks while a tab is open, so if no one
+    // had the dashboard open at exactly the 3h mark, a narrow window would close
+    // and the reminder would never send. With an open window, the first tick after
+    // the 3h mark — any time before the shift starts — sends it. The `!r.clockinSent`
+    // guard + persisted shift_reminders.clockin_sent dedupe it team-wide so it only
+    // ever goes out once.
     if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
-      if (nowMins >= shiftMins - 180 && nowMins < shiftMins - 150) {
+      if (nowMins >= shiftMins - 180 && nowMins < shiftMins) {
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
