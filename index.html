@@ -2927,6 +2927,21 @@ function applySuggestedRate() {
   if (rule) document.getElementById('f-rate').value = parseFloat(rule.rate).toFixed(2);
 }
 
+// AI slot/shift creation rate resolver.
+// If the AI action supplied an explicit rate (user asked to override), use it.
+// Otherwise fall back to the outlet's STANDARD rate for that role + day — the
+// exact same rate engine the manual Add Shift form uses (getSuggestedRate).
+// dateStr is "YYYY-MM-DD"; we build a local date to pick the right weekday.
+function aiResolveRate(action, outletName, roleName, dateStr) {
+  const explicit = action && (action.rate ?? action.hourlyRate);
+  if (explicit !== undefined && explicit !== null && explicit !== '' && !isNaN(parseFloat(explicit))) {
+    return parseFloat(explicit).toFixed(2);
+  }
+  const dateObj = dateStr ? new Date(dateStr + 'T00:00:00') : currentDate;
+  const suggested = getSuggestedRate(outletName, roleName || 'F&B Service Crew', dateObj);
+  return parseFloat(suggested.rate).toFixed(2);
+}
+
 // ── Init ─────────────────────────────────────────────────────
 async function init() {
   seedInternalUsers();
@@ -14298,10 +14313,10 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "waivePenalty", "shiftId": "<id>", "workerName": "<name>"}
 {"type": "navigateTo", "page": "attendance|workers|reports|analytics|incidents|activity"}
 {"type": "markPaid", "shiftId": "<id>", "workerName": "<name>"}
-{"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
-{"type": "forceCreateShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
-{"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
-{"type": "batchCreateSlots", "outlet": "<exact outlet name from DB>", "role": "<default role for all slots>", "slots": [{"date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<override role or omit>"}, ...]}
+{"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>", "rate": "<OPTIONAL — only include if user specified a custom hourly rate; omit to use the outlet's standard rate>"}
+{"type": "forceCreateShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>", "rate": "<OPTIONAL custom rate; omit to use standard>"}
+{"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>", "rate": "<OPTIONAL custom rate; omit to use standard>"}
+{"type": "batchCreateSlots", "outlet": "<exact outlet name from DB>", "role": "<default role for all slots>", "rate": "<OPTIONAL custom rate for all slots; omit to use standard>", "slots": [{"date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<override role or omit>", "rate": "<OPTIONAL per-slot custom rate>"}, ...]}
 {"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "preferredTime": "Any time|Morning|Afternoon|Evening|Full day", "preferredRole": "<role or Any role>", "area": "<optional area/outlet>", "note": "<optional note>"}
 {"type": "searchWorker", "query": "<partial or full name to search>"}
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
@@ -14341,6 +14356,12 @@ BREAK TIME RULES (apply automatically — no need to ask):
 - Shifts more than 6 hours: 60 min break (set breakMins: 60).
 - Shifts more than 6 hours at Burma Social OR Vincenzo: 120 min break (set breakMins: 120).
 Always apply these rules when setting breakMins in createShift, createAvailableSlot, and batchCreateSlots actions.
+
+RATE RULES (apply automatically — do NOT invent rates):
+- By default, DO NOT include a "rate" field in createShift, forceCreateShift, createAvailableSlot, or batchCreateSlots. The system automatically applies the outlet's STANDARD rate for that role and day (the same rate the Add Shift form suggests). This keeps rates consistent for each outlet.
+- ONLY include a "rate" field when the user EXPLICITLY gives a custom hourly rate (e.g. "create the slot at $18/hr", "book her at 16 dollars an hour"). In that case set "rate" to just the number (e.g. "18").
+- Never guess or copy a rate from another shift. If the user doesn't mention a rate, omit it and let the standard rate apply.
+- For batchCreateSlots, a custom rate can apply to all slots (top-level "rate") or to individual slots (per-slot "rate"). Only set these if the user specified them.
 
 RULES:
 - Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
@@ -14525,9 +14546,9 @@ async function executeAIAction(actionJson) {
         return `⚠️ **Conflict detected — please review before I proceed:**\n\n${conflictType} _(already exists)_\n• ${w.name} @ ${outlet.name} — ${a.date}, ${a.start}–${a.end} ← you requested\n${existing}\n\nReply **"confirm override"** to create it anyway, or **"cancel"** to abort.`;
       }
       // ── End conflict check ─────────────────────────────────────
-      // Get rate from most recent shift at this outlet for this worker, or fallback
-      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
-      const rate = prevShift ? prevShift.rate : '15';
+      // Use the outlet's STANDARD rate (per-role, per-day rate rules) — the same
+      // engine the Add Shift form uses — unless the user explicitly supplied a rate.
+      const rate = aiResolveRate(a, outlet.name, a.role || 'F&B Service Crew', a.date);
       const country = normaliseCountry(outlet.country || w.country);
       const breakMinsCS = defaultBreakMinsForRange(a.start, a.end, outlet.name) ?? parseInt(a.breakMins || 0);
       const { error } = await supabaseClient.from('shifts').insert({
@@ -14567,8 +14588,7 @@ async function executeAIAction(actionJson) {
       if (isWorkerSuspended(w.name)) {
         return `🚫 **Blocked — ${w.name} is currently suspended** and can't be assigned shifts.`;
       }
-      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
-      const rate = prevShift ? prevShift.rate : '15';
+      const rate = aiResolveRate(a, outlet.name, a.role || 'F&B Service Crew', a.date);
       const country = normaliseCountry(outlet.country || w.country);
       const breakMinsFC = defaultBreakMinsForRange(a.start, a.end, outlet.name) ?? parseInt(a.breakMins || 0);
       const { error } = await supabaseClient.from('shifts').insert({
@@ -14586,8 +14606,8 @@ async function executeAIAction(actionJson) {
     case 'createAvailableSlot': {
       const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
-      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
-      const rate = prevShift ? prevShift.rate : '15';
+      const role = a.role || 'F&B Service Crew';
+      const rate = aiResolveRate(a, outlet.name, role, a.date);
       const country = normaliseCountry(outlet.country || 'Singapore');
       const breakMinsAS = defaultBreakMinsForRange(a.start, a.end, outlet.name) ?? parseInt(a.breakMins || 0);
       const { error } = await supabaseClient.from('shifts').insert({
@@ -14599,7 +14619,7 @@ async function executeAIAction(actionJson) {
         break_mins: breakMinsAS,
         rate: rate,
         country: country,
-        role: a.role || 'F&B Service Crew',
+        role: role,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       });
@@ -14626,23 +14646,30 @@ async function executeAIAction(actionJson) {
           if (isWorkerSuspended(realName)) return `🚫 **Blocked — ${realName} is suspended.** No slots created.`;
         }
       }
-      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
-      const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || 'Singapore');
       const now = new Date().toISOString();
-      const rows = a.slots.map(slot => ({
-        worker_name: 'Available',
-        outlet: outlet.name,
-        shift_date: slot.date,
-        scheduled_start: slot.start.includes(':') ? slot.start + (slot.start.length === 5 ? ':00' : '') : slot.start + ':00',
-        scheduled_end: slot.end.includes(':') ? slot.end + (slot.end.length === 5 ? ':00' : '') : slot.end + ':00',
-        break_mins: defaultBreakMinsForRange(slot.start, slot.end, outlet.name) ?? parseInt(slot.breakMins || 0),
-        rate: rate,
-        country: country,
-        role: slot.role || a.role || 'F&B Service Crew',
-        created_at: now,
-        updated_at: now
-      }));
+      const rows = a.slots.map(slot => {
+        const slotRole = slot.role || a.role || 'F&B Service Crew';
+        // Per-slot explicit rate wins; else batch-level explicit rate; else the
+        // outlet's standard rate for this slot's role + day.
+        const slotRate = aiResolveRate(
+          { rate: slot.rate ?? slot.hourlyRate ?? a.rate ?? a.hourlyRate },
+          outlet.name, slotRole, slot.date
+        );
+        return {
+          worker_name: 'Available',
+          outlet: outlet.name,
+          shift_date: slot.date,
+          scheduled_start: slot.start.includes(':') ? slot.start + (slot.start.length === 5 ? ':00' : '') : slot.start + ':00',
+          scheduled_end: slot.end.includes(':') ? slot.end + (slot.end.length === 5 ? ':00' : '') : slot.end + ':00',
+          break_mins: defaultBreakMinsForRange(slot.start, slot.end, outlet.name) ?? parseInt(slot.breakMins || 0),
+          rate: slotRate,
+          country: country,
+          role: slotRole,
+          created_at: now,
+          updated_at: now
+        };
+      });
       const { error } = await supabaseClient.from('shifts').insert(rows);
       if (error) return `❌ Batch insert failed: ${error.message}`;
       await logActivity('AI: Batch slots created', `${rows.length} available slots at ${outlet.name}`, 'shift', null, {});
