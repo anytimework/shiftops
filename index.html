@@ -87,7 +87,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .main { flex: 1; min-width: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 /* Every page fills main exactly and scrolls internally so topbar is ALWAYS visible */
 .main > div { height: 100vh; overflow-y: auto; overflow-x: hidden; flex-shrink: 0; }
-.topbar { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, var(--bg2) 0%, rgba(22,26,36,0.85) 100%); backdrop-filter: blur(6px); box-shadow: 0 1px 0 rgba(0,0,0,0.2); }
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, var(--bg2) 0%, rgba(22,26,36,0.85) 100%); backdrop-filter: blur(6px); box-shadow: 0 1px 0 rgba(0,0,0,0.2); position: relative; z-index: 40; }
 .topbar-left h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
 .topbar-left p { font-size: 12px; color: var(--text2); margin-top: 2px; }
 .topbar-right { display: flex; gap: 8px; align-items: center; }
@@ -105,7 +105,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .config-inputs input:focus { outline: none; border-color: var(--accent); }
 
 /* Metrics */
-.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; position: relative; z-index: 1; }
 .metric-card { background: linear-gradient(180deg, var(--bg2) 0%, #13161f 100%); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 18px; position: relative; box-shadow: var(--shadow-sm); overflow: hidden; }
 .metric-card::before { content:""; position:absolute; inset:0 0 auto 0; height:1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent); }
 .metric-notify { position:absolute; top:10px; right:10px; min-width:22px; height:22px; padding:0 6px; border-radius:999px; background:var(--red); color:#fff; display:inline-flex; align-items:center; justify-content:center; gap:2px; font-size:10px; font-weight:700; font-family:var(--mono); box-shadow:0 0 0 2px var(--bg2); }
@@ -7692,18 +7692,14 @@ async function autoSendShiftReminders() {
       }
     }
 
-    // ⏰ Clock-in reminder: send from ~3 hours before shift start up until the
-    // shift actually starts. This is an OPEN window (not a narrow 30-min slot):
-    // this runs in the browser and only ticks while a tab is open, so if no one
-    // had the dashboard open at exactly the 3h mark, a narrow window would close
-    // and the reminder would never send. With an open window, the first tick after
-    // the 3h mark — any time before the shift starts — sends it. The `!r.clockinSent`
-    // guard + persisted shift_reminders.clockin_sent dedupe it team-wide so it only
-    // ever goes out once.
+    // ⏰ Clock-in reminder: send ~3 hours before shift start on the day.
+    // Window is 180→150 min before start (a 30-min catch window so a tick is never
+    // missed even if the app was closed at exactly the 3h mark). One send per shift,
+    // deduped team-wide via shift_reminders.clockin_sent.
     if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
-      if (nowMins >= shiftMins - 180 && nowMins < shiftMins) {
+      if (nowMins >= shiftMins - 180 && nowMins < shiftMins - 150) {
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
