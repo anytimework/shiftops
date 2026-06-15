@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v38 — Outlet late-arrival alerts. Each outlet can now store its own WhatsApp group (Outlet modal → "Outlet WhatsApp group", with a "Fetch my groups" picker reusing the Periskope chats API; saved to profileMeta.outlets[key].wa_group_chat_id). When a worker messages "late", the deployed periskope-webhook applies two safeguards before alerting that outlet's group: (A) it only counts if the matched shift is NOT yet started — clock_in IS NULL AND clock_out IS NULL — so "payment is late" / "wasn't late today" on an already clocked-in/ended shift no longer triggers a false alarm; (B) an ETA gate — if no ETA is in the message, the webhook auto-replies asking for one (awaiting_eta=true, eta_asked_at stamped) and only notifies the outlet group once an ETA arrives, including it in the message. A pg_cron sweep flags any reminder with no ETA after 5 min (eta_timed_out=true) for staff attention in the Tasks panel instead of notifying the outlet. New shift_reminders columns: awaiting_eta, eta_asked_at, eta_text, eta_minutes, outlet_late_notified, eta_timed_out. The Reminder/Dispute SQL popup documents the full schema + webhook logic + cron job. NOTE: the HTML stores the group id and documents the logic; the actual classification runs in the separately-deployed periskope-webhook Edge Function, which must be updated to match. -->
 <!-- Build patch: v37 — AI chatbot now shows WHAT it changed for batched actions. Previously, when 4+ actions ran at once (e.g. adding 4 booking requirements), the chat only showed "X of Y actions completed" and discarded each action's detail — so you couldn't see which requirements were recorded or on which outlet. The large-batch summary now lists each successful action's confirmation line. addOutletRequirement / removeOutletRequirement confirmations now echo the exact outlet name plus the full updated requirement list, so there's no ambiguity about which outlet received what. -->
 <!-- Build patch: v36 — Client booking requirements. Each outlet can now hold a requirements checklist (e.g. "Is the worker 18+?", "Has formal black long-sleeve shirt?", add/delete in the outlet profile or via the AI chatbot). When booking a worker into an outlet that has requirements, a checklist modal appears; EVERY item must be ticked or the booking is blocked. The system remembers who passed which requirements at which outlet (profileMeta.workers[key].passed_requirements[outletKey]) and auto-ticks those on future bookings, with a "met all requirements in a previous shift" disclaimer — if you ADD a new requirement later, prior passers keep their ticks and only the new item needs verifying. Gating is enforced on ALL assignment paths via assignmentRestriction(): interactive paths (Add Shift form, inline Available-slot assign) pop the checklist; non-interactive paths (AI createShift/forceCreateShift/batchCreateSlots, standby auto-accept) safely refuse with a clear message. New AI actions: addOutletRequirement, removeOutletRequirement, listOutletRequirements. Stored team-wide in app_settings/profile_meta; mergeProfileMeta extended (requirements replaced so edits/deletes propagate; passed_requirements deep-unioned so no device loses pass history). saveOutlet/saveWorker now preserve existing meta (no longer wipe requirements/pass-history) and carry it across renames. -->
 <!-- Build patch: v35 — Business Knowledge is now TEAM-WIDE for everyone. Previously, if the shared Supabase `business_knowledge` read failed (missing table / RLS blocking the anon role), the page silently fell back to a per-device localStorage copy — so an entry was visible ONLY to the person/device that uploaded it. loadKnowledge() now reads the shared Supabase table as the single source of truth, mirrors it to localStorage only as a read cache, and shows an honest error toast (instead of silently hiding the team's data) if the read fails. kbSaveEntry() now warns clearly when a save lands on this device only and won't reach the team, with the fix (run the business_knowledge SQL / check RLS). No new columns. -->
@@ -2060,15 +2059,6 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
-    <div class="form-row">
-      <label>Outlet WhatsApp group <span style="font-weight:400;color:var(--text3);font-size:11px;">— late-arrival alerts for this outlet post here</span></label>
-      <input type="text" id="of-wa-group" placeholder="e.g. 120363001234567890@g.us" style="font-family:var(--mono);font-size:12px;" autocomplete="off">
-      <div style="display:flex;gap:6px;margin-top:6px;align-items:center;">
-        <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchOutletGroups()">🔍 Fetch my groups</button>
-        <span id="of-wa-result" style="font-size:11px;color:var(--text3);"></span>
-      </div>
-      <div id="of-wa-groups-list" style="margin-top:6px;max-height:160px;overflow-y:auto;"></div>
-    </div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
     <div class="form-row">
       <label>Booking requirements <span style="font-weight:400;color:var(--text3);font-size:11px;">— each must be ticked before a worker can be booked here</span></label>
@@ -2956,7 +2946,7 @@ function aiResolveRate(action, outletName, roleName, dateStr) {
 async function init() {
   seedInternalUsers();
   updateDateLabel();
-  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
+  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders(), loadEntityLinks()]);
   // loadStandbyList may have run before loadWorkers/loadOutlets resolved (parallel),
   // so re-apply country scoping now that allWorkers/allOutlets are populated. This
   // guarantees a PH-scoped partner never sees SG/MY standby rows.
@@ -7644,75 +7634,6 @@ function selectPayrollGroup(id, name) {
   if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Selected “${name}”. Hit Save, then Test group message.`; }
 }
 
-// ── Outlet WhatsApp group picker (used inside the outlet modal) ───────────────
-// Normalise whatever the user pastes/selects into a clean @g.us chat_id, or ''.
-function normaliseGroupChatId(raw) {
-  let v = String(raw || '').trim();
-  if (!v) return '';
-  if (v.includes('@')) return v;             // already a full jid (e.g. ...@g.us)
-  const digits = v.replace(/\D/g,'');
-  return digits ? `${digits}@g.us` : '';
-}
-async function fetchOutletGroups() {
-  const resultEl = document.getElementById('of-wa-result');
-  const listEl = document.getElementById('of-wa-groups-list');
-  const pk = getPeriskopeConfig();
-  const apikey = pk?.apikey || '';
-  const phone  = String(pk?.phone || '').replace(/\D/g,'');
-  if (!apikey || !phone) {
-    resultEl.style.color='var(--red)';
-    resultEl.textContent = 'Set up Periskope (API key + org phone) in WhatsApp settings first.';
-    return;
-  }
-  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Fetching your groups…';
-  if (listEl) listEl.innerHTML = '';
-  const headers = { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' };
-  const urls = [
-    'https://api.periskope.app/v1/chats?chat_type=group&limit=200',
-    'https://api.periskope.app/v1/chats?limit=200'
-  ];
-  let chats = null, lastErr = '';
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { headers });
-      if (!res.ok) { lastErr = 'HTTP ' + res.status; continue; }
-      const j = await res.json().catch(()=>({}));
-      chats = j.chats || j.data || j.results || (Array.isArray(j) ? j : null);
-      if (Array.isArray(chats)) break;
-    } catch(e) { lastErr = e.message || 'network error'; }
-  }
-  if (!Array.isArray(chats)) {
-    resultEl.style.color='var(--red)';
-    resultEl.textContent = '✗ Could not fetch groups (' + (lastErr || 'unexpected response') + '). You can still paste the @g.us ID manually.';
-    return;
-  }
-  const groups = chats.filter(c => /@g\.us$/.test(String(c.chat_id || c.id || c.chatId || '')))
-    .map(c => ({
-      id: String(c.chat_id || c.id || c.chatId),
-      name: c.chat_name || c.name || c.subject || c.group_name || '(unnamed group)'
-    }));
-  if (!groups.length) {
-    resultEl.style.color='var(--amber, #f59e0b)';
-    resultEl.textContent = '⚠ No groups found on this number. Make sure your org phone is in the outlet group.';
-    return;
-  }
-  resultEl.style.color='var(--text3)'; resultEl.textContent = `Found ${groups.length} group(s) — pick this outlet's:`;
-  if (listEl) {
-    listEl.innerHTML = groups.map(g =>
-      `<button type="button" class="btn btn-ghost btn-sm" style="display:block;width:100%;text-align:left;margin-top:4px;font-size:11.5px;"
-        onclick="selectOutletGroup('${g.id.replace(/'/g,"\\'")}','${String(g.name).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">
-        ${g.name.replace(/</g,'&lt;')} <span style="color:var(--text3);font-family:var(--mono);">${g.id}</span>
-      </button>`
-    ).join('');
-  }
-}
-function selectOutletGroup(id, name) {
-  const field = document.getElementById('of-wa-group');
-  if (field) field.value = id;
-  const resultEl = document.getElementById('of-wa-result');
-  if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Selected “${name}”. Remember to Save the outlet.`; }
-}
-
 // ── Night reminder message builder ───────────────────────────────────────────
 function buildNightReminderMessage(s) {
   const d = new Date(s.shift_date + 'T00:00:00');
@@ -8671,12 +8592,6 @@ alter table public.shift_reminders
   add column if not exists late_at          timestamptz,
   add column if not exists late_ack         boolean default false,
   add column if not exists outlet_informed  boolean default false,
-  add column if not exists awaiting_eta      boolean default false,     -- worker said "late" with no ETA; we asked and are waiting for their reply
-  add column if not exists eta_asked_at      timestamptz,               -- when we auto-asked the worker for an ETA (drives the 5-min staff-flag timeout)
-  add column if not exists eta_text          text,                      -- raw ETA the worker gave (e.g. "15 mins", "by 8.30")
-  add column if not exists eta_minutes       int,                       -- parsed ETA in minutes, when derivable
-  add column if not exists outlet_late_notified boolean default false,  -- the outlet's own WhatsApp group has been told about this late arrival (dedupe)
-  add column if not exists eta_timed_out     boolean default false,     -- no ETA within 5 min of asking → surfaced in Tasks for staff attention
   add column if not exists needs_replacement boolean default false,  -- slot awaiting re-fill after a processed worker cancellation
   add column if not exists replacement_at    timestamptz,            -- when the slot became replacement-needed
   add column if not exists completed_at       timestamptz,           -- when a late task was fully handled (drives 18h collapse)
@@ -8748,31 +8663,11 @@ create index if not exists completed_tasks_completed_at_idx on public.completed_
 --    // If the message names a day ("today"/"tomorrow"), prefer that date.
 --
 --    if (LATE.test(body) && !DISPUTE.test(body)) {
---      // ── SAFEGUARD A: only a NOT-YET-STARTED shift can be "late". ───────────
---      // Look up the matched shift's clock state. If the worker is already
---      // clocked in, or has clocked out, the word "late" is noise
---      // ("payment is late", "I wasn't late today") → DO NOTHING.
---      //   select clock_in, clock_out, outlet from shifts where id = <matched shift>;
---      //   if (clock_in != null || clock_out != null) return;   // ignore
---      //
---      // ── SAFEGUARD B: ETA gate. Don't tell the outlet until we have an ETA. ─
---      const eta = parseEta(body);   // returns {minutes, text} or null
---      if (eta) {
---        update shift_reminders set late_notified = true,
---          late_reason = msg.body, late_at = now(),
---          late_ack = false, outlet_informed = false,
---          awaiting_eta = false, eta_text = eta.text, eta_minutes = eta.minutes
---        where shift_id = <matched shift>;
---        notifyOutletGroup(<matched shift>, eta);  // post to that outlet's @g.us
---        update shift_reminders set outlet_late_notified = true where shift_id = <matched shift>;
---      } else {
---        // No ETA in the message → ask for one, start the 5-min clock.
---        update shift_reminders set late_notified = true,
---          late_reason = msg.body, late_at = now(),
---          awaiting_eta = true, eta_asked_at = now()
---        where shift_id = <matched shift>;
---        sendToWorker(msg.from, "Noted 🙏 roughly how many minutes late will you be? (e.g. 15 mins)");
---      }
+--      // Worker will arrive late — log as a Task (acknowledge + inform outlet).
+--      update shift_reminders set late_notified = true,
+--        late_reason = msg.body, late_at = now(),
+--        late_ack = false, outlet_informed = false
+--      where shift_id = <matched upcoming shift>;
 --    } else if (DISPUTE.test(body)) {
 --      update shift_reminders set disputed = true,
 --        dispute_kind = /cancel|drop/.test(body) ? 'cancel' : 'cantmake',
@@ -8803,49 +8698,7 @@ create index if not exists completed_tasks_completed_at_idx on public.completed_
 --      // → surfaces in the ShiftOps Tasks panel as "✅ Standby accepted"
 --    }
 --
---  AWAITING-ETA REPLY: if this worker has a shift_reminder with awaiting_eta = true
---  (and the matched shift is still NOT clocked in/out), treat their NEXT message as
---  the ETA answer — this runs BEFORE the ACK branch so a bare "15 mins" isn't
---  mis-read as an acknowledgement:
---    const slot = (select * from shift_reminders sr
---                  join shifts s on s.id = sr.shift_id
---                  where sr.awaiting_eta = true and s.clock_in is null and s.clock_out is null
---                    and <worker matches by last-8-digit phone>
---                  order by sr.eta_asked_at desc limit 1);
---    if (slot) {
---      const eta = parseEta(body);
---      if (eta) {
---        update shift_reminders set awaiting_eta = false,
---          eta_text = eta.text, eta_minutes = eta.minutes,
---          outlet_informed = false
---        where shift_id = slot.shift_id;
---        notifyOutletGroup(slot.shift_id, eta);
---        update shift_reminders set outlet_late_notified = true where shift_id = slot.shift_id;
---      }
---      // no ETA parsed → leave awaiting_eta = true; the 5-min sweep (below) will
---      // surface it for staff if no usable ETA ever arrives.
---      return; // handled — don't fall through to ACK/LATE
---    }
---
---  notifyOutletGroup(shiftId, eta): look up the shift's outlet, read that outlet's
---  stored WhatsApp group id (profileMeta.outlets[normKey(outlet)].wa_group_chat_id,
---  saved in app_settings/profile_meta), and POST to Periskope /v1/message/send with
---  chat_id = <that @g.us>. Skip (and instead flag in Tasks) if the outlet has no
---  group linked. Message e.g.:
---    "⏰ Heads-up: <worker> for the <start> shift will be ~<eta.text> late. Thanks for your patience."
---
---  3) 5-MINUTE TIMEOUT (pg_cron — runs server-side, no app needed). Any reminder
---  still waiting on an ETA after 5 minutes is flagged for staff (it does NOT
---  auto-notify the outlet — a human decides). Schedule once:
---    select cron.schedule('eta-timeout-sweep', '* * * * *', $$
---      update public.shift_reminders
---         set awaiting_eta = false, eta_timed_out = true
---       where awaiting_eta = true
---         and eta_asked_at < now() - interval '5 minutes';
---    $$);
---  ShiftOps shows eta_timed_out rows in the Tasks panel as
---  "⏰ Late — no ETA given, needs staff follow-up".
---
+--  NOTE: ShiftOps reads shift_reminders across ALL dates, so a late/dispute flag set
 --  on tomorrow's (or any future) shift appears immediately in the Tasks panel and the
 --  sidebar Tasks badge — regardless of which date the attendance grid is showing.`;
   const w = window.open('', '_blank', 'width=640,height=640');
@@ -10751,8 +10604,7 @@ function loadOutletsList() {
       const banned = (meta.banned_workers || []).length ? `<div class="sub-text" style="color:var(--red);margin-top:4px;">Banned: ${escapeHtml(meta.banned_workers.join(', '))}</div>` : '';
       const reqCount = (Array.isArray(meta.requirements) ? meta.requirements.filter(r => r && r.label) : []).length;
       const reqBadge = reqCount ? `<div class="sub-text" style="color:var(--accent);margin-top:4px;">📋 ${reqCount} booking requirement${reqCount!==1?'s':''}</div>` : '';
-      const waBadge = meta.wa_group_chat_id ? `<div class="sub-text" style="color:var(--green);margin-top:4px;">💬 Late-alert group linked</div>` : '';
-      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}${reqBadge}${waBadge}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}${reqBadge}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
 }
@@ -10766,9 +10618,6 @@ function resetOutletModal() {
   document.getElementById('of-location').value = '';
   document.getElementById('of-commission').value = '20';
   document.getElementById('of-notes').value = '';
-  document.getElementById('of-wa-group').value = '';
-  document.getElementById('of-wa-result').textContent = '';
-  document.getElementById('of-wa-groups-list').innerHTML = '';
   document.getElementById('of-banned-workers').value = '';
   ofRequirements = [];
   renderOfRequirements();
@@ -10786,9 +10635,6 @@ function editOutlet(id) {
   const meta = outletProfile(o.name);
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
   document.getElementById('of-notes').value = meta.notes || '';
-  document.getElementById('of-wa-group').value = meta.wa_group_chat_id || '';
-  document.getElementById('of-wa-result').textContent = '';
-  document.getElementById('of-wa-groups-list').innerHTML = '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
   ofRequirements = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
   renderOfRequirements();
@@ -10850,7 +10696,6 @@ async function saveOutlet() {
     ...prevMeta, // preserve any fields we don't explicitly edit here
     commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
     notes: document.getElementById('of-notes').value.trim(),
-    wa_group_chat_id: normaliseGroupChatId(document.getElementById('of-wa-group').value),
     banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
     requirements: ofRequirements.map(r => ({ id: r.id, label: r.label }))
   };
@@ -12090,7 +11935,120 @@ function cleanOutletName(raw) {
   return raw.replace(ROLE_SUFFIXES, '').trim();
 }
 
+// ============================================================
+// PERSISTENT RECONCILIATION (entity_links)
+// ------------------------------------------------------------
+// A reconciliation you make once is remembered in the Supabase
+// entity_links table and re-applied to every future import. Held
+// in memory as a Map for synchronous lookup during matching; the
+// table is the single source of truth (mirrored to localStorage as
+// a read cache so matching still works if a load momentarily fails).
+// Keys: source_key = entityLinkKey(name); source_phone = last-8 digits.
+// ============================================================
+let entityLinks = { worker: { byKey: {}, byPhone: {} }, outlet: { byKey: {}, byPhone: {} } };
+
+// Normalize a name to a stable lookup key (reuses the app's existing
+// accent-stripping / punctuation-collapsing rules so "Five Guys (iON Mall)"
+// and "Five Guys iON Mall" collapse to the same key).
+function entityLinkKey(name) {
+  return normWorkerKey(name); // lower, strip accents, punctuation→space, collapse spaces
+}
+// Last-8 digits of a phone — matches the cross-country suffix rule used elsewhere.
+function entityLinkPhone(phone) {
+  const d = digitsOnly(phone);
+  return d.length >= 8 ? d.slice(-8) : d;
+}
+
+function indexEntityLinks(rows) {
+  const next = { worker: { byKey: {}, byPhone: {} }, outlet: { byKey: {}, byPhone: {} } };
+  (rows || []).forEach(r => {
+    if (!r || (r.status && r.status === 'rejected')) return; // rejected = "not the same", skip
+    const t = r.entity_type === 'outlet' ? 'outlet' : 'worker';
+    if (r.source_key)   next[t].byKey[r.source_key]     = r;
+    if (r.source_phone) next[t].byPhone[r.source_phone] = r;
+  });
+  entityLinks = next;
+}
+
+async function loadEntityLinks() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('entity_links').select('*').neq('status', 'rejected');
+    if (error) { console.warn('entity_links load failed:', error.message); return; }
+    indexEntityLinks(data || []);
+    try { localStorage.setItem('entity_links_cache', JSON.stringify(data || [])); } catch(e) {}
+  } catch (e) {
+    console.warn('entity_links load error:', e);
+    // Fall back to the local read cache so matching still works offline.
+    try {
+      const cached = JSON.parse(localStorage.getItem('entity_links_cache') || '[]');
+      indexEntityLinks(cached);
+    } catch(_) {}
+  }
+}
+
+// Look up a saved link. Workers: try phone first (strong signal), then name.
+// Outlets: name only. Returns the canonical shiftops_name, or '' if none.
+function entityLinkResolve(type, name, phone) {
+  const t = type === 'outlet' ? 'outlet' : 'worker';
+  if (t === 'worker' && phone) {
+    const hit = entityLinks.worker.byPhone[entityLinkPhone(phone)];
+    if (hit) return hit.shiftops_name || '';
+  }
+  if (name) {
+    const hit = entityLinks[t].byKey[entityLinkKey(name)];
+    if (hit) return hit.shiftops_name || '';
+  }
+  return '';
+}
+
+// Persist a confirmed link so it sticks across imports. Upserts in memory
+// immediately (so the current preview re-resolves at once) and writes to
+// Supabase; an honest toast fires if the write can't reach the team.
+async function entityLinkSave(type, { name, phone, shiftopsName, matchType = 'manual', confidence = 1 }) {
+  const t = type === 'outlet' ? 'outlet' : 'worker';
+  const source_key   = name  ? entityLinkKey(name)   : null;
+  const source_phone = (t === 'worker' && phone) ? entityLinkPhone(phone) : null;
+  if (!source_key && !source_phone) return;
+  if (!shiftopsName) return;
+
+  const row = {
+    entity_type: t, source_key, source_phone,
+    shiftops_name: shiftopsName, match_type: matchType,
+    confidence, status: 'confirmed',
+  };
+  // optimistic in-memory update
+  if (source_key)   entityLinks[t].byKey[source_key]     = row;
+  if (source_phone) entityLinks[t].byPhone[source_phone] = row;
+
+  try {
+    // Clear any existing active link on the same keys, then insert fresh —
+    // avoids relying on a composite upsert against partial unique indexes.
+    if (source_key) {
+      await supabaseClient.from('entity_links').delete()
+        .eq('entity_type', t).eq('source_key', source_key).neq('status', 'rejected');
+    }
+    if (source_phone) {
+      await supabaseClient.from('entity_links').delete()
+        .eq('entity_type', t).eq('source_phone', source_phone).neq('status', 'rejected');
+    }
+    const { error } = await supabaseClient.from('entity_links').insert(row);
+    if (error) {
+      toast('Link saved on this device only (not team-wide): ' + error.message, 'error');
+      try { const c = JSON.parse(localStorage.getItem('entity_links_cache') || '[]'); c.push(row); localStorage.setItem('entity_links_cache', JSON.stringify(c)); } catch(_) {}
+    } else {
+      await loadEntityLinks(); // re-sync canonical state
+    }
+  } catch (e) {
+    toast('Link saved on this device only (not team-wide): ' + (e.message || e), 'error');
+  }
+}
+
 function importOutletAlias(raw) {
+  // 1) Saved reconciliations (team-wide, editable) take priority.
+  const linked = entityLinkResolve('outlet', raw);
+  if (linked) return linked;
+  // 2) Legacy hard-coded aliases as a fallback (now also seeded into the table).
   const n = String(raw || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (/\bfive guys\b/.test(n) && /\bkitchen\b/.test(n)) return 'Five Guys iON Mall';
   if (/\bfive guys\b/.test(n) && /\bcashier\b/.test(n)) return 'Five Guys Plaza Singapura';
@@ -12320,9 +12278,11 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       }
     }
 
-    // Resolve worker — exact first, then fuzzy
-    const workerExact = workerRaw ? allWorkers.find(w =>
-      w.name.trim().toLowerCase() === workerRaw.toLowerCase()
+    // Resolve worker — saved link (by name) first, then exact, then fuzzy.
+    const workerLinked = workerRaw ? entityLinkResolve('worker', workerRaw) : '';
+    const workerExact = workerRaw ? (
+      (workerLinked && allWorkers.find(w => w.name === workerLinked)) ||
+      allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase())
     ) : null;
     const workerFuzzy = workerRaw && !workerExact
       ? importBestMatch(workerRaw, allWorkers.map(w => w.name))
@@ -13243,8 +13203,10 @@ function onImportWorkerSelect(idx, val) {
       r._workerAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
+  // Remember this reconciliation so it auto-applies on every future import.
+  entityLinkSave('worker', { name: rawName, shiftopsName: val, matchType: 'manual', confidence: 1 });
   renderImportPreview();
-  toast(`Mapped "${rawName}" → "${val}"`);
+  toast(`Mapped "${rawName}" → "${val}" (remembered)`);
 }
 
 // Map an existing outlet to ALL rows that share the same raw name
@@ -13259,8 +13221,10 @@ function onImportOutletSelect(idx, val) {
       r._outletAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
+  // Remember this reconciliation so it auto-applies on every future import.
+  entityLinkSave('outlet', { name: rawName, shiftopsName: val, matchType: 'manual', confidence: 1 });
   renderImportPreview();
-  toast(`Mapped "${rawName}" → "${val}"`);
+  toast(`Mapped "${rawName}" → "${val}" (remembered)`);
 }
 
 // Open new-worker modal, pre-filled but editable
