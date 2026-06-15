@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
 <!-- Build patch: v37 — AI chatbot now shows WHAT it changed for batched actions. Previously, when 4+ actions ran at once (e.g. adding 4 booking requirements), the chat only showed "X of Y actions completed" and discarded each action's detail — so you couldn't see which requirements were recorded or on which outlet. The large-batch summary now lists each successful action's confirmation line. addOutletRequirement / removeOutletRequirement confirmations now echo the exact outlet name plus the full updated requirement list, so there's no ambiguity about which outlet received what. -->
+<!-- Build patch: v39 — Restored the outlet WhatsApp group mapping for late-arrival alerts (lost in a prior rebuild). The Outlet modal again has an "Outlet WhatsApp group" field with a "Fetch my groups" picker (reuses the Periskope chats API via the shared pk_config), saved to profileMeta.outlets[key].wa_group_chat_id. editOutlet/resetOutletModal/saveOutlet all carry the field; it survives cross-device sync (scalar, preserved by mergeProfileMeta). The deployed periskope-webhook reads wa_group_chat_id and, once its safeguards pass (shift not yet started + ETA captured), posts the late alert to that outlet's group. NOTE: the HTML stores/links the group id; classification + the actual outlet post run in the separately-deployed periskope-webhook Edge Function. -->
 <!-- Build patch: v36 — Client booking requirements. Each outlet can now hold a requirements checklist (e.g. "Is the worker 18+?", "Has formal black long-sleeve shirt?", add/delete in the outlet profile or via the AI chatbot). When booking a worker into an outlet that has requirements, a checklist modal appears; EVERY item must be ticked or the booking is blocked. The system remembers who passed which requirements at which outlet (profileMeta.workers[key].passed_requirements[outletKey]) and auto-ticks those on future bookings, with a "met all requirements in a previous shift" disclaimer — if you ADD a new requirement later, prior passers keep their ticks and only the new item needs verifying. Gating is enforced on ALL assignment paths via assignmentRestriction(): interactive paths (Add Shift form, inline Available-slot assign) pop the checklist; non-interactive paths (AI createShift/forceCreateShift/batchCreateSlots, standby auto-accept) safely refuse with a clear message. New AI actions: addOutletRequirement, removeOutletRequirement, listOutletRequirements. Stored team-wide in app_settings/profile_meta; mergeProfileMeta extended (requirements replaced so edits/deletes propagate; passed_requirements deep-unioned so no device loses pass history). saveOutlet/saveWorker now preserve existing meta (no longer wipe requirements/pass-history) and carry it across renames. -->
 <!-- Build patch: v35 — Business Knowledge is now TEAM-WIDE for everyone. Previously, if the shared Supabase `business_knowledge` read failed (missing table / RLS blocking the anon role), the page silently fell back to a per-device localStorage copy — so an entry was visible ONLY to the person/device that uploaded it. loadKnowledge() now reads the shared Supabase table as the single source of truth, mirrors it to localStorage only as a read cache, and shows an honest error toast (instead of silently hiding the team's data) if the read fails. kbSaveEntry() now warns clearly when a save lands on this device only and won't reach the team, with the fix (run the business_knowledge SQL / check RLS). No new columns. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
@@ -2059,6 +2060,15 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
+    <div class="form-row">
+      <label>Outlet WhatsApp group <span style="font-weight:400;color:var(--text3);font-size:11px;">— late-arrival alerts for workers at this outlet are posted here</span></label>
+      <input type="text" id="of-wa-group" placeholder="120363xxxxxxxxxx@g.us" style="font-family:var(--mono);">
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchOutletGroups()">🔍 Fetch my groups</button>
+      </div>
+      <div id="of-wa-groups-list" style="margin-top:6px;"></div>
+      <div id="of-wa-result" style="font-size:11.5px;margin-top:4px;min-height:14px;"></div>
+    </div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
     <div class="form-row">
       <label>Booking requirements <span style="font-weight:400;color:var(--text3);font-size:11px;">— each must be ticked before a worker can be booked here</span></label>
@@ -7634,6 +7644,71 @@ function selectPayrollGroup(id, name) {
   if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Selected “${name}”. Hit Save, then Test group message.`; }
 }
 
+// ── Outlet WhatsApp group picker (late-arrival alerts) ────────────────────────
+// Fetches the org's WhatsApp groups via Periskope so an outlet can be linked to
+// the group chat its late-arrival alerts post into. The selected id is saved to
+// profileMeta.outlets[key].wa_group_chat_id; the deployed periskope-webhook reads
+// it and posts the late alert there (with ETA) once safeguards pass.
+async function fetchOutletGroups() {
+  const resultEl = document.getElementById('of-wa-result');
+  const listEl = document.getElementById('of-wa-groups-list');
+  const pk = getPeriskopeConfig() || {};
+  const apikey = pk.apikey || '';
+  const phone  = String(pk.phone || '').replace(/\D/g,'');
+  if (!apikey || !phone) {
+    resultEl.style.color='var(--red)';
+    resultEl.textContent = 'Set your Periskope API key + org phone in WhatsApp settings first.';
+    return;
+  }
+  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Fetching your groups…';
+  if (listEl) listEl.innerHTML = '';
+  const headers = { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' };
+  const urls = [
+    'https://api.periskope.app/v1/chats?chat_type=group&limit=200',
+    'https://api.periskope.app/v1/chats?limit=200'
+  ];
+  let chats = null, lastErr = '';
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers });
+      if (!res.ok) { lastErr = 'HTTP ' + res.status; continue; }
+      const j = await res.json().catch(()=>({}));
+      chats = j.chats || j.data || j.results || (Array.isArray(j) ? j : null);
+      if (Array.isArray(chats)) break;
+    } catch(e) { lastErr = e.message || 'network error'; }
+  }
+  if (!Array.isArray(chats)) {
+    resultEl.style.color='var(--red)';
+    resultEl.textContent = '✗ Could not fetch groups (' + (lastErr || 'unexpected response') + '). You can still paste the @g.us ID manually.';
+    return;
+  }
+  const groups = chats.filter(c => /@g\.us$/.test(String(c.chat_id || c.id || c.chatId || '')))
+    .map(c => ({
+      id: String(c.chat_id || c.id || c.chatId),
+      name: c.chat_name || c.name || c.subject || c.group_name || '(unnamed group)'
+    }));
+  if (!groups.length) {
+    resultEl.style.color='var(--amber, #f59e0b)';
+    resultEl.textContent = '⚠ No groups found on this number. Make sure the org phone is in the outlet group.';
+    return;
+  }
+  resultEl.style.color='var(--text3)'; resultEl.textContent = `Found ${groups.length} group(s) — pick this outlet's:`;
+  if (listEl) {
+    listEl.innerHTML = groups.map(g =>
+      `<button type="button" class="btn btn-ghost btn-sm" style="display:block;width:100%;text-align:left;margin-top:4px;font-size:11.5px;"
+        onclick="selectOutletGroup('${g.id.replace(/'/g,"\\'")}','${String(g.name).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">
+        ${g.name.replace(/</g,'&lt;')} <span style="color:var(--text3);font-family:var(--mono);">${g.id}</span>
+      </button>`
+    ).join('');
+  }
+}
+function selectOutletGroup(id, name) {
+  const field = document.getElementById('of-wa-group');
+  if (field) field.value = id;
+  const resultEl = document.getElementById('of-wa-result');
+  if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Linked “${name}”. Hit Save to apply.`; }
+}
+
 // ── Night reminder message builder ───────────────────────────────────────────
 function buildNightReminderMessage(s) {
   const d = new Date(s.shift_date + 'T00:00:00');
@@ -10618,6 +10693,9 @@ function resetOutletModal() {
   document.getElementById('of-location').value = '';
   document.getElementById('of-commission').value = '20';
   document.getElementById('of-notes').value = '';
+  document.getElementById('of-wa-group').value = '';
+  document.getElementById('of-wa-groups-list').innerHTML = '';
+  document.getElementById('of-wa-result').textContent = '';
   document.getElementById('of-banned-workers').value = '';
   ofRequirements = [];
   renderOfRequirements();
@@ -10635,6 +10713,9 @@ function editOutlet(id) {
   const meta = outletProfile(o.name);
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
   document.getElementById('of-notes').value = meta.notes || '';
+  document.getElementById('of-wa-group').value = meta.wa_group_chat_id || '';
+  document.getElementById('of-wa-groups-list').innerHTML = '';
+  document.getElementById('of-wa-result').textContent = '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
   ofRequirements = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
   renderOfRequirements();
@@ -10696,6 +10777,7 @@ async function saveOutlet() {
     ...prevMeta, // preserve any fields we don't explicitly edit here
     commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
     notes: document.getElementById('of-notes').value.trim(),
+    wa_group_chat_id: document.getElementById('of-wa-group').value.trim(),
     banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
     requirements: ofRequirements.map(r => ({ id: r.id, label: r.label }))
   };
