@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v47 — Fixed two linked Import Bookings problems reported on already-in-panel bookings (e.g. Hui Ling). (1) Mapping a suggested outlet/worker made the row silently vanish into "Already in the ops panel" before the user could Confirm. (2) Such a booking still showed the amber ⚠️ "ops-only" sync icon on its attendance row afterwards, because matching it during import only DETECTED the panel shift — it never stamped sync_source, and the live portal-feed key often misses when the outlet name had to be mapped (panel string ≠ portal string). Root cause: a no-op match (same clock times) was unconditionally hidden as "already imported", even when the matched panel shift wasn't actually linked to the app. Now: tagExistingShifts only hides a no-op match when the panel shift is genuinely synced (sync_source set, or present in the live portal feed) via new importPanelShiftIsSynced(); otherwise the row STAYS visible as a ticked "🔗 Mark as synced" action (new _syncStampOnly state + status branch + action-bar note). Confirming a Mark-as-synced row stamps the panel shift sync_source='merged' (no duplicate, no data change) so its attendance row flips to the green 🔄. The confirm-time no-op skip does the same stamping. tagExistingShifts and the confirm merge-target query now select * so sync_source flows through. Already-genuinely-synced bookings still drop straight into the bottom section as before. No schema change (sync_source column from v45 still optional; stamping is a no-op if absent). -->
 <!-- Build patch: v46 — Already-in-panel import rows moved out of the main list into their own collapsible "Already in the ops panel" section at the bottom of the import preview (collapsed by default). Synced/merged/created bookings no longer interleave with actionable rows and are never re-offered when you re-click "Load synced portal bookings" — the section just shows them with a Synced / Merged / Created label and a count breakdown so you can audit what was skipped. Confirm now stamps each written row with _importedThisSession ('created' or 'merged') so the section can label how it entered the panel this session; pre-existing matches read as Synced. Removed the old inline "Show/Hide already-imported" toggle (replaced by the section's expand/collapse header). ALSO FIXED: a same booking kept resurfacing as "Merge into existing" (e.g. Hui Ling 15 Jun) because the panel stores clock_in/out as HH:MM:SS while imports parse to HH:MM, so the "is there newer clock data?" check compared "07:54:00" !== "07:54" and always saw a difference. Added importHHMM() to normalise both sides to HH:MM in all three comparison sites (tagExistingShifts exact + same-worker/outlet fallback, and the confirm-time skip), and the confirm-time no-op skip now stamps the row as already-imported so it drops into the bottom section. No schema change. -->
 <!-- Build patch: v45 — Origin-aware attendance icons + sturdier import de-dup. (A) syncDot now reflects how a shift entered the panel: 🔄 (green, "synced") when it matches the live portal feed OR an import was merged into it (sync_source='merged'); 📱 (blue) when it was created from an app booking via Import Bookings with no prior panel shift to reconcile (sync_source='import'); ⚠️ (amber) only for ops-panel-only shifts with no app booking behind them. This requires a new nullable column — run:  alter table shifts add column sync_source text;  The code degrades gracefully if it's absent (falls back to the portal-feed check) and stops retrying after the first failure. confirmImportBookings stamps sync_source on every insert ('import') and merge ('merged'). loadShifts already selects * so the column flows through. (B) tagExistingShifts no longer relies solely on time-overlap: if there's no overlapping match it now also treats a same worker + same outlet + same date panel shift as the existing booking, so a reconciled shift won't reappear as "new" after exit + re-load even if the stored scheduled times drifted from a prior merge. No other behaviour changed. -->
 <!-- Build patch: v44 — (1) Attendance-row sync indicator restored + clarified per ops request: app-originated bookings (matched to the Anytime Work app / portal feed) now show a green 📱⬇ "app booking — synced"; shifts that exist ONLY in the ops panel with no matching app booking show the amber ⚠️ again so the team knows to add them to the app. (2) Import de-dup now persists across restarts: tagExistingShifts marks an exact same-booking match as already-imported (hidden) whenever the import has no NEWER clock-in/out to push — so re-running the whole import no longer re-offers a booking that's already in the panel. It only resurfaces if the import carries fresh clock data to sync, or the panel shift is deleted/cancelled. The confirm-time merge skip uses the same "nothing new" test, so it won't re-write no-op merges. No schema change. -->
@@ -11770,6 +11771,20 @@ function importOutletKey(name) {
 //                 outlet (a genuine clash to review, not a duplicate)
 //   r._alreadyImported -> true when an exact match already carries the same
 //                 clock-in/out (nothing new to sync) — hidden by default.
+// A matched panel shift counts as "fully synced already" only when it's been
+// durably stamped as synced (sync_source set) OR it's present in the live
+// portal feed. If neither is true, the booking exists in the panel but isn't
+// yet linked to the app — so an import that matches it should stay visible as a
+// one-click "mark synced" merge (which stamps sync_source on confirm), instead
+// of silently dropping into the "already in the ops panel" section while the
+// attendance row keeps showing the amber ⚠️ "ops-only" icon.
+function importPanelShiftIsSynced(s) {
+  if (!s) return false;
+  if (s.sync_source === 'merged' || s.sync_source === 'import') return true;
+  try { if (isShiftPortalSynced(s)) return true; } catch (e) {}
+  return false;
+}
+
 async function tagExistingShifts(rows) {
   if (!supabaseClient || !rows || !rows.length) return;
 
@@ -11780,6 +11795,7 @@ async function tagExistingShifts(rows) {
     r._existingShift = null;
     r._existingMatch = null;
     r._alreadyImported = false;
+    r._syncStampOnly = false;
     r._overlapCandidates = [];
     r._mergeCandidates = [];
     // Keep any manual merge choice the user made, but drop it if it's no longer
@@ -11796,7 +11812,7 @@ async function tagExistingShifts(rows) {
 
   const { data: existing, error } = await supabaseClient
     .from('shifts')
-    .select('id,shift_date,worker_name,outlet,scheduled_start,scheduled_end,clock_in,clock_out,role,rate')
+    .select('*')
     .in('shift_date', dates)
     .not('cancelled', 'is', true);
   if (error) { console.warn('tagExistingShifts query failed:', error.message); return; }
@@ -11875,7 +11891,15 @@ async function tagExistingShifts(rows) {
         const importCout = importHHMM(r.clock_out);
         const addsClockIn  = importCin  && importCin  !== importHHMM(ex.clock_in);
         const addsClockOut = importCout && importCout !== importHHMM(ex.clock_out);
-        r._alreadyImported = !addsClockIn && !addsClockOut;
+        const nothingNew = !addsClockIn && !addsClockOut;
+        // Hide as "already imported" only when the panel shift is genuinely
+        // synced. If it isn't, keep the row visible so confirming will stamp it.
+        if (nothingNew && importPanelShiftIsSynced(ex)) {
+          r._alreadyImported = true;
+        } else if (nothingNew) {
+          r._alreadyImported = false;
+          r._syncStampOnly = true;   // matches a panel shift not yet linked to the app
+        }
       }
       continue;
     }
@@ -11899,7 +11923,19 @@ async function tagExistingShifts(rows) {
       const addsClockIn  = importCin  && importCin  !== panelCin;
       const addsClockOut = importCout && importCout !== panelCout;
       const nothingNew = !addsClockIn && !addsClockOut;
-      r._alreadyImported = nothingNew;
+      // Hide as "already imported" only when the panel shift is genuinely synced
+      // (durably stamped, or present in the live portal feed). If it's nothing-new
+      // but the panel shift isn't linked to the app yet, keep the row visible as a
+      // one-click "mark synced" merge so confirming stamps sync_source — otherwise
+      // the attendance row keeps showing the amber ⚠️ "ops-only" icon forever.
+      if (nothingNew && importPanelShiftIsSynced(exact)) {
+        r._alreadyImported = true;
+      } else if (nothingNew) {
+        r._alreadyImported = false;
+        r._syncStampOnly = true;
+      } else {
+        r._alreadyImported = false;
+      }
     } else {
       // Same worker + time but a different outlet — genuine clash to review
       r._existingShift = sameWorker[0];
@@ -13375,6 +13411,21 @@ function renderImportPreview() {
         <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">In ops panel — will be skipped</div>
         ${mergePicker()}
       </td>`;
+    } else if (r._existingMatch === 'exact' && r._syncStampOnly) {
+      // Matches a booking that's already in the ops panel with the same times,
+      // but that panel shift isn't linked to the app yet (no sync_source / not in
+      // the portal feed). Confirming stamps it as synced so the attendance row
+      // shows the green 🔄 instead of the amber ⚠️ "ops-only" icon.
+      const ex = r._existingShift || {};
+      statusCell = `<td>
+        <span class="badge badge-blue">🔗 Mark as synced</span>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
+          Already in the panel (${escapeHtml(ex.scheduled_start||'')}–${escapeHtml(ex.scheduled_end||'')})<br>
+          Confirm to link it to the app — no duplicate created
+        </div>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipMerge=${!r._skipMerge};renderImportPreview()">${r._skipMerge ? 'Will skip — undo' : 'Skip this one'}</button>
+        ${mergePicker()}
+      </td>`;
     } else if (r._existingMatch === 'exact') {
       // Same booking exists but the portal has fresher data (e.g. clock in/out).
       // Merging updates the existing shift instead of creating a duplicate.
@@ -13449,11 +13500,12 @@ function renderImportPreview() {
 
   // Counts that drive the action bar. Only SELECTED (ticked) rows are written.
   const isEligible = r => importRowIsSelected(r);
-  const autoMergeCount  = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'exact' && !r._alreadyImported && !r._skipMerge).length;
+  const stampOnlyCount  = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'exact' && r._syncStampOnly && !r._skipMerge).length;
+  const autoMergeCount  = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'exact' && !r._alreadyImported && !r._syncStampOnly && !r._skipMerge).length;
   const manualMergeCount= importRows.filter(r => isEligible(r) && r._forceMergeId).length;
   const mergeCount    = autoMergeCount + manualMergeCount;
   const insertCount   = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch !== 'exact').length;
-  const activeCount   = mergeCount + insertCount; // total that will be written
+  const activeCount   = mergeCount + insertCount + stampOnlyCount; // total that will be written/stamped
   const alreadyCount  = importRows.filter(r => r._alreadyImported).length;
   const clashCount    = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'overlap').length;
   const unmappedCount = importRows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
@@ -13465,6 +13517,9 @@ function renderImportPreview() {
     : '';
   const mergeNote = mergeCount > 0
     ? `<span style="font-size:12px;color:var(--accent);">🔗 ${mergeCount} will merge into existing booking${mergeCount!==1?'s':''}.</span>`
+    : '';
+  const stampNote = stampOnlyCount > 0
+    ? `<span style="font-size:12px;color:var(--accent);">🔗 ${stampOnlyCount} already in the panel — Confirm to mark synced.</span>`
     : '';
   const clashNote = clashCount > 0
     ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${clashCount} clash${clashCount!==1?'es':''} (different outlet) — review before saving.</span>`
@@ -13552,6 +13607,7 @@ function renderImportPreview() {
       <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()" ${activeCount === 0 ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''}>${saveLabel}</button>
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
       ${mergeNote}
+      ${stampNote}
       ${clashNote}
       ${selectionNote}
       ${unmappedNote}
@@ -13905,7 +13961,7 @@ async function _confirmImportBookingsInner() {
     if (r.worker_name && r.worker_name !== 'Available') {
       const { data: dayShifts } = await supabaseClient
         .from('shifts')
-        .select('id,scheduled_start,scheduled_end,outlet,clock_in,clock_out,rate,sr_rate,sr_worker,sr_absorbed')
+        .select('*')
         .eq('shift_date', r.shift_date)
         .not('cancelled', 'is', true)
         .ilike('worker_name', r.worker_name.trim());
@@ -13933,11 +13989,19 @@ async function _confirmImportBookingsInner() {
       const addsClockIn  = importHHMM(r.clock_in)  && importHHMM(r.clock_in)  !== importHHMM(mergeTarget.clock_in);
       const addsClockOut = importHHMM(r.clock_out) && importHHMM(r.clock_out) !== importHHMM(mergeTarget.clock_out);
       if (!addsClockIn && !addsClockOut) {
-        // No-op merge: stamp it as already-synced so it drops into the bottom
-        // section instead of staying in the actionable list.
+        // No new clock data to push. But if the matched panel shift isn't linked
+        // to the app yet, stamp it synced so the attendance row shows the green
+        // 🔄 instead of the amber ⚠️ "ops-only" icon. (This is the "Mark as
+        // synced" case.) Either way the row is now reconciled and drops into the
+        // "already in the ops panel" section.
+        if (!importPanelShiftIsSynced(mergeTarget)) {
+          await markShiftSyncSource(mergeTarget.id, 'merged');
+          r._importedThisSession = 'merged';
+        }
         skipped++;
         r._importedShiftId = mergeTarget.id;
         r._alreadyImported = true;
+        r._syncStampOnly = false;
         r._existingMatch = 'exact';
         continue;
       }
