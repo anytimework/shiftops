@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v55 — Two requests. (1) WHATSAPP GROUP PICKER now has a type-to-filter search box above a multi-row list (size=8), so finding a group among many doesn't require scrolling a tiny native popup. Filters live by name or @g.us id. (2) RESTORED Client Booking Requirements (was absent from this build line): outlets can define requirements (e.g. "Is the worker 18 years old and above?") that must be ticked before booking. Per ops: if a worker already passed ALL current requirements the modal is SKIPPED entirely (silent pass); adding a NEW requirement only needs the new tick (old passes kept); gate applies to ALL paths (Add Shift form, inline/standby assignment via assignWorkerToOpenSlot, AI chatbot). Data: profileMeta.outlets[k].requirements=[{id,label}], profileMeta.workers[k].passed_requirements={[outletKey]:[reqId]}. assignmentRestriction returns a REQ_SENTINEL-prefixed string for unmet requirements; isRequirementGate() lets interactive callers open the checklist modal (ensureRequirementsMet) instead of hard-blocking; suggestion filters and offers don't hide/block on the soft gate; imports never apply it (past records). mergeProfileMeta extended: requirements replaced by primary, passed_requirements deep-unioned per outlet so no device loses verification history. Outlet modal gains a requirements editor; outlet rows show a 📋 count. AI: createShift lists unmet reqs and asks for "confirm requirements" → forceCreateShift records the pass and proceeds; new addOutletRequirement / removeOutletRequirement / listOutletRequirements actions + context block. No schema change. -->
 <!-- Build patch: v54 — Four fixes. (1) IGNORE BOOKINGS: new durable team-synced "import_ignored" ledger (app_settings key='import_ignored', parallel to import_handled, same stable importBookingKey). Every actionable import-preview row gets a "🚫 Ignore" button; ignored bookings drop into a new collapsible "Ignored — won't be imported" section and never resurface on reload/refresh/new session/teammate. Each is un-ignorable from that section. tagExistingShifts flags ignored rows first; importRowIsSelectable excludes them; loaded at boot + before each reconcile. No schema change. (2) AI CLOCK-OUT ALERT: the AI chatbot's clockOut action updated the DB + logged but never called notifyPayrollClockOut, so AI-driven clock-outs sent no WhatsApp group alert (manual + edit-shift paths already did). Now fires buildClockOutMessage→notifyPayrollClockOut on a NEW clock-out only. (3) CLIENT WHATSAPP GROUP DROPDOWN restored on the Add/Edit outlet modal: "🔍 Fetch my WhatsApp groups" button + select reusing the Periskope chats endpoint (same as WhatsApp Alerts), writes the @g.us id into of-chat-link; resets on modal open; manual paste still works. (4) Estimated Payment card was NOT removed — confirmed still rendered in the metrics block; no structure touched. -->
 <!-- Build patch: v53 — DURABLE import-handled ledger fixes the recurring "I already merged/mapped this booking but it keeps coming back after refresh" complaint, WITHOUT the long-blocked schema change (the sync_source column still doesn't exist in the live DB, so markShiftSyncSource still no-ops and feed-matching alone is too fragile across mapped outlets + subset names). New team-synced app_settings row key='import_handled' records, for every booking imported/merged/mapped-to-existing, a stable key → the panel shift id it went into. tagExistingShifts now consults this ledger FIRST (after the same-session _importedShiftId check, before the fragile worker+outlet+time matching): if the row's key is recorded and that shift still exists, it's recognised as already-in-panel and drops into the "Already in the ops panel" section — surviving refresh, new sessions, and other teammates. Self-cleaning: a ledger entry whose shift was deleted is pruned so the booking can be re-imported. Stable key uses _portalBookingId when present, else token-SORTED worker name + date + scheduled start/end, deliberately EXCLUDING the outlet (the outlet is exactly what gets remapped, e.g. "Baggie's" → "Baggies' Butcher & Deli", so keying on it is what made prior recognition miss after a remap). Recorded at all reconcile points: manual merge, auto-merge, no-op/mark-synced, new insert, autoStampSyncRows, and on worker/outlet map-reveal of an already-in-panel booking. Loaded at boot + before each reconcile (loadImportHandledRemote), flushed via saveImportHandled (localStorage instant + Supabase merge-union so concurrent devices don't clobber). Mirrors the outlet_groups storage pattern. Adding the sync_source column later still works and is complementary; this ledger makes it unnecessary for de-dup. -->
 <!-- Build patch: v52 — Currency fix: Malaysian-outlet shifts (e.g. Khairul at Five Guys (Pavillion Mall)) showed $ instead of RM on the gross/net amounts while the per-hour subline correctly showed RM. Cause: the paste/upload importer stamped each shift's country from the "Default Country" dropdown (often Singapore) even for a Malaysian outlet, and the payment renderer trusted that stale stored country. FIX (display): resolvedCountryForShift() now treats the matched OUTLET's country as the source of truth for currency, falling back to the stored s.country only when the outlet can't be resolved — so moneyForShift/countryForShift display the correct currency for all existing data immediately. FIX (data): all three paste/upload parsers now stamp country from the matched outlet (falling back to the default dropdown only when no outlet matched), and mapping/changing an outlet in the import preview re-stamps the row's country from the chosen outlet. ALSO (reconciler robustness): tagExistingShifts now has outlet-INDEPENDENT fallbacks — a same-worker (token-subset) panel shift on the same date that is portal-synced, and a same-worker overlapping shift whose only difference is an UNMAPPED outlet, are both treated as the same already-in-panel booking instead of resurfacing as new. The portal sync index is built before reconciling so these fallbacks have data on first load. -->
@@ -2063,15 +2064,43 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>WhatsApp group / chat link</label><input type="text" id="of-chat-link" placeholder="e.g. https://chat.whatsapp.com/… or wa.me/65… or pick a group below">
       <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchOutletWhatsappGroups()">🔍 Fetch my WhatsApp groups</button>
-        <select id="of-chat-group-select" style="display:none;flex:1;min-width:200px;font-size:12px;padding:6px 8px;border-radius:6px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);" onchange="onOutletWhatsappGroupPick(this.value)"></select>
+      </div>
+      <div id="of-chat-group-wrap" style="display:none;margin-top:6px;">
+        <input type="text" id="of-chat-group-search" placeholder="Type to filter groups…" oninput="filterOutletWhatsappGroups(this.value)"
+          style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);margin-bottom:4px;">
+        <select id="of-chat-group-select" size="8" style="width:100%;font-size:12px;padding:4px;border-radius:6px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);" onchange="onOutletWhatsappGroupPick(this.value)"></select>
       </div>
       <div id="of-chat-group-status" style="font-size:11px;color:var(--text3);margin-top:4px;"></div>
     </div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
+    <div class="form-row">
+      <label>Booking requirements <span style="font-weight:400;color:var(--text3);">— ticked before a worker can be booked here</span></label>
+      <div id="of-requirements-list" style="display:flex;flex-direction:column;gap:5px;margin-bottom:6px;"></div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="of-requirement-input" placeholder="e.g. Is the worker 18 years old and above?"
+          style="flex:1;font-size:12px;padding:6px 8px;border-radius:6px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();addOutletRequirementRow();}">
+        <button type="button" class="btn btn-ghost btn-sm" style="white-space:nowrap;" onclick="addOutletRequirementRow()">+ Add</button>
+      </div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="outlet-save-btn" onclick="saveOutlet()">Add outlet</button>
+    </div>
+  </div>
+</div>
+
+<!-- BOOKING REQUIREMENTS CHECKLIST MODAL -->
+<div class="modal-overlay" id="requirements-modal">
+  <div class="modal" style="width:440px;">
+    <h3 id="req-modal-title">Booking requirements</h3>
+    <div id="req-modal-sub" class="sub-text" style="margin-bottom:10px;"></div>
+    <div id="req-modal-prior-note"></div>
+    <div id="req-modal-list" style="display:flex;flex-direction:column;gap:8px;margin:10px 0;"></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="cancelRequirementsModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="req-modal-confirm" onclick="confirmRequirementsModal()">Confirm &amp; book</button>
     </div>
   </div>
 </div>
@@ -2456,11 +2485,35 @@ function mergeProfileMeta(primary, secondary) {
     keys.forEach(k => {
       const pe = p[k] || {};
       const se = s[k] || {};
-      out[sectionName][k] = {
+      const merged = {
         ...se,            // remote/secondary defaults
         ...pe,            // primary (local) overrides scalars like notes/commission
         [listField]: unionList(pe[listField], se[listField])
       };
+      // OUTLET requirements: a list of {id,label}. Replace with primary's copy
+      // (so an edit/delete on this device propagates) — but if this device has no
+      // requirements key at all, keep the remote one rather than wiping it.
+      if (sectionName === 'outlets') {
+        if (Array.isArray(pe.requirements)) merged.requirements = pe.requirements;
+        else if (Array.isArray(se.requirements)) merged.requirements = se.requirements;
+      }
+      // WORKER passed_requirements: { [outletKey]: [reqId,...] }. Deep-UNION per
+      // outlet so no device loses a verification record another device made.
+      if (sectionName === 'workers') {
+        const pr = (pe.passed_requirements && typeof pe.passed_requirements === 'object') ? pe.passed_requirements : {};
+        const sr = (se.passed_requirements && typeof se.passed_requirements === 'object') ? se.passed_requirements : {};
+        const okeys = new Set([...Object.keys(pr), ...Object.keys(sr)]);
+        if (okeys.size) {
+          const passed = {};
+          okeys.forEach(ok => {
+            const a = Array.isArray(pr[ok]) ? pr[ok] : [];
+            const b = Array.isArray(sr[ok]) ? sr[ok] : [];
+            passed[ok] = Array.from(new Set([...a, ...b]));
+          });
+          merged.passed_requirements = passed;
+        }
+      }
+      out[sectionName][k] = merged;
     });
   };
   mergeSection('workers', 'disliked_outlets');
@@ -2861,6 +2914,61 @@ function workerProfile(name) {
 function outletProfile(name) {
   return profileMeta.outlets[normProfileKey(name)] || {};
 }
+
+// ── Client Booking Requirements ───────────────────────────────────────────────
+// An outlet can define requirements (e.g. "Is the worker 18 years old and
+// above?") that must be confirmed before a worker is booked there. Once a worker
+// passes, the pass is remembered per-outlet; future bookings auto-pass unless a
+// NEW requirement was added. Stored team-wide in profileMeta:
+//   profileMeta.outlets[oKey].requirements        = [{ id, label }]
+//   profileMeta.workers[wKey].passed_requirements  = { [oKey]: [reqId, ...] }
+// A requirements gate is surfaced through assignmentRestriction() with a sentinel
+// prefix so interactive callers can show the checklist modal instead of a hard
+// block (which is what a ban returns).
+const REQ_SENTINEL = '__REQ__:';
+function outletRequirements(outletName) {
+  const r = outletProfile(outletName).requirements;
+  return Array.isArray(r) ? r.filter(x => x && x.id && x.label) : [];
+}
+function workerPassedReqIds(workerName, outletName) {
+  const pr = workerProfile(workerName).passed_requirements;
+  const ok = normProfileKey(outletName);
+  const arr = pr && typeof pr === 'object' ? pr[ok] : null;
+  return Array.isArray(arr) ? arr : [];
+}
+// Which requirement objects this worker has NOT yet passed at this outlet.
+function unmetOutletRequirements(workerName, outletName) {
+  const reqs = outletRequirements(outletName);
+  if (!reqs.length) return [];
+  const passed = new Set(workerPassedReqIds(workerName, outletName));
+  return reqs.filter(r => !passed.has(r.id));
+}
+// True when the worker already passes every current requirement (or there are
+// none) — i.e. booking can proceed with NO modal.
+function workerMeetsAllOutletRequirements(workerName, outletName) {
+  const worker = String(workerName || '').trim();
+  if (!worker || worker.toLowerCase() === 'available') return true;
+  return unmetOutletRequirements(worker, outletName).length === 0;
+}
+// Record that a worker passed the given requirement IDs at an outlet (union).
+function recordPassedRequirements(workerName, outletName, reqIds) {
+  const worker = String(workerName || '').trim();
+  if (!worker || worker.toLowerCase() === 'available') return;
+  const wk = normProfileKey(worker);
+  const ok = normProfileKey(outletName);
+  if (!profileMeta.workers[wk]) profileMeta.workers[wk] = {};
+  const w = profileMeta.workers[wk];
+  if (!w.passed_requirements || typeof w.passed_requirements !== 'object') w.passed_requirements = {};
+  const existing = Array.isArray(w.passed_requirements[ok]) ? w.passed_requirements[ok] : [];
+  w.passed_requirements[ok] = Array.from(new Set([...existing, ...(reqIds || [])]));
+}
+function makeRequirementId() {
+  return 'req_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+// Is this assignmentRestriction() result a (soft) requirements gate vs a hard ban?
+function isRequirementGate(restriction) {
+  return typeof restriction === 'string' && restriction.startsWith(REQ_SENTINEL);
+}
 function workerPhone(workerName) {
   const w = allWorkers.find(x => String(x.name || '').trim().toLowerCase() === String(workerName || '').trim().toLowerCase());
   return w?.phone || '';
@@ -2880,6 +2988,14 @@ function assignmentRestriction(workerName, outletName) {
   }
   if ((outletProfile(outlet).banned_workers || []).map(normProfileKey).includes(wk)) {
     return `${worker} is banned from ${outlet}.`;
+  }
+  // Soft gate: outlet has booking requirements this worker hasn't passed yet.
+  // Returns a sentinel-prefixed message so interactive callers show the checklist
+  // modal; non-interactive callers treat any non-null as "blocked", which is the
+  // safe default (they should route through the modal anyway).
+  const unmet = unmetOutletRequirements(worker, outlet);
+  if (unmet.length) {
+    return `${REQ_SENTINEL}${worker} must meet ${unmet.length} booking requirement${unmet.length!==1?'s':''} for ${outlet}.`;
   }
   return null;
 }
@@ -7921,13 +8037,33 @@ async function fetchOutletWhatsappGroups() {
     if (statusEl) { statusEl.style.color='var(--amber, #f59e0b)'; statusEl.textContent = '⚠ No groups found on this number. Make sure the org phone is in the client group.'; }
     return;
   }
-  if (selectEl) {
-    const current = (document.getElementById('of-chat-link')?.value || '').trim();
-    selectEl.innerHTML = '<option value="">— Pick a WhatsApp group —</option>'
-      + groups.map(g => `<option value="${escapeAttr(g.id)}" ${g.id===current?'selected':''}>${escapeHtml(g.name)} (${escapeHtml(g.id)})</option>`).join('');
-    selectEl.style.display = '';
+  renderOutletWhatsappGroupOptions(groups);
+  const wrap = document.getElementById('of-chat-group-wrap');
+  if (wrap) wrap.style.display = '';
+  const searchEl = document.getElementById('of-chat-group-search');
+  if (searchEl) { searchEl.value = ''; try { searchEl.focus(); } catch(e){} }
+  if (statusEl) { statusEl.style.color='var(--text3)'; statusEl.textContent = `Found ${groups.length} group(s) — type to filter, then pick one. Or keep the link above.`; }
+}
+// Render the <option> list for the picker, marking the currently-set group.
+function renderOutletWhatsappGroupOptions(groups) {
+  const selectEl = document.getElementById('of-chat-group-select');
+  if (!selectEl) return;
+  const current = (document.getElementById('of-chat-link')?.value || '').trim();
+  if (!groups.length) {
+    selectEl.innerHTML = '<option value="" disabled>No groups match your filter</option>';
+    return;
   }
-  if (statusEl) { statusEl.style.color='var(--text3)'; statusEl.textContent = `Found ${groups.length} group(s) — pick the client's group, or keep the link above.`; }
+  selectEl.innerHTML = '<option value="">— Pick a WhatsApp group —</option>'
+    + groups.map(g => `<option value="${escapeAttr(g.id)}" ${g.id===current?'selected':''}>${escapeHtml(g.name)} (${escapeHtml(g.id)})</option>`).join('');
+}
+// Live filter the dropdown by name or id as the user types.
+function filterOutletWhatsappGroups(q) {
+  const all = _outletWaGroupsCache || [];
+  const term = String(q || '').trim().toLowerCase();
+  const filtered = term
+    ? all.filter(g => (g.name||'').toLowerCase().includes(term) || (g.id||'').toLowerCase().includes(term))
+    : all;
+  renderOutletWhatsappGroupOptions(filtered);
 }
 function onOutletWhatsappGroupPick(id) {
   if (!id) return;
@@ -7937,9 +8073,13 @@ function onOutletWhatsappGroupPick(id) {
   if (statusEl) { statusEl.style.color='var(--green)'; statusEl.textContent = '✓ Group set. Save changes to keep it.'; }
 }
 function resetOutletWhatsappGroupPicker() {
+  const wrap = document.getElementById('of-chat-group-wrap');
   const selectEl = document.getElementById('of-chat-group-select');
+  const searchEl = document.getElementById('of-chat-group-search');
   const statusEl = document.getElementById('of-chat-group-status');
-  if (selectEl) { selectEl.style.display = 'none'; selectEl.innerHTML = ''; }
+  if (wrap) wrap.style.display = 'none';
+  if (selectEl) selectEl.innerHTML = '';
+  if (searchEl) searchEl.value = '';
   if (statusEl) { statusEl.textContent = ''; statusEl.style.color = 'var(--text3)'; }
 }
 
@@ -8195,7 +8335,9 @@ function eligibleStandbyForSlot(slot) {
       if (seen.has(key)) return false;       // de-dupe same worker listed twice
       seen.add(key);
       // Skip banned / disliked-outlet workers entirely so the option never shows.
-      if (assignmentRestriction(name, outlet)) return false;
+      // A soft requirements gate does NOT hide a worker — they can pass the
+      // checklist when assigned; only hard restrictions remove the option.
+      { const rstr = assignmentRestriction(name, outlet); if (rstr && !isRequirementGate(rstr)) return false; }
       // Skip workers whose existing assigned shift that day clashes with this slot.
       if (workerHasClashingShift(name, slot)) return false;
       return true;
@@ -8374,7 +8516,7 @@ function likelyWorkersForSlot(slot, freqCache, scheduled) {
     // skip the overlap check entirely.
     if (workerClashesInWindows(name, slot, windows)) return;
     if (isWorkerSuspended(name)) return;                     // suspended
-    if (assignmentRestriction(name, outlet)) return;         // banned / not-wanted at outlet
+    { const rstr = assignmentRestriction(name, outlet); if (rstr && !isRequirementGate(rstr)) return; } // banned / not-wanted at outlet
     // Belt-and-braces: also drop any worker whose loaded shift that day clashes,
     // in case the windows map is incomplete for some reason.
     if (workerHasClashingShift(name, slot)) return;
@@ -8564,7 +8706,9 @@ async function offerSlotToStandby(shiftId, workerName) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
   const restriction = assignmentRestriction(workerName, slot.outlet || '');
-  if (restriction) { toast(restriction, 'error'); return; }
+  // A requirements gate doesn't block the OFFER — requirements are confirmed when
+  // the worker is actually assigned on acceptance. Only hard restrictions block.
+  if (restriction && !isRequirementGate(restriction)) { toast(restriction, 'error'); return; }
   // Live double-check: never offer to someone already booked that day with a shift
   // whose time overlaps this slot (guards against a stale rendered chip).
   try {
@@ -8705,7 +8849,10 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
     || (function(){ const s = (allShifts||[]).find(x=>String(x.id)===String(shiftId)) || taskShiftCache?.[String(shiftId)]; return s ? { id:s.id, outlet:s.outlet||'', date:s.shift_date||'' } : null; })();
   if (!slot) { toast('Slot no longer open', 'error'); return false; }
   const restriction = assignmentRestriction(worker, slot.outlet || '');
-  if (restriction) { toast(restriction, 'error'); return false; }
+  if (restriction && isRequirementGate(restriction)) {
+    const ok = await ensureRequirementsMet(worker, slot.outlet || '');
+    if (!ok) return false;
+  } else if (restriction) { toast(restriction, 'error'); return false; }
   // Safety net: never assign a worker into a slot that clashes with another
   // shift they already have that day. allShifts only holds the focused day/week
   // (and maybe one outlet), so check the DB directly for the slot's actual date —
@@ -9976,7 +10123,12 @@ function onWorkerInput() {
   const selectedOutlet = document.getElementById('f-outlet')?.value || '';
   const selectedCountry = outletCountry(selectedOutlet);
   const restriction = assignmentRestriction(name, selectedOutlet);
-  if (restriction) {
+  if (restriction && isRequirementGate(restriction)) {
+    // Soft gate — don't disable; the checklist modal runs on submit.
+    const n = unmetOutletRequirements(name, selectedOutlet).length;
+    document.getElementById('add-block-text').textContent = `${selectedOutlet} has ${n} booking requirement${n!==1?'s':''} to confirm — you'll tick them when you book.`;
+    warn.style.display = 'flex'; btn.disabled = false; btn.style.opacity = '1';
+  } else if (restriction) {
     document.getElementById('add-block-text').textContent = restriction;
     warn.style.display = 'flex'; btn.disabled = true; btn.style.opacity = '0.4';
   } else if (rawName && w && normaliseCountry(w.country) !== selectedCountry) {
@@ -10037,7 +10189,11 @@ async function addShift() {
   if (!isThirdParty && name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const selectedWorker = allWorkers.find(x => String(x.name || '').toLowerCase() === String(name || '').toLowerCase());
   const restriction = !isThirdParty ? assignmentRestriction(name, outletName) : null;
-  if (restriction) { toast(restriction, 'error'); return; }
+  if (restriction && isRequirementGate(restriction)) {
+    // Soft gate: run the checklist modal. Proceed only if all confirmed.
+    const ok = await ensureRequirementsMet(name, outletName);
+    if (!ok) return;
+  } else if (restriction) { toast(restriction, 'error'); return; }
   if (!isThirdParty && selectedWorker && normaliseCountry(selectedWorker.country) !== selectedCountry) { toast(`${name} is registered under ${normaliseCountry(selectedWorker.country)}, not ${selectedCountry}`, 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
@@ -10858,7 +11014,9 @@ function loadOutletsList() {
       const meta = outletProfile(o.name);
       const banned = (meta.banned_workers || []).length ? `<div class="sub-text" style="color:var(--red);margin-top:4px;">Banned: ${escapeHtml(meta.banned_workers.join(', '))}</div>` : '';
       const chatLink = meta.chat_link ? `<div class="sub-text" style="margin-top:4px;"><a href="${escapeAttr(meta.chat_link)}" target="_blank" rel="noopener" style="color:var(--green);text-decoration:none;font-weight:600;" title="Open client chat">💬 Open chat</a></div>` : '';
-      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${chatLink}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      const reqs = outletRequirements(o.name);
+      const reqLine = reqs.length ? `<div class="sub-text" style="color:var(--accent);margin-top:4px;" title="${escapeAttr(reqs.map(r=>r.label).join(' · '))}">📋 ${reqs.length} booking requirement${reqs.length!==1?'s':''}</div>` : '';
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${chatLink}${reqLine}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
 }
@@ -10875,6 +11033,8 @@ function resetOutletModal() {
   resetOutletWhatsappGroupPicker();
   document.getElementById('of-notes').value = '';
   document.getElementById('of-banned-workers').value = '';
+  _outletReqEditing = [];
+  renderOutletRequirementsEditor();
 }
 function openAddOutletModal() { resetOutletModal(); document.getElementById('add-outlet-modal').classList.add('open'); }
 function editOutlet(id) {
@@ -10892,6 +11052,8 @@ function editOutlet(id) {
   resetOutletWhatsappGroupPicker();
   document.getElementById('of-notes').value = meta.notes || '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
+  _outletReqEditing = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
+  renderOutletRequirementsEditor();
   document.getElementById('add-outlet-modal').classList.add('open');
 }
 
@@ -10904,11 +11066,14 @@ async function saveOutlet() {
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldOutlet = editingOutletId ? allOutlets.find(x => x.id === editingOutletId) : null;
   if (oldOutlet && normProfileKey(oldOutlet.name) !== normProfileKey(name)) delete profileMeta.outlets[normProfileKey(oldOutlet.name)];
+  const prevMeta = profileMeta.outlets[normProfileKey(name)] || {};
   profileMeta.outlets[normProfileKey(name)] = {
+    ...prevMeta,            // preserve any fields not edited here
     commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
     chat_link: document.getElementById('of-chat-link').value.trim(),
     notes: document.getElementById('of-notes').value.trim(),
-    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value)
+    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
+    requirements: (_outletReqEditing || []).filter(r => r && r.id && r.label).map(r => ({ id: r.id, label: r.label }))
   };
   await saveProfileMeta();
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
@@ -10917,6 +11082,109 @@ async function saveOutlet() {
   await loadOutlets(); loadOutletsList(); await loadShifts();
 }
 const addOutlet = saveOutlet;
+
+// ── Outlet modal: requirements editor ─────────────────────────────────────────
+let _outletReqEditing = []; // working buffer of {id,label} while the modal is open
+function renderOutletRequirementsEditor() {
+  const host = document.getElementById('of-requirements-list');
+  if (!host) return;
+  if (!_outletReqEditing.length) {
+    host.innerHTML = `<div class="sub-text" style="color:var(--text3);">No requirements yet. Workers can be booked here without a checklist.</div>`;
+    return;
+  }
+  host.innerHTML = _outletReqEditing.map((r, i) => `
+    <div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:6px 8px;">
+      <span style="flex:1;font-size:12px;color:var(--text);">${escapeHtml(r.label)}</span>
+      <button type="button" title="Remove" onclick="removeOutletRequirementRow(${i})"
+        style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;line-height:1;">✕</button>
+    </div>`).join('');
+}
+function addOutletRequirementRow() {
+  const input = document.getElementById('of-requirement-input');
+  const label = (input?.value || '').trim();
+  if (!label) return;
+  if (_outletReqEditing.some(r => r.label.toLowerCase() === label.toLowerCase())) {
+    toast('That requirement is already listed.', 'error');
+    return;
+  }
+  _outletReqEditing.push({ id: makeRequirementId(), label });
+  if (input) input.value = '';
+  renderOutletRequirementsEditor();
+}
+function removeOutletRequirementRow(i) {
+  _outletReqEditing.splice(i, 1);
+  renderOutletRequirementsEditor();
+}
+
+// ── Booking requirements checklist gate ───────────────────────────────────────
+// Promise-based gate used by every interactive booking path. Resolves true when
+// the worker may be booked (recording any newly-ticked passes), false if the
+// user cancels. If the worker already passes every current requirement, it
+// resolves true immediately with NO modal (per ops preference).
+let _reqModalState = null; // { resolve, worker, outlet, reqs }
+function ensureRequirementsMet(workerName, outletName) {
+  return new Promise(resolve => {
+    const worker = String(workerName || '').trim();
+    const outlet = String(outletName || '').trim();
+    if (!worker || worker.toLowerCase() === 'available' || !outlet) { resolve(true); return; }
+    const reqs = outletRequirements(outlet);
+    if (!reqs.length) { resolve(true); return; }
+    const unmet = unmetOutletRequirements(worker, outlet);
+    if (!unmet.length) { resolve(true); return; } // all already passed → no modal
+
+    const passedIds = new Set(workerPassedReqIds(worker, outlet));
+    _reqModalState = { resolve, worker, outlet, reqs };
+
+    document.getElementById('req-modal-title').textContent = `Requirements — ${outlet}`;
+    document.getElementById('req-modal-sub').textContent =
+      `Confirm ${worker} meets ${outlet}'s booking requirements before booking.`;
+    const priorNote = passedIds.size
+      ? `<div class="alert alert-green" style="margin-bottom:6px;padding:8px 10px;font-size:11px;"><span class="alert-icon">✓</span><span>${escapeHtml(worker)} met some requirements in a previous shift — those are pre-ticked. Only new ones need checking.</span></div>`
+      : '';
+    document.getElementById('req-modal-prior-note').innerHTML = priorNote;
+
+    document.getElementById('req-modal-list').innerHTML = reqs.map((r, i) => {
+      const pre = passedIds.has(r.id);
+      return `<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;font-size:13px;color:var(--text);background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:9px 11px;">
+        <input type="checkbox" class="req-check" data-reqid="${escapeAttr(r.id)}" ${pre ? 'checked' : ''}
+          style="width:16px;height:16px;margin-top:1px;cursor:pointer;accent-color:var(--accent);" onchange="updateReqModalConfirmState()">
+        <span>${escapeHtml(r.label)}${pre ? ' <span style="color:var(--green);font-size:11px;">(passed before)</span>' : ''}</span>
+      </label>`;
+    }).join('');
+
+    document.getElementById('requirements-modal').classList.add('open');
+    updateReqModalConfirmState();
+  });
+}
+// Enable Confirm only when every requirement is ticked.
+function updateReqModalConfirmState() {
+  const boxes = Array.from(document.querySelectorAll('#req-modal-list .req-check'));
+  const allTicked = boxes.length > 0 && boxes.every(b => b.checked);
+  const btn = document.getElementById('req-modal-confirm');
+  if (btn) {
+    btn.disabled = !allTicked;
+    btn.style.opacity = allTicked ? '' : '0.5';
+    btn.style.cursor = allTicked ? '' : 'not-allowed';
+  }
+}
+async function confirmRequirementsModal() {
+  const st = _reqModalState;
+  if (!st) { document.getElementById('requirements-modal').classList.remove('open'); return; }
+  const boxes = Array.from(document.querySelectorAll('#req-modal-list .req-check'));
+  if (!boxes.every(b => b.checked)) { toast('Tick every requirement to proceed.', 'error'); return; }
+  const reqIds = boxes.map(b => b.getAttribute('data-reqid'));
+  recordPassedRequirements(st.worker, st.outlet, reqIds);
+  try { await saveProfileMeta(); } catch(e) { console.warn('save passed_requirements failed:', e); }
+  document.getElementById('requirements-modal').classList.remove('open');
+  const resolve = st.resolve; _reqModalState = null;
+  resolve(true);
+}
+function cancelRequirementsModal() {
+  const st = _reqModalState;
+  document.getElementById('requirements-modal').classList.remove('open');
+  _reqModalState = null;
+  if (st && st.resolve) st.resolve(false);
+}
 
 async function deleteOutlet(id) {
   const outlet = allOutlets.find(o => o.id === id);
@@ -14485,11 +14753,13 @@ async function _confirmImportBookingsInner() {
     if (r._alreadyImported && !r._forceMergeId) { skipped++; continue; }
 
     const restriction = assignmentRestriction(r.worker_name, r.outlet);
-    if (restriction) {
+    if (restriction && !isRequirementGate(restriction)) {
       skipped++;
       toast(`Skipped ${r.worker_name}: ${restriction}`, 'error');
       continue;
     }
+    // A requirements gate does NOT block an import — imported rows are records of
+    // shifts already worked, so the checklist isn't applicable retroactively.
 
     // ── Manual merge: user explicitly tagged this row to update a specific
     // existing booking shown by the app. This wins over auto-detection. ──
@@ -15610,6 +15880,17 @@ function buildSystemContext() {
   });
   const restrictionList = restrictionLines.length ? restrictionLines.join('\n') : 'None on record.';
 
+  // Outlet booking requirements (checklist gates) so the assistant knows them
+  // before proposing a booking and can list/add/remove them on request.
+  const reqLines = [];
+  Object.entries(profileMeta.outlets || {}).forEach(([key, meta]) => {
+    if (Array.isArray(meta.requirements) && meta.requirements.length) {
+      const outletName = (allOutlets.find(o => normProfileKey(o.name) === key) || {}).name || key;
+      reqLines.push(`${outletName}: ${meta.requirements.map(r => r.label).join(' | ')}`);
+    }
+  });
+  const requirementsList = reqLines.length ? reqLines.join('\n') : 'None on record.';
+
   return `
 === SYSTEM CONTEXT (live data) ===
 Current user: ${currentInternalUser || 'Unknown'}
@@ -15636,6 +15917,9 @@ OUTLETS: ${outletList}
 
 ASSIGNMENT RESTRICTIONS (bans / do-not-assign — NEVER create a shift that violates these):
 ${restrictionList}
+
+OUTLET BOOKING REQUIREMENTS (a worker must meet these before being booked at that outlet; if you createShift for someone who hasn't passed, the system blocks and lists them):
+${requirementsList}
 
 BUSINESS KNOWLEDGE (${allKnowledge.length} entries):
 ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e.outlet+')':''} ${e.topic}: ${e.content}`).join('\n')||'No entries yet.'}
@@ -15676,6 +15960,9 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "unbanWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
 {"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
+{"type": "addOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<requirement text, e.g. Is the worker 18 years old and above?>"}
+{"type": "removeOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<exact requirement text to remove>"}
+{"type": "listOutletRequirements", "outlet": "<exact outlet name from DB>"}
 \`\`\`
 
 SCHEDULE CONFLICT RULES:
@@ -15724,6 +16011,7 @@ RULES:
 - BANNING: When the user says a worker is banned, barred, blacklisted, or "should not / cannot be assigned" to a specific outlet (e.g. "Ahn Duc is banned from Les Bouchons"), use the banWorkerFromOutlet action with the exact worker and outlet names. To lift a ban ("unban", "allow again", "remove the ban"), use unbanWorkerFromOutlet. This is NOT business knowledge — do not use saveKnowledge for bans. If either the worker or the outlet name is ambiguous or not in context, look them up first (searchWorker / searchOutlet) before banning.
 - ENFORCING BANS: NEVER create or offer to create a shift (createShift, forceCreateShift, batchCreateSlots) that assigns a worker to an outlet they're banned from or marked do-not-assign for — check ASSIGNMENT RESTRICTIONS above first. If asked to do so, refuse and explain the worker is restricted there, and offer to lift the restriction if that's what they want. The system will also hard-block it, but you should catch it before proposing the booking.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
+- CLIENT BOOKING REQUIREMENTS: Some outlets require workers to meet conditions before booking (e.g. "Is the worker 18 years old and above?"). To add one, use addOutletRequirement; to remove, use removeOutletRequirement; to see an outlet's list, use listOutletRequirements. When you try to createShift for a worker who hasn't passed an outlet's requirements, the system returns a requirements list and blocks. You cannot tick the checklist yourself. If the user explicitly confirms the worker meets ALL listed requirements (e.g. replies "confirm requirements", "yes she's 18+", "they meet all"), use forceCreateShift — it records the worker as having passed and creates the shift. Otherwise tell them to book via the Add Shift form to use the checklist.
 - Speak naturally, like a helpful colleague.`;
 
   const response = await fetch('https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/claude-proxy', {
@@ -15858,6 +16146,11 @@ async function executeAIAction(actionJson) {
       // Mirrors the manual Add-shift UI: a banned worker cannot be assigned to
       // that outlet, and this is NOT overridable via "confirm override".
       const restriction = assignmentRestriction(w.name, outlet.name);
+      if (restriction && isRequirementGate(restriction)) {
+        const unmet = unmetOutletRequirements(w.name, outlet.name);
+        const list = unmet.map(r => `  • ${r.label}`).join('\n');
+        return `📋 **${outlet.name} has booking requirements to confirm for ${w.name}:**\n${list}\n\nI can't tick these for you. Please book ${w.name} via the Add Shift form (you'll get the checklist), or confirm here that ${w.name} meets all of the above and I'll proceed — reply **"confirm requirements"**.`;
+      }
       if (restriction) {
         return `🚫 **Blocked — ${restriction}** I won't create this shift. To allow it, lift the restriction first (e.g. tell me "unban ${w.name} from ${outlet.name}" or update it in the worker/outlet settings).`;
       }
@@ -15918,7 +16211,12 @@ async function executeAIAction(actionJson) {
       const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
       const fcRestriction = assignmentRestriction(w.name, outlet.name);
-      if (fcRestriction) {
+      if (fcRestriction && isRequirementGate(fcRestriction)) {
+        // User confirmed the worker meets the outlet's requirements — record the
+        // passes (so future bookings auto-pass) and proceed.
+        recordPassedRequirements(w.name, outlet.name, outletRequirements(outlet.name).map(r => r.id));
+        try { await saveProfileMeta(); } catch(e) {}
+      } else if (fcRestriction) {
         return `🚫 **Blocked — ${fcRestriction}** A conflict override doesn't lift a ban. Lift the restriction first if you really want to assign them here.`;
       }
       if (isWorkerSuspended(w.name)) {
@@ -15979,6 +16277,7 @@ async function executeAIAction(actionJson) {
           const wMatch = allWorkers.find(x => x.name.toLowerCase() === wn.toLowerCase());
           const realName = wMatch ? wMatch.name : wn;
           const r = assignmentRestriction(realName, outlet.name);
+          if (r && isRequirementGate(r)) return `📋 **Blocked — ${realName} has unmet booking requirements for ${outlet.name}.** Book them via the Add Shift form to confirm the checklist. No slots created.`;
           if (r) return `🚫 **Blocked — ${r}** No slots created. Lift the restriction first.`;
           if (isWorkerSuspended(realName)) return `🚫 **Blocked — ${realName} is suspended.** No slots created.`;
         }
@@ -16114,6 +16413,51 @@ async function executeAIAction(actionJson) {
         outlet: a.outlet || null
       });
       return `✅ ${existing ? 'Updated' : 'Saved'} knowledge: **${a.topic}**`;
+    }
+
+    case 'addOutletRequirement': {
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const label = String(a.label || '').trim();
+      if (!label) return `❌ No requirement text provided.`;
+      const oKey = normProfileKey(outlet.name);
+      const existing = profileMeta.outlets[oKey] || {};
+      const reqs = Array.isArray(existing.requirements) ? existing.requirements.slice() : [];
+      if (reqs.some(r => r.label.toLowerCase() === label.toLowerCase())) {
+        return `ℹ️ **${outlet.name}** already requires: "${label}".`;
+      }
+      reqs.push({ id: makeRequirementId(), label });
+      profileMeta.outlets[oKey] = { ...existing, requirements: reqs };
+      await saveProfileMeta();
+      try { loadOutletsList(); } catch(e) {}
+      const all = reqs.map((r,i)=>`${i+1}. ${r.label}`).join('\n');
+      return `✅ Added booking requirement to **${outlet.name}**.\nCurrent requirements:\n${all}`;
+    }
+
+    case 'removeOutletRequirement': {
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const oKey = normProfileKey(outlet.name);
+      const existing = profileMeta.outlets[oKey] || {};
+      const reqs = Array.isArray(existing.requirements) ? existing.requirements.slice() : [];
+      const label = String(a.label || '').trim().toLowerCase();
+      const idx = reqs.findIndex(r => r.label.toLowerCase() === label);
+      if (idx === -1) return `ℹ️ **${outlet.name}** has no requirement matching "${a.label}".`;
+      const removed = reqs.splice(idx, 1)[0];
+      profileMeta.outlets[oKey] = { ...existing, requirements: reqs };
+      await saveProfileMeta();
+      try { loadOutletsList(); } catch(e) {}
+      const all = reqs.length ? reqs.map((r,i)=>`${i+1}. ${r.label}`).join('\n') : '(none)';
+      return `✅ Removed "${removed.label}" from **${outlet.name}**.\nRemaining requirements:\n${all}`;
+    }
+
+    case 'listOutletRequirements': {
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const reqs = outletRequirements(outlet.name);
+      if (!reqs.length) return `**${outlet.name}** has no booking requirements — workers can be booked without a checklist.`;
+      const all = reqs.map((r,i)=>`${i+1}. ${r.label}`).join('\n');
+      return `📋 **${outlet.name}** booking requirements:\n${all}`;
     }
 
     default:
