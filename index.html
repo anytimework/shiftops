@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v35 — Import Bookings now reconciles against the ops panel. On load/paste/upload, each row is matched against existing shifts (same worker + outlet + date + overlapping time). True duplicates show a "🔗 Merge into existing" badge and, on Confirm, UPDATE the existing booking (clock in/out, rate, role, times) instead of creating a duplicate or being blocked by the old overlap clash — so the booking stays as one synced record. Rows already fully in the panel show "✓ Already imported" and are hidden by default (toggle to show). Same worker+time at a DIFFERENT outlet is flagged as a "⚠️ Clash" to review/skip. After Confirm, saved/merged rows re-tag and drop out of the unseen view. Action bar shows new vs merge vs already-imported counts. No schema change. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -955,7 +956,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <!-- IMPORT BOOKINGS PAGE -->
     <div id="page-import" style="display:none;">
       <div class="topbar">
-        <div class="topbar-left"><h2>Import Bookings</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Paste payroll text or upload Excel/CSV, then reconcile workers and outlets before saving</p></div>
+        <div class="topbar-left"><h2>Import Bookings</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">Paste payroll text or upload Excel/CSV, then reconcile workers and outlets before saving. Bookings already in the ops panel are auto-detected — duplicates merge into the existing booking and already-synced rows are hidden.</p></div>
         <div class="topbar-right"><button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button></div>
       </div>
       <div class="content">
@@ -11616,6 +11617,109 @@ function exportReportCsv() {
 
 // ── Shared helpers ──────────────────────────────────────────
 
+// When true, the preview hides rows that are already in the ops panel
+// (already imported / merged) so you only see what's new and unreconciled.
+let importHideReconciled = true;
+
+// Normalise a name for loose comparison (case/space/punct-insensitive)
+function importNormName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Two time ranges overlap (in minutes)?
+function importTimesOverlap(aStart, aEnd, bStart, bEnd) {
+  const as = timeToMins(aStart), ae = timeToMins(aEnd);
+  const bs = timeToMins(bStart), be = timeToMins(bEnd);
+  return as < be && ae > bs;
+}
+
+// Collapse an outlet name to a canonical normalized key so that alias/name
+// variants (e.g. "Five Guys (iON Mall)" vs "(iON Mall) Five Guys") are treated
+// as the SAME outlet when deciding whether a booking is a duplicate to merge.
+function importOutletKey(name) {
+  let canonical = name;
+  try {
+    const resolved = resolveImportOutlet(name);
+    canonical = resolved?.name || name;
+  } catch (_) { /* resolver unavailable — fall back to the raw name */ }
+  return importNormName(canonical);
+}
+
+// Given the current importRows, query the shifts table for all of their dates
+// and tag each row with whether it already exists in the ops panel.
+//   r._existingShift   -> the matching DB shift object (or null)
+//   r._existingMatch   -> 'exact' | 'overlap' | null
+//     'exact'   = same worker + same outlet + same date + overlapping time
+//                 (this IS the same booking — already imported / mergeable)
+//     'overlap' = same worker + same date + overlapping time but DIFFERENT
+//                 outlet (a genuine clash to review, not a duplicate)
+//   r._alreadyImported -> true when an exact match already carries the same
+//                 clock-in/out (nothing new to sync) — hidden by default.
+async function tagExistingShifts(rows) {
+  if (!supabaseClient || !rows || !rows.length) return;
+
+  // Reset tags first
+  rows.forEach(r => {
+    r._existingShift = null;
+    r._existingMatch = null;
+    r._alreadyImported = false;
+  });
+
+  // Unique, named dates to query (skip 'Available' rows — nothing to dedupe)
+  const dates = [...new Set(
+    rows.filter(r => r.worker_name && r.worker_name !== 'Available')
+        .map(r => r.shift_date)
+        .filter(Boolean)
+  )];
+  if (!dates.length) return;
+
+  const { data: existing, error } = await supabaseClient
+    .from('shifts')
+    .select('id,shift_date,worker_name,outlet,scheduled_start,scheduled_end,clock_in,clock_out,role,rate')
+    .in('shift_date', dates)
+    .not('cancelled', 'is', true);
+  if (error) { console.warn('tagExistingShifts query failed:', error.message); return; }
+
+  // Index existing shifts by date for quick lookup
+  const byDate = new Map();
+  (existing || []).forEach(s => {
+    if (!byDate.has(s.shift_date)) byDate.set(s.shift_date, []);
+    byDate.get(s.shift_date).push(s);
+  });
+
+  for (const r of rows) {
+    if (!r.worker_name || r.worker_name === 'Available') continue;
+    const candidates = byDate.get(r.shift_date) || [];
+    const wNorm = importNormName(r.worker_name);
+    const oNorm = importOutletKey(r.outlet);
+
+    // Same worker + overlapping time on that date
+    const sameWorker = candidates.filter(s =>
+      importNormName(s.worker_name) === wNorm &&
+      importTimesOverlap(r.scheduled_start, r.scheduled_end, s.scheduled_start, s.scheduled_end)
+    );
+    if (!sameWorker.length) continue;
+
+    // Prefer a same-outlet match (true duplicate of the same booking)
+    const exact = sameWorker.find(s => importOutletKey(s.outlet) === oNorm);
+    if (exact) {
+      r._existingShift = exact;
+      r._existingMatch = 'exact';
+      // Already fully reconciled if clock times already match (or both empty)
+      const sameCin  = (exact.clock_in || '')  === (r.clock_in || '');
+      const sameCout = (exact.clock_out || '') === (r.clock_out || '');
+      r._alreadyImported = sameCin && sameCout;
+    } else {
+      // Same worker + time but a different outlet — genuine clash to review
+      r._existingShift = sameWorker[0];
+      r._existingMatch = 'overlap';
+    }
+  }
+}
+
 function importParseDate(raw) {
   if (!raw) return null;
   raw = String(raw).trim();
@@ -12534,8 +12638,7 @@ function parseImportPaste() {
     toast(hint, 'error');
     return;
   }
-  importRows = rows;
-  renderImportPreview();
+  applyImportRows(rows);
   toast(`Parsed ${rows.length} row${rows.length !== 1 ? 's' : ''} — review below then click Confirm`);
 }
 
@@ -12718,13 +12821,15 @@ async function loadPortalBookings() {
       return;
     }
 
-    importRows = rows;
-    renderImportPreview();
+    await applyImportRows(rows);
 
     const needMap = rows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
+    const seenCount = rows.filter(r => r._alreadyImported).length;
+    const newCount  = rows.length - seenCount;
     toast(
       `Loaded ${rows.length} synced booking${rows.length !== 1 ? 's' : ''}` +
-      (needMap ? ` — ${needMap} need worker/outlet mapping below.` : ' — all matched, review then Confirm.'),
+      (seenCount ? ` — ${newCount} new, ${seenCount} already in ops panel (hidden).` : '') +
+      (needMap ? ` ${needMap} need worker/outlet mapping below.` : (seenCount ? '' : ' — all matched, review then Confirm.')),
       'success'
     );
   } catch (e) {
@@ -12747,8 +12852,7 @@ async function handleImportFile(event) {
       const rows = parseImportText(text);
       if (rows === null) { toast('Could not find a "Date" column in the CSV file.', 'error'); return; }
       if (!rows.length) { toast('No valid rows found in the CSV file.', 'error'); return; }
-      importRows = rows;
-      renderImportPreview();
+      applyImportRows(rows);
       toast(`Loaded ${rows.length} row${rows.length !== 1 ? 's' : ''} from CSV`);
     } else {
       // XLSX / XLS — use the SheetJS library already loaded on the page
@@ -12760,8 +12864,7 @@ async function handleImportFile(event) {
       const rows = parseImportText(tsv);
       if (rows === null) { toast('Could not find a "Date" column in the Excel file.', 'error'); return; }
       if (!rows.length) { toast('No valid rows found in the Excel file.', 'error'); return; }
-      importRows = rows;
-      renderImportPreview();
+      applyImportRows(rows);
       toast(`Loaded ${rows.length} row${rows.length !== 1 ? 's' : ''} from Excel`);
     }
   } catch(e) {
@@ -12788,6 +12891,20 @@ function importOutletOptions(selectedName) {
 // Track which import row is pending quick-add
 let _importNewWorkerIdx = null;
 let _importNewOutletIdx = null;
+
+// Set importRows, tag them against the ops panel, then render.
+// Renders immediately (so the table appears fast), tags in the background,
+// then re-renders with merge/already-imported badges once tagging completes.
+async function applyImportRows(rows) {
+  importRows = rows;
+  renderImportPreview();
+  try {
+    await tagExistingShifts(importRows);
+  } catch (e) {
+    console.warn('applyImportRows tagging failed:', e);
+  }
+  renderImportPreview();
+}
 
 function renderImportPreview() {
   const body     = document.getElementById('import-preview-body');
@@ -12825,6 +12942,9 @@ function renderImportPreview() {
   const SEL_STYLE = 'font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--amber);border-radius:4px;';
 
   const tbodyRows = importRows.map((r, idx) => {
+    // Hide rows already in the ops panel (already imported / merged) unless the
+    // user has chosen to show them. Keeps idx stable for the onclick handlers.
+    if (importHideReconciled && r._alreadyImported) return '';
     // ── Helper: search dropdown for mapping ──
     const searchDropdown = (type, idx, listId) => `
       <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;">
@@ -12963,6 +13083,34 @@ function renderImportPreview() {
         <span class="badge badge-red">Cancelled</span>
         <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._cancelled=false;renderImportPreview()">Undo</button>
       </td>`;
+    } else if (r._existingMatch === 'exact' && r._alreadyImported) {
+      // Same booking already in ops panel, nothing new to sync.
+      statusCell = `<td>
+        <span class="badge badge-green">✓ Already imported</span>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">In ops panel — will be skipped</div>
+      </td>`;
+    } else if (r._existingMatch === 'exact') {
+      // Same booking exists but the portal has fresher data (e.g. clock in/out).
+      // Merging updates the existing shift instead of creating a duplicate.
+      const ex = r._existingShift || {};
+      statusCell = `<td>
+        <span class="badge badge-blue">🔗 Merge into existing</span>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
+          Updates the booking already in the panel<br>
+          (${escapeHtml(ex.clock_in||'—')}–${escapeHtml(ex.clock_out||'—')} → ${escapeHtml(r.clock_in||'—')}–${escapeHtml(r.clock_out||'—')})
+        </div>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipMerge=${!r._skipMerge};renderImportPreview()">${r._skipMerge ? 'Will skip — undo' : 'Skip this one'}</button>
+      </td>`;
+    } else if (r._existingMatch === 'overlap') {
+      // Same worker + time but a DIFFERENT outlet — a genuine clash to review.
+      const ex = r._existingShift || {};
+      statusCell = `<td>
+        <span class="badge badge-amber">⚠️ Clash</span>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
+          Already booked ${escapeHtml(ex.scheduled_start||'')}–${escapeHtml(ex.scheduled_end||'')}<br>at <b>${escapeHtml(ex.outlet||'')}</b> (different outlet)
+        </div>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Skip</button>
+      </td>`;
     } else {
       const st = (r.clock_in && r.clock_out) ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-blue">Scheduled</span>';
       statusCell = `<td>
@@ -12988,19 +13136,58 @@ function renderImportPreview() {
     </tr>`;
   }).join('');
 
-  const activeCount = importRows.filter(r => !r._cancelled && !r._hasWorkerMismatch && !r._hasOutletMismatch).length;
+  // If every row is hidden (all already imported), show a friendly placeholder
+  // inside the table instead of a bare empty body.
+  const visibleCount = importRows.filter(r => !(importHideReconciled && r._alreadyImported)).length;
+  const tbodyFinal = visibleCount === 0 && importRows.length > 0
+    ? `<tr><td colspan="12" style="padding:26px 18px;text-align:center;color:var(--text2);font-size:13px;">
+         ✓ All ${importRows.length} booking${importRows.length !== 1 ? 's are' : ' is'} already in the ops panel — nothing new to import.
+         <button class="btn btn-ghost btn-sm" style="margin-left:8px;" onclick="importHideReconciled=false;renderImportPreview()">Show them anyway</button>
+       </td></tr>`
+    : tbodyRows;
+
+  // Counts that drive the action bar.
+  const isEligible = r => !r._cancelled && !r._hasWorkerMismatch && !r._hasOutletMismatch;
+  const mergeCount    = importRows.filter(r => isEligible(r) && r._existingMatch === 'exact' && !r._alreadyImported && !r._skipMerge).length;
+  const insertCount   = importRows.filter(r => isEligible(r) && r._existingMatch !== 'exact').length;
+  const activeCount   = mergeCount + insertCount; // total that will be written
+  const alreadyCount  = importRows.filter(r => r._alreadyImported).length;
+  const clashCount    = importRows.filter(r => isEligible(r) && r._existingMatch === 'overlap').length;
   const unmappedCount = importRows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
+
   const unmappedNote = unmappedCount > 0
     ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${unmappedCount} row${unmappedCount!==1?'s':''} need mapping — use a suggestion or + New.</span>`
     : '';
+  const mergeNote = mergeCount > 0
+    ? `<span style="font-size:12px;color:var(--accent);">🔗 ${mergeCount} will merge into existing booking${mergeCount!==1?'s':''}.</span>`
+    : '';
+  const clashNote = clashCount > 0
+    ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${clashCount} clash${clashCount!==1?'es':''} (different outlet) — review before saving.</span>`
+    : '';
+  const reconciledToggle = alreadyCount > 0
+    ? `<button class="btn btn-ghost btn-sm" onclick="importHideReconciled=!importHideReconciled;renderImportPreview()">${importHideReconciled ? `Show ${alreadyCount} already-imported` : 'Hide already-imported'}</button>`
+    : '';
+  const saveLabel = mergeCount > 0
+    ? `✓ Confirm — save ${insertCount} &amp; merge ${mergeCount}`
+    : `✓ Confirm &amp; Save ${activeCount} shift${activeCount !== 1 ? 's' : ''}`;
+
+  // If everything left is already imported, say so plainly.
+  const allDoneNote = (activeCount === 0 && alreadyCount > 0 && unmappedCount === 0)
+    ? `<span style="font-size:12px;color:var(--green);">✓ Everything here is already in the ops panel — nothing new to import.</span>`
+    : '';
+
   body.innerHTML = `
     <div style="overflow-x:auto;">
-      <table>${thead}<tbody>${tbodyRows}</tbody></table>
+      <table>${thead}<tbody>${tbodyFinal}</tbody></table>
     </div>
     <div style="padding:14px 18px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-      <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()">✓ Confirm &amp; Save ${activeCount} shift${activeCount !== 1 ? 's' : ''}</button>
+      <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()" ${activeCount === 0 ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''}>${saveLabel}</button>
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
+      ${reconciledToggle}
+      ${mergeNote}
+      ${clashNote}
       ${unmappedNote}
+      ${allDoneNote}
       <span style="font-size:12px;color:var(--text3);">Worker, client, role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>`;
 }
@@ -13194,7 +13381,7 @@ function renderImportMetrics() {
 async function confirmImportBookings() {
   if (!importRows.length) { toast('Nothing to import', 'error'); return; }
 
-  let saved = 0, skipped = 0;
+  let saved = 0, merged = 0, skipped = 0;
 
   for (const r of importRows) {
     // Always skip unmapped rows — user must explicitly map or add before confirming
@@ -13217,30 +13404,78 @@ async function confirmImportBookings() {
       continue;
     }
 
-    // ── Overlap check: query DB for that date to catch conflicts across all dates ──
+    // ── Merge / reconcile against the ops panel ──
+    // Re-resolve against the live DB at save time so we never create a duplicate
+    // for a booking that already sits in the panel, and so two browsers can't
+    // race each other into double inserts.
+    let mergeTarget = null;          // existing shift row to update, if any
+    let isGenuineClash = false;      // same worker+time, different outlet
     if (r.worker_name && r.worker_name !== 'Available') {
       const { data: dayShifts } = await supabaseClient
-        .from('shifts').select('scheduled_start,scheduled_end,outlet')
+        .from('shifts')
+        .select('id,scheduled_start,scheduled_end,outlet,clock_in,clock_out')
         .eq('shift_date', r.shift_date)
         .not('cancelled', 'is', true)
         .ilike('worker_name', r.worker_name.trim());
-      const newStart = timeToMins(r.scheduled_start);
-      const newEnd   = timeToMins(r.scheduled_end);
-      const overlap  = (dayShifts || []).find(s => {
-        const eStart = timeToMins(s.scheduled_start);
-        const eEnd   = timeToMins(s.scheduled_end);
-        return newStart < eEnd && newEnd > eStart;
-      });
-      if (overlap) {
-        const skip = !confirm(
-          `⚠️ Overlap detected!\n\n` +
-          `${r.worker_name} already has a shift on ${r.shift_date}\n` +
-          `Existing: ${overlap.scheduled_start}–${overlap.scheduled_end} at ${overlap.outlet}\n` +
-          `New:      ${r.scheduled_start}–${r.scheduled_end} at ${r.outlet}\n\n` +
-          `Click OK to import anyway, or Cancel to skip this row.`
-        );
-        if (skip) { skipped++; continue; }
+
+      const overlapping = (dayShifts || []).filter(s =>
+        importTimesOverlap(r.scheduled_start, r.scheduled_end, s.scheduled_start, s.scheduled_end)
+      );
+      if (overlapping.length) {
+        const oNorm = importOutletKey(r.outlet);
+        // Same outlet → this IS the same booking: merge into it.
+        mergeTarget = overlapping.find(s => importOutletKey(s.outlet) === oNorm) || null;
+        if (!mergeTarget) isGenuineClash = true; // different outlet only
       }
+    }
+
+    // Same booking already in the panel.
+    if (mergeTarget) {
+      // User explicitly chose to skip this merge.
+      if (r._skipMerge) { skipped++; continue; }
+
+      // Nothing new to sync (clock times already identical) → treat as seen.
+      const sameCin  = (mergeTarget.clock_in  || '') === (r.clock_in  || '');
+      const sameCout = (mergeTarget.clock_out || '') === (r.clock_out || '');
+      if (sameCin && sameCout) { skipped++; continue; }
+
+      // Merge: update the existing shift with the fresher portal data so the
+      // single booking stays in sync, instead of inserting a duplicate.
+      const mergePayload = {
+        role:            r.role,
+        scheduled_start: r.scheduled_start,
+        scheduled_end:   r.scheduled_end,
+        rate:            parseFloat(r.rate) || 12,
+        break_mins:      parseInt(r.break_mins) || 0,
+        clock_in:        r.clock_in  || mergeTarget.clock_in  || null,
+        clock_out:       r.clock_out || mergeTarget.clock_out || null,
+        country:         r.country,
+        late_penalty:    parseFloat(r.late_penalty || 0),
+        cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
+        updated_at:      new Date().toISOString(),
+      };
+      const { error: mErr } = await supabaseClient
+        .from('shifts').update(mergePayload).eq('id', mergeTarget.id);
+      if (mErr) {
+        console.error('Import merge failed:', mErr.message, mergePayload);
+        toast(`Failed to merge ${r.worker_name}: ${mErr.message}`, 'error');
+        skipped++;
+      } else {
+        merged++;
+      }
+      continue;
+    }
+
+    // Genuine clash at a different outlet — confirm before adding a second shift.
+    if (isGenuineClash) {
+      const keep = confirm(
+        `⚠️ Clash detected!\n\n` +
+        `${r.worker_name} is already booked at a different outlet on ${r.shift_date} ` +
+        `during ${r.scheduled_start}–${r.scheduled_end}.\n\n` +
+        `New: ${r.scheduled_start}–${r.scheduled_end} at ${r.outlet}\n\n` +
+        `Click OK to add this as a SECOND shift anyway, or Cancel to skip it.`
+      );
+      if (!keep) { skipped++; continue; }
     }
 
     // Build the shift payload
@@ -13280,23 +13515,33 @@ async function confirmImportBookings() {
   await loadWorkers();
   await loadOutlets();
 
-  let msg = `Saved ${saved} shift${saved !== 1 ? 's' : ''}`;
-  if (skipped) msg += ` (${skipped} skipped)`;
-  toast(msg, saved > 0 ? 'success' : 'error');
+  const wroteCount = saved + merged;
+  let msg = [];
+  if (saved)  msg.push(`saved ${saved} new`);
+  if (merged) msg.push(`merged ${merged}`);
+  if (!msg.length) msg.push('no changes');
+  let resultMsg = msg.join(', ');
+  if (skipped) resultMsg += ` (${skipped} skipped)`;
+  toast(resultMsg.charAt(0).toUpperCase() + resultMsg.slice(1), wroteCount > 0 ? 'success' : 'info');
 
-  if (saved > 0) {
-    logActivity('Import bookings', `Bulk imported ${saved} shift${saved !== 1 ? 's' : ''}${skipped ? ` (${skipped} skipped — unmapped or overlap)` : ''}`, 'import', '');
-    importRows = [];
+  if (wroteCount > 0) {
+    logActivity(
+      'Import bookings',
+      `Imported ${saved} new + merged ${merged} existing shift${(saved+merged) !== 1 ? 's' : ''}${skipped ? ` (${skipped} skipped — unmapped, already-synced or clash)` : ''}`,
+      'import', ''
+    );
+    // Re-tag the remaining preview rows against the now-updated panel so saved/
+    // merged rows flip to "already imported" and disappear from the unseen view.
+    await loadShifts();
+    // Re-tag everything and re-render; rows now in the panel become
+    // _alreadyImported and are hidden by default, leaving only what's unseen.
+    await tagExistingShifts(importRows);
+    renderImportPreview();
+
     const pasteEl = document.getElementById('import-paste');
     if (pasteEl) pasteEl.value = '';
     const fileEl = document.getElementById('import-file');
     if (fileEl) fileEl.value = '';
-    const countEl = document.getElementById('import-count');
-    if (countEl) countEl.textContent = '';
-    const metricsEl = document.getElementById('import-metrics');
-    if (metricsEl) metricsEl.innerHTML = '';
-    renderImportPreview();
-    await loadShifts();
   }
 }
 
