@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v42 — Merge now respects the ops-panel rate. When an imported row merges into a booking that already exists in the ops panel (auto-match or manual "Merge into existing"), Confirm KEEPS the panel's rate and special-rate fields (sr_rate/sr_worker/sr_absorbed) instead of overwriting them with the imported value — because special rates often live only in the panel, not in the source app. New bookings that aren't yet in the panel still use the imported/app rate as before. The preview now shows the kept panel rate (in accent colour, "kept from ops panel", with the import's value noted when it differs) for merge rows, so what you see matches what saves. Both merge SELECTs now fetch rate + SR fields. No schema change. -->
+<!-- Build patch: v41 — Rate lookup hardened against outlet-name corruption. getSuggestedRate / ensureOutletRates and the Rates editor now resolve rateRules through a tolerant key match (_rateRulesKeyFor), so an outlet stored under a backslash-escaped apostrophe (e.g. "Baggies\' Butcher & Deli") or differing whitespace/casing still finds its configured per-day rates instead of falling back to the role default (which is $12 Mon–Thu for Kitchen Assistant). This prevents the import from showing $12 on a weekday when the outlet is configured at $15. Note: a rate present in the pasted/portal SOURCE row still takes precedence over the outlet rule by design — that's unchanged. No schema change. -->
 <!-- Build patch: v40 — Fixed two Import Bookings issues. (1) Double-save / "runs forever": confirmImportBookings now takes an in-flight lock and disables + relabels the Confirm button ("⏳ Saving…") while writing, so a second click can't kick off a concurrent pass that merges/saves the same rows again (the repeated activity-log entries). It also fast-skips already-imported and unticked rows before any DB query, so importing a single booking out of a big paste no longer scans every row. (2) Already-merged booking reappearing: each row that's actually written this session is now stamped with _importedShiftId and kept marked done; tagExistingShifts preserves that stamp as long as the target booking still exists, so a saved/merged shift won't be offered again on the next import. New inserts capture their id via .select('id'). No schema change. -->
 <!-- Build patch: v39 — Import preview now has a per-row tick column so you can import a subset of bookings instead of all-or-nothing. Every importable row (mapped, not cancelled, not already-imported) shows a checkbox, ticked by default; a header checkbox selects/deselects all. Confirm only writes ticked rows — unticked ones stay in the preview for a later batch. Action-bar counts and the save button ("Save N selected shifts") reflect the current selection, with a "N unticked — will be left for later · Select all" hint. No schema change. -->
 <!-- Build patch: v38 — Manual merge picker is now scoped to the import row's OWN date: a 19 Jun shift only lists other 19 Jun bookings in the "🔗 Merge into existing…" dropdown. Dropped the cross-date worker fetch (and its extra query); candidates come straight from the same-date pool, ordered same worker+overlap → same worker same date → anyone else that date. Date removed from option labels since every option shares the row's date. No schema change. -->
@@ -2727,16 +2729,39 @@ function dayKeyForDate(d) {
   return DAY_KEYS[d.getDay() === 0 ? 6 : d.getDay() - 1];
 }
 
+// Find the rateRules entry for an outlet even when the stored key differs only
+// by an escaped apostrophe (e.g. "Baggies\' Butcher") or surrounding/After
+// whitespace — the known outlet-name corruption. Returns the actual key in use
+// (so writes land on the right entry) or null if none exists yet.
+function _rateRulesKeyFor(outlet) {
+  if (!outlet) return null;
+  if (rateRules[outlet]) return outlet;                 // exact hit
+  const target = _normaliseRateOutlet(outlet);
+  for (const k of Object.keys(rateRules)) {
+    if (_normaliseRateOutlet(k) === target) return k;   // tolerant hit
+  }
+  return null;
+}
+function _normaliseRateOutlet(raw) {
+  return String(raw || '')
+    .replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\\\/g, '')
+    .toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 function ensureOutletRates(outlet) {
   if (!outlet) return;
-  if (!rateRules[outlet]) rateRules[outlet] = {};
+  // Reuse an existing entry under a corrupt/variant key so we don't create a
+  // second, default-filled entry that shadows the user's configured rates.
+  const existingKey = _rateRulesKeyFor(outlet);
+  const key = existingKey || outlet;
+  if (!rateRules[key]) rateRules[key] = {};
   JOB_TYPES.forEach(role => {
-    if (!rateRules[outlet][role]) rateRules[outlet][role] = defaultDailyRates(role);
+    if (!rateRules[key][role]) rateRules[key][role] = defaultDailyRates(role);
     DAY_KEYS.forEach(day => {
       if (role === 'Barista') {
-        rateRules[outlet][role][day] = 15;
-      } else if (rateRules[outlet][role][day] === undefined || rateRules[outlet][role][day] === null || rateRules[outlet][role][day] === '') {
-        rateRules[outlet][role][day] = defaultDailyRates(role)[day];
+        rateRules[key][role][day] = 15;
+      } else if (rateRules[key][role][day] === undefined || rateRules[key][role][day] === null || rateRules[key][role][day] === '') {
+        rateRules[key][role][day] = defaultDailyRates(role)[day];
       }
     });
   });
@@ -2746,7 +2771,8 @@ function getSuggestedRate(outlet, role, dateObj) {
   const roleName = normaliseRole(role);
   const day = dayKeyForDate(dateObj);
   ensureOutletRates(outlet);
-  const outletRate = rateRules[outlet]?.[roleName]?.[day];
+  const key = _rateRulesKeyFor(outlet) || outlet;
+  const outletRate = rateRules[key]?.[roleName]?.[day];
   if (outletRate !== undefined && outletRate !== null && outletRate !== '') return { rate: outletRate };
   return { rate: defaultDailyRates(roleName)[day] };
 }
@@ -4733,7 +4759,8 @@ function renderRateEditor() {
   const role = document.getElementById('rate-job-type')?.value || JOB_TYPES[0];
   if (!outlet || !role) return;
   ensureOutletRates(outlet);
-  const rates = rateRules[outlet][role];
+  const rkey = _rateRulesKeyFor(outlet) || outlet;
+  const rates = rateRules[rkey][role];
   document.getElementById('rate-editor-body').innerHTML = `
     <div class="form-grid" style="grid-template-columns:repeat(4,1fr);">
       ${DAY_KEYS.map(day => `<div class="form-row"><label>${DAY_LABELS[day]}</label><input type="number" id="rate-${day}" value="${parseFloat(rates[day]).toFixed(2)}" step="0.50" min="1"></div>`).join('')}
@@ -4749,9 +4776,10 @@ function saveOutletJobRates() {
   const role = document.getElementById('rate-job-type')?.value;
   if (!outlet || !role) return;
   ensureOutletRates(outlet);
+  const rkey = _rateRulesKeyFor(outlet) || outlet;
   DAY_KEYS.forEach(day => {
     const v = parseFloat(document.getElementById('rate-' + day).value);
-    if (!isNaN(v)) rateRules[outlet][role][day] = v;
+    if (!isNaN(v)) rateRules[rkey][role][day] = v;
   });
   saveRateRules();
   toast('Rates saved');
@@ -4764,7 +4792,8 @@ function resetOutletJobRates() {
   if (!outlet || !role) return;
   if (!confirm(`Reset ${role} rates for ${outlet} to the standard pre-fill?`)) return;
   ensureOutletRates(outlet);
-  rateRules[outlet][role] = defaultDailyRates(role);
+  const rkey = _rateRulesKeyFor(outlet) || outlet;
+  rateRules[rkey][role] = defaultDailyRates(role);
   saveRateRules();
   renderRateEditor();
   toast('Rates reset');
@@ -13131,7 +13160,26 @@ function renderImportPreview() {
     </td>`;
 
     // ── Rate cell (editable) — shows SR badge if special rate detected ──
-    const rateCell = r._specialRate && r._specialRate > r.rate
+    // If this row will MERGE into an existing ops-panel booking, that booking's
+    // rate is authoritative (special rates often live only in the panel), so we
+    // display the panel rate as a locked "kept" value rather than an editable
+    // imported rate — matching what Confirm will actually save.
+    let willMergeIntoPanel = false;
+    let panelKeptRate = null;
+    if (r._forceMergeId) {
+      const tgt = (r._mergeCandidates || []).find(s => s.id === r._forceMergeId);
+      if (tgt && tgt.rate != null && tgt.rate !== '') { willMergeIntoPanel = true; panelKeptRate = parseFloat(tgt.rate); }
+    } else if (r._existingMatch === 'exact' && r._existingShift && !r._alreadyImported) {
+      const ex = r._existingShift;
+      if (ex.rate != null && ex.rate !== '') { willMergeIntoPanel = true; panelKeptRate = parseFloat(ex.rate); }
+    }
+
+    const rateCell = willMergeIntoPanel
+      ? `<td>
+          <div style="font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:600;">\$${panelKeptRate.toFixed(2)}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:1px;line-height:1.3;">kept from ops panel${(parseFloat(r.rate||0) && Math.abs(parseFloat(r.rate) - panelKeptRate) > 0.001) ? `<br>(import had \$${parseFloat(r.rate).toFixed(2)})` : ''}</div>
+        </td>`
+      : (r._specialRate && r._specialRate > r.rate
       ? `<td>
           <div style="font-family:var(--mono);font-size:12px;">\$${parseFloat(r.rate).toFixed(2)}<span style="color:var(--text3);font-size:10px;"> client</span></div>
           <div style="font-family:var(--mono);font-size:12px;color:var(--teal);font-weight:600;">\$${parseFloat(r._specialRate).toFixed(2)}<span style="color:var(--text3);font-weight:400;font-size:10px;"> worker</span></div>
@@ -13141,7 +13189,7 @@ function renderImportPreview() {
           <input type="number" step="0.5" min="0" value="${parseFloat(r.rate||12).toFixed(2)}"
             style="width:64px;font-size:12px;padding:3px 5px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--mono);"
             onchange="importRows[${idx}].rate=parseFloat(this.value)||12;">
-        </td>`;
+        </td>`);
 
     // ── Penalty cell ──
     const latePen   = parseFloat(r.late_penalty||0);
@@ -13620,7 +13668,7 @@ async function _confirmImportBookingsInner() {
     if (r._forceMergeId) {
       const { data: tgtRows } = await supabaseClient
         .from('shifts')
-        .select('id,clock_in,clock_out')
+        .select('id,clock_in,clock_out,rate,sr_rate,sr_worker,sr_absorbed')
         .eq('id', r._forceMergeId)
         .limit(1);
       const tgt = (tgtRows || [])[0];
@@ -13629,12 +13677,18 @@ async function _confirmImportBookingsInner() {
         skipped++;
         continue;
       }
+      // RATE RULE (see merge below): keep the ops-panel booking's existing rate
+      // and special-rate fields — they're authoritative and often special rates
+      // only live in the panel. Fall back to the imported rate only if absent.
+      const tgtRate = (tgt.rate != null && tgt.rate !== '')
+        ? parseFloat(tgt.rate)
+        : (parseFloat(r.rate) || 12);
       const mergePayload = {
         role:            r.role,
         outlet:          r.outlet,
         scheduled_start: r.scheduled_start,
         scheduled_end:   r.scheduled_end,
-        rate:            parseFloat(r.rate) || 12,
+        rate:            tgtRate,
         break_mins:      parseInt(r.break_mins) || 0,
         clock_in:        r.clock_in  || tgt.clock_in  || null,
         clock_out:       r.clock_out || tgt.clock_out || null,
@@ -13643,6 +13697,9 @@ async function _confirmImportBookingsInner() {
         cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
         updated_at:      new Date().toISOString(),
       };
+      if (tgt.sr_rate     != null) mergePayload.sr_rate     = tgt.sr_rate;
+      if (tgt.sr_worker   != null) mergePayload.sr_worker   = tgt.sr_worker;
+      if (tgt.sr_absorbed != null) mergePayload.sr_absorbed = tgt.sr_absorbed;
       const { error: fmErr } = await supabaseClient
         .from('shifts').update(mergePayload).eq('id', r._forceMergeId);
       if (fmErr) {
@@ -13670,7 +13727,7 @@ async function _confirmImportBookingsInner() {
     if (r.worker_name && r.worker_name !== 'Available') {
       const { data: dayShifts } = await supabaseClient
         .from('shifts')
-        .select('id,scheduled_start,scheduled_end,outlet,clock_in,clock_out')
+        .select('id,scheduled_start,scheduled_end,outlet,clock_in,clock_out,rate,sr_rate,sr_worker,sr_absorbed')
         .eq('shift_date', r.shift_date)
         .not('cancelled', 'is', true)
         .ilike('worker_name', r.worker_name.trim());
@@ -13698,11 +13755,19 @@ async function _confirmImportBookingsInner() {
 
       // Merge: update the existing shift with the fresher portal data so the
       // single booking stays in sync, instead of inserting a duplicate.
+      // RATE RULE: a booking already in the ops panel is authoritative for its
+      // rate — special rates often live only in the panel, never in the source
+      // app. So on merge we KEEP the panel's rate (and any special-rate fields)
+      // rather than overwriting with the imported value. Only fall back to the
+      // imported rate if the panel row genuinely has none.
+      const panelRate = (mergeTarget.rate != null && mergeTarget.rate !== '')
+        ? parseFloat(mergeTarget.rate)
+        : (parseFloat(r.rate) || 12);
       const mergePayload = {
         role:            r.role,
         scheduled_start: r.scheduled_start,
         scheduled_end:   r.scheduled_end,
-        rate:            parseFloat(r.rate) || 12,
+        rate:            panelRate,
         break_mins:      parseInt(r.break_mins) || 0,
         clock_in:        r.clock_in  || mergeTarget.clock_in  || null,
         clock_out:       r.clock_out || mergeTarget.clock_out || null,
@@ -13711,6 +13776,10 @@ async function _confirmImportBookingsInner() {
         cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
         updated_at:      new Date().toISOString(),
       };
+      // Preserve special-rate fields that exist only in the panel.
+      if (mergeTarget.sr_rate     != null) mergePayload.sr_rate     = mergeTarget.sr_rate;
+      if (mergeTarget.sr_worker   != null) mergePayload.sr_worker   = mergeTarget.sr_worker;
+      if (mergeTarget.sr_absorbed != null) mergePayload.sr_absorbed = mergeTarget.sr_absorbed;
       const { error: mErr } = await supabaseClient
         .from('shifts').update(mergePayload).eq('id', mergeTarget.id);
       if (mErr) {
