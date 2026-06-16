@@ -4,10 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v37 — AI chatbot now shows WHAT it changed for batched actions. Previously, when 4+ actions ran at once (e.g. adding 4 booking requirements), the chat only showed "X of Y actions completed" and discarded each action's detail — so you couldn't see which requirements were recorded or on which outlet. The large-batch summary now lists each successful action's confirmation line. addOutletRequirement / removeOutletRequirement confirmations now echo the exact outlet name plus the full updated requirement list, so there's no ambiguity about which outlet received what. -->
-<!-- Build patch: v39 — Restored the outlet WhatsApp group mapping for late-arrival alerts (lost in a prior rebuild). The Outlet modal again has an "Outlet WhatsApp group" field with a "Fetch my groups" picker (reuses the Periskope chats API via the shared pk_config), saved to profileMeta.outlets[key].wa_group_chat_id. editOutlet/resetOutletModal/saveOutlet all carry the field; it survives cross-device sync (scalar, preserved by mergeProfileMeta). The deployed periskope-webhook reads wa_group_chat_id and, once its safeguards pass (shift not yet started + ETA captured), posts the late alert to that outlet's group. NOTE: the HTML stores/links the group id; classification + the actual outlet post run in the separately-deployed periskope-webhook Edge Function. -->
-<!-- Build patch: v36 — Client booking requirements. Each outlet can now hold a requirements checklist (e.g. "Is the worker 18+?", "Has formal black long-sleeve shirt?", add/delete in the outlet profile or via the AI chatbot). When booking a worker into an outlet that has requirements, a checklist modal appears; EVERY item must be ticked or the booking is blocked. The system remembers who passed which requirements at which outlet (profileMeta.workers[key].passed_requirements[outletKey]) and auto-ticks those on future bookings, with a "met all requirements in a previous shift" disclaimer — if you ADD a new requirement later, prior passers keep their ticks and only the new item needs verifying. Gating is enforced on ALL assignment paths via assignmentRestriction(): interactive paths (Add Shift form, inline Available-slot assign) pop the checklist; non-interactive paths (AI createShift/forceCreateShift/batchCreateSlots, standby auto-accept) safely refuse with a clear message. New AI actions: addOutletRequirement, removeOutletRequirement, listOutletRequirements. Stored team-wide in app_settings/profile_meta; mergeProfileMeta extended (requirements replaced so edits/deletes propagate; passed_requirements deep-unioned so no device loses pass history). saveOutlet/saveWorker now preserve existing meta (no longer wipe requirements/pass-history) and carry it across renames. -->
-<!-- Build patch: v35 — Business Knowledge is now TEAM-WIDE for everyone. Previously, if the shared Supabase `business_knowledge` read failed (missing table / RLS blocking the anon role), the page silently fell back to a per-device localStorage copy — so an entry was visible ONLY to the person/device that uploaded it. loadKnowledge() now reads the shared Supabase table as the single source of truth, mirrors it to localStorage only as a read cache, and shows an honest error toast (instead of silently hiding the team's data) if the read fails. kbSaveEntry() now warns clearly when a save lands on this device only and won't reach the team, with the fix (run the business_knowledge SQL / check RLS). No new columns. -->
 <!-- Build patch: v34 — Inline dispute banner (in the attendance row) now has an "Acknowledge → Replacement" button (same as the Tasks panel): moves the slot out of Tasks and into Replacement-needed with no penalty, and shows the cancelling worker's name in the banner head. Clock-in reminder alert and night-unacked alert rows now have a quick "✓ Worker acknowledged" button on the far right so ops can clear the alert without scrolling to the row. replacedWorker is now persisted to a real shift_reminders.replaced_worker column so the dropped-worker name syncs team-wide on Replacement-needed slots. New column: shift_reminders.replaced_worker. -->
 <!-- Build patch: v33 — Reminder routing (Layer 1): every reminder send (auto night, auto clock-in, manual) now stamps shift_reminders.last_reminder_at. The Periskope webhook should use this to route a bare worker reply to the shift whose reminder was most recently sent (with tomorrow/today text hints overriding), fixing the case where a reply to tomorrow's reminder was logged against today's shift. New column: shift_reminders.last_reminder_at. -->
 <!-- Build patch: v32 — Dispute/cancellation tasks now have an "Acknowledge" option: confirms the worker is out, returns the slot to Available, flags it needs_replacement and preserves the cancelling worker's name — moving it OUT of Tasks and showing it ONLY in the Replacement-needed tab, without applying penalty/MC/suspension (that stays under "Process cancellation"). Cancelling worker's name now shown on the dispute task and persists on the resulting replacement slot (via replacedWorker fallback when the live name is Available). Replacement-needed tab groups today first, then tomorrow, then future dates. -->
@@ -88,7 +84,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .main { flex: 1; min-width: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 /* Every page fills main exactly and scrolls internally so topbar is ALWAYS visible */
 .main > div { height: 100vh; overflow-y: auto; overflow-x: hidden; flex-shrink: 0; }
-.topbar { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, var(--bg2) 0%, rgba(22,26,36,0.85) 100%); backdrop-filter: blur(6px); box-shadow: 0 1px 0 rgba(0,0,0,0.2); position: relative; z-index: 40; }
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, var(--bg2) 0%, rgba(22,26,36,0.85) 100%); backdrop-filter: blur(6px); box-shadow: 0 1px 0 rgba(0,0,0,0.2); }
 .topbar-left h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
 .topbar-left p { font-size: 12px; color: var(--text2); margin-top: 2px; }
 .topbar-right { display: flex; gap: 8px; align-items: center; }
@@ -106,7 +102,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .config-inputs input:focus { outline: none; border-color: var(--accent); }
 
 /* Metrics */
-.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; position: relative; z-index: 1; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .metric-card { background: linear-gradient(180deg, var(--bg2) 0%, #13161f 100%); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 18px; position: relative; box-shadow: var(--shadow-sm); overflow: hidden; }
 .metric-card::before { content:""; position:absolute; inset:0 0 auto 0; height:1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent); }
 .metric-notify { position:absolute; top:10px; right:10px; min-width:22px; height:22px; padding:0 6px; border-radius:999px; background:var(--red); color:#fff; display:inline-flex; align-items:center; justify-content:center; gap:2px; font-size:10px; font-weight:700; font-family:var(--mono); box-shadow:0 0 0 2px var(--bg2); }
@@ -976,6 +972,8 @@ tr:hover td { background: rgba(91,148,249,0.045); }
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
               <button class="btn btn-primary btn-sm" onclick="parseImportPaste()">Preview pasted data</button>
               <label class="btn btn-ghost btn-sm" style="cursor:pointer;">Upload Excel/CSV<input type="file" id="import-file" accept=".xlsx,.xls,.csv" style="display:none;" onchange="handleImportFile(event)"></label>
+              <span style="width:1px;height:22px;background:var(--border2);margin:0 2px;"></span>
+              <button class="btn btn-ghost btn-sm" id="load-portal-btn" onclick="loadPortalBookings()" title="Pull bookings synced from the portal database into the preview below">⬇️ Load synced portal bookings</button>
             </div>
           </div>
         </div>
@@ -1697,8 +1695,8 @@ tr:hover td { background: rgba(91,148,249,0.045); }
       </div>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.7;color:var(--text2);">
         <strong>🌙 Night reminders</strong> — auto-sent to workers between 7 PM–10 PM for tomorrow's shifts<br>
-        <strong>⏰ Clock-in reminders</strong> — auto-sent ~3 hours before shift starts<br>
-        <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / 👌 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
+        <strong>⏰ Clock-in reminders</strong> — auto-sent ~60 min before shift starts<br>
+        <strong>✅ Acknowledgement tracking</strong> — when a worker replies <em>OK / yes / confirm / 👍 / ✓</em>, ShiftOps auto-ticks <strong>“Worker acknowledged”</strong> for that shift via webhook<br>
         <strong>🚨 Dispute &amp; cancellation detection</strong> — when a worker replies that they <em>can't make it</em> or <em>want to cancel</em> (e.g. “cancel”, “can't make it”, “sick”, “MC”), ShiftOps flags the shift as <strong>disputed</strong> and surfaces a red alert + Process-cancellation button
       </div>
       <div class="form-row" style="flex-direction:row;align-items:center;gap:10px;">
@@ -1740,7 +1738,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border2);">
           <strong>The webhook classifies each inbound reply</strong> and updates the worker's most recent pending reminder shift:
           <div style="margin-top:6px;">• <span style="color:var(--green);">ACK</span> → sets <code>night_acked</code> / <code>clockin_responded = true</code><br>
-          &nbsp;&nbsp;<span style="color:var(--text3);">keywords: ok, okay, yes, y, confirm, confirmed, noted, sure, 👍, 👌, ✓, ✅, can, will be there</span><br>
+          &nbsp;&nbsp;<span style="color:var(--text3);">keywords: ok, okay, yes, y, confirm, confirmed, noted, sure, 👍, ✓, ✅, can, will be there</span><br>
           • <span style="color:var(--red);">DISPUTE</span> → sets <code>disputed = true</code>, <code>dispute_kind</code>, <code>dispute_reason</code> (the raw message)<br>
           &nbsp;&nbsp;<span style="color:var(--text3);">keywords: cancel, can't make it, cannot make, not coming, won't come, sick, mc, emergency, reschedule, can't come, drop</span></div>
           <button class="btn btn-ghost btn-sm" style="margin-top:8px;font-size:11px;" onclick="showReminderSchemaSQL()">📋 Show required Supabase SQL</button>
@@ -2035,23 +2033,6 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 </div>
 
 <!-- ADD OUTLET MODAL -->
-<!-- ── Client booking requirements checklist ─────────────────────────────────── -->
-<div class="modal-overlay" id="req-checklist-modal">
-  <div class="modal">
-    <h3 id="req-checklist-title">Booking requirements</h3>
-    <div id="req-checklist-sub" class="sub-text" style="margin-bottom:10px;"></div>
-    <div id="req-checklist-passed-note" style="display:none;margin-bottom:10px;padding:8px 10px;border-radius:6px;background:rgba(111,221,155,0.12);border:1px solid rgba(111,221,155,0.4);font-size:12px;color:#6fdd9b;">
-      ✅ This worker met all of this client's requirements in a previous shift — pre-ticked below. Untick anything that no longer holds.
-    </div>
-    <div id="req-checklist-body" style="display:flex;flex-direction:column;gap:8px;margin-bottom:6px;"></div>
-    <div id="req-checklist-warn" class="sub-text" style="color:var(--red);min-height:16px;margin-top:4px;"></div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" onclick="cancelRequirementsChecklist()">Cancel booking</button>
-      <button class="btn btn-primary btn-sm" id="req-checklist-confirm" onclick="confirmRequirementsChecklist()">Confirm &amp; proceed</button>
-    </div>
-  </div>
-</div>
-
 <div class="modal-overlay" id="add-outlet-modal">
   <div class="modal">
     <h3 id="outlet-modal-title">Add outlet</h3>
@@ -2060,24 +2041,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
-    <div class="form-row">
-      <label>Outlet WhatsApp group <span style="font-weight:400;color:var(--text3);font-size:11px;">— late-arrival alerts for workers at this outlet are posted here</span></label>
-      <input type="text" id="of-wa-group" placeholder="120363xxxxxxxxxx@g.us" style="font-family:var(--mono);">
-      <div style="display:flex;gap:6px;margin-top:6px;">
-        <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchOutletGroups()">🔍 Fetch my groups</button>
-      </div>
-      <div id="of-wa-groups-list" style="margin-top:6px;"></div>
-      <div id="of-wa-result" style="font-size:11.5px;margin-top:4px;min-height:14px;"></div>
-    </div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
-    <div class="form-row">
-      <label>Booking requirements <span style="font-weight:400;color:var(--text3);font-size:11px;">— each must be ticked before a worker can be booked here</span></label>
-      <div id="of-req-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
-      <div style="display:flex;gap:6px;">
-        <input type="text" id="of-req-new" placeholder="e.g. Has formal black long-sleeve shirt?" style="flex:1;" onkeydown="if(event.key==='Enter'){event.preventDefault();ofAddRequirement();}">
-        <button type="button" class="btn btn-ghost btn-sm" onclick="ofAddRequirement()">+ Add</button>
-      </div>
-    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('add-outlet-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary btn-sm" id="outlet-save-btn" onclick="saveOutlet()">Add outlet</button>
@@ -2465,32 +2429,11 @@ function mergeProfileMeta(primary, secondary) {
     keys.forEach(k => {
       const pe = p[k] || {};
       const se = s[k] || {};
-      const merged = {
+      out[sectionName][k] = {
         ...se,            // remote/secondary defaults
         ...pe,            // primary (local) overrides scalars like notes/commission
         [listField]: unionList(pe[listField], se[listField])
       };
-      // ── Client booking requirements (outlets only) ──
-      // requirements is an ordered list of {id,label}. It is REPLACED, not unioned,
-      // so that an edit/delete on one device propagates (primary wins when present).
-      // passed_requirements (workers only) is an object keyed by outlet-key → array
-      // of requirement-ids the worker has been verified to pass at that outlet; it
-      // is DEEP-UNIONED so neither device ever loses a worker's pass history.
-      if (sectionName === 'outlets') {
-        if (Array.isArray(pe.requirements)) merged.requirements = pe.requirements;
-        else if (Array.isArray(se.requirements)) merged.requirements = se.requirements;
-      }
-      if (sectionName === 'workers') {
-        const pp = (pe.passed_requirements && typeof pe.passed_requirements === 'object') ? pe.passed_requirements : {};
-        const sp = (se.passed_requirements && typeof se.passed_requirements === 'object') ? se.passed_requirements : {};
-        const oKeys = new Set([...Object.keys(pp), ...Object.keys(sp)]);
-        if (oKeys.size) {
-          const out2 = {};
-          oKeys.forEach(ok => { out2[ok] = unionList(pp[ok], sp[ok]); });
-          merged.passed_requirements = out2;
-        }
-      }
-      out[sectionName][k] = merged;
     });
   };
   mergeSection('workers', 'disliked_outlets');
@@ -2733,136 +2676,7 @@ function assignmentRestriction(workerName, outletName) {
   if ((outletProfile(outlet).banned_workers || []).map(normProfileKey).includes(wk)) {
     return `${worker} is banned from ${outlet}.`;
   }
-  // ── Client booking requirements (e.g. age 18+, formal black attire) ──
-  // If the outlet has requirements the worker has NOT yet been verified to pass,
-  // the booking is blocked. The interactive Add-shift / inline-assign flows catch
-  // this *before* calling assignmentRestriction and pop the checklist modal so ops
-  // can tick them off; the message below is prefixed with REQUIREMENTS_SENTINEL so
-  // those flows can tell it apart from a hard ban. Non-interactive paths (AI,
-  // standby auto-accept) surface the message and refuse, which is the safe default.
-  const unmet = unmetRequirements(worker, outlet);
-  if (unmet.length) {
-    return REQUIREMENTS_SENTINEL + `${worker} hasn't met ${outlet}'s booking requirements yet (${unmet.length} unticked): ${unmet.map(r => r.label).join('; ')}.`;
-  }
   return null;
-}
-
-// ── Client booking requirements helpers ───────────────────────────────────────
-// Marker so interactive booking flows can distinguish a (resolvable) requirements
-// block from a hard ban. Never shown to the user (stripped before display).
-const REQUIREMENTS_SENTINEL = '\u0001REQ\u0001';
-function isRequirementsRestriction(msg) { return typeof msg === 'string' && msg.startsWith(REQUIREMENTS_SENTINEL); }
-function stripRequirementsSentinel(msg) { return isRequirementsRestriction(msg) ? msg.slice(REQUIREMENTS_SENTINEL.length) : msg; }
-
-// The list of {id,label} requirements configured for an outlet (empty if none).
-function outletRequirements(outletName) {
-  const reqs = outletProfile(outletName).requirements;
-  return Array.isArray(reqs) ? reqs.filter(r => r && r.id && r.label) : [];
-}
-// Requirement-ids a worker has already been verified to pass at an outlet.
-function workerPassedRequirementIds(workerName, outletName) {
-  const pr = workerProfile(workerName).passed_requirements;
-  const ok = normProfileKey(outletName);
-  const arr = pr && typeof pr === 'object' ? pr[ok] : null;
-  return Array.isArray(arr) ? arr : [];
-}
-// Requirements the worker has NOT yet passed at the outlet (subset of the list).
-function unmetRequirements(workerName, outletName) {
-  const reqs = outletRequirements(outletName);
-  if (!reqs.length) return [];
-  const passed = new Set(workerPassedRequirementIds(workerName, outletName));
-  return reqs.filter(r => !passed.has(r.id));
-}
-// True if the worker has passed every CURRENT requirement at the outlet before.
-function workerHasPassedAllRequirements(workerName, outletName) {
-  return outletRequirements(outletName).length > 0 && unmetRequirements(workerName, outletName).length === 0;
-}
-// Record that a worker has been verified against a set of requirement-ids at an
-// outlet (team-wide, deep-union-merged), then persist. Used when ops ticks the
-// checklist on booking. Returns nothing; saves in the background.
-async function recordPassedRequirements(workerName, outletName, requirementIds) {
-  const wk = normProfileKey(workerName);
-  const ok = normProfileKey(outletName);
-  if (!wk || !ok || !Array.isArray(requirementIds) || !requirementIds.length) return;
-  const existing = profileMeta.workers[wk] || {};
-  const pr = (existing.passed_requirements && typeof existing.passed_requirements === 'object') ? { ...existing.passed_requirements } : {};
-  const prev = Array.isArray(pr[ok]) ? pr[ok] : [];
-  const set = new Set(prev);
-  requirementIds.forEach(id => set.add(id));
-  pr[ok] = Array.from(set);
-  profileMeta.workers[wk] = { ...existing, passed_requirements: pr };
-  await saveProfileMeta();
-}
-function newRequirementId() {
-  return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-}
-
-// ── Requirements checklist modal (interactive booking gate) ───────────────────
-// gateRequirements() returns a Promise<boolean>. If the outlet has requirements
-// that aren't all pre-passed, it shows the checklist and resolves true only when
-// ops ticks every box and confirms (recording the passes team-wide); false if
-// they cancel. If there are no requirements, or the worker already passed them
-// all, it still surfaces the checklist pre-ticked (with a "met previously" note)
-// per the configured behaviour — quick one-tap confirm — but never blocks.
-let _reqChecklistState = null; // { worker, outlet, reqs:[{id,label,checked}], resolve }
-function gateRequirements(workerName, outletName) {
-  return new Promise(resolve => {
-    const worker = String(workerName || '').trim();
-    const outlet = String(outletName || '').trim();
-    if (!worker || worker.toLowerCase() === 'available' || !outlet) { resolve(true); return; }
-    const reqs = outletRequirements(outlet);
-    if (!reqs.length) { resolve(true); return; }                 // no requirements → proceed
-    const passed = new Set(workerPassedRequirementIds(worker, outlet));
-    const allPassed = reqs.every(r => passed.has(r.id));
-    _reqChecklistState = {
-      worker, outlet, resolve,
-      reqs: reqs.map(r => ({ id: r.id, label: r.label, checked: passed.has(r.id) }))
-    };
-    document.getElementById('req-checklist-title').textContent = `${outlet} — booking requirements`;
-    document.getElementById('req-checklist-sub').textContent = `Confirm ${worker} meets every requirement below. All must be ticked or the booking can't proceed.`;
-    document.getElementById('req-checklist-passed-note').style.display = allPassed ? 'block' : 'none';
-    renderRequirementsChecklist();
-    document.getElementById('req-checklist-modal').classList.add('open');
-  });
-}
-function renderRequirementsChecklist() {
-  if (!_reqChecklistState) return;
-  const body = document.getElementById('req-checklist-body');
-  body.innerHTML = _reqChecklistState.reqs.map((r, i) => `
-    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);">
-      <input type="checkbox" data-reqidx="${i}" ${r.checked ? 'checked' : ''} onchange="toggleRequirementCheck(${i}, this.checked)" style="margin-top:2px;flex-shrink:0;">
-      <span style="font-size:13px;color:var(--text);line-height:1.4;">${escapeHtml(r.label)}</span>
-    </label>`).join('');
-  updateRequirementsConfirmState();
-}
-function toggleRequirementCheck(i, checked) {
-  if (!_reqChecklistState || !_reqChecklistState.reqs[i]) return;
-  _reqChecklistState.reqs[i].checked = checked;
-  updateRequirementsConfirmState();
-}
-function updateRequirementsConfirmState() {
-  if (!_reqChecklistState) return;
-  const all = _reqChecklistState.reqs.every(r => r.checked);
-  const btn = document.getElementById('req-checklist-confirm');
-  const warn = document.getElementById('req-checklist-warn');
-  btn.disabled = !all; btn.style.opacity = all ? '1' : '0.4';
-  warn.textContent = all ? '' : 'Tick every requirement to proceed — bookings cannot continue with unmet requirements.';
-}
-function cancelRequirementsChecklist() {
-  document.getElementById('req-checklist-modal').classList.remove('open');
-  const st = _reqChecklistState; _reqChecklistState = null;
-  if (st && st.resolve) st.resolve(false);
-}
-async function confirmRequirementsChecklist() {
-  if (!_reqChecklistState) return;
-  const st = _reqChecklistState;
-  if (!st.reqs.every(r => r.checked)) { updateRequirementsConfirmState(); return; }
-  // Remember this worker has passed these requirements at this outlet (team-wide),
-  // so future bookings auto-tick them.
-  try { await recordPassedRequirements(st.worker, st.outlet, st.reqs.map(r => r.id)); } catch(e) { console.warn('recordPassedRequirements failed', e); }
-  document.getElementById('req-checklist-modal').classList.remove('open');
-  _reqChecklistState = null;
-  st.resolve(true);
 }
 function profileNoteBlock(text, tone = 'blue') {
   const clean = String(text || '').trim();
@@ -2937,26 +2751,11 @@ function applySuggestedRate() {
   if (rule) document.getElementById('f-rate').value = parseFloat(rule.rate).toFixed(2);
 }
 
-// AI slot/shift creation rate resolver.
-// If the AI action supplied an explicit rate (user asked to override), use it.
-// Otherwise fall back to the outlet's STANDARD rate for that role + day — the
-// exact same rate engine the manual Add Shift form uses (getSuggestedRate).
-// dateStr is "YYYY-MM-DD"; we build a local date to pick the right weekday.
-function aiResolveRate(action, outletName, roleName, dateStr) {
-  const explicit = action && (action.rate ?? action.hourlyRate);
-  if (explicit !== undefined && explicit !== null && explicit !== '' && !isNaN(parseFloat(explicit))) {
-    return parseFloat(explicit).toFixed(2);
-  }
-  const dateObj = dateStr ? new Date(dateStr + 'T00:00:00') : currentDate;
-  const suggested = getSuggestedRate(outletName, roleName || 'F&B Service Crew', dateObj);
-  return parseFloat(suggested.rate).toFixed(2);
-}
-
 // ── Init ─────────────────────────────────────────────────────
 async function init() {
   seedInternalUsers();
   updateDateLabel();
-  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders(), loadEntityLinks()]);
+  await Promise.all([loadOutlets(), loadWorkers(), loadRateRules(), loadStandbyList(), loadReminders()]);
   // loadStandbyList may have run before loadWorkers/loadOutlets resolved (parallel),
   // so re-apply country scoping now that allWorkers/allOutlets are populated. This
   // guarantees a PH-scoped partner never sees SG/MY standby rows.
@@ -7231,13 +7030,9 @@ function buildClockOutMessage(s, co) {
     lines.push(`Hours: ${hours}h`);
     lines.push(`Rate: ${sym}${rate.toFixed(2)}/hr${isOwnSR ? ` (SR: ${sym}${parseFloat(s.sr_rate).toFixed(2)}/hr)` : ''}`);
     lines.push('---');
-    // Total deductions = penalties + overpayment recovery (transport is an addition, not a deduction)
-    const totalDeduct = penalty + opDeduct;
     lines.push(`Gross pay: ${fmt(grossPay)}`);
-    lines.push(`Deductions: ${totalDeduct > 0 ? '-' : ''}${fmt(totalDeduct)}`);
-    if (penalty > 0)    lines.push(`  • Penalty: -${fmt(penalty)}`);
-    if (opDeduct > 0)   lines.push(`  • OP recovery: -${fmt(opDeduct)}`);
-    if (tc > 0)         lines.push(`Transport: +${fmt(tc)}`);
+    if (penalty > 0)    lines.push(`Penalty: -${fmt(penalty)}`);
+    if (opDeduct > 0)   lines.push(`OP recovery: -${fmt(opDeduct)}`);
     if (isSRWorker && s.sr_worker) lines.push(`SR (3rd party): ${s.sr_worker}`);
     if (isSRWorker && srAbsorbed > 0) lines.push(`SR absorbed: ${fmt(srAbsorbed)}`);
     if (isOwnSR) {
@@ -7245,13 +7040,8 @@ function buildClockOutMessage(s, co) {
       try { srPay = parseFloat(calcShiftHours(ts) || 0) * parseFloat(s.sr_rate || 0); } catch(e) {}
       lines.push(`SR payout: ${fmt(srPay)}`);
     }
+    if (tc > 0) lines.push(`Transport: +${fmt(tc)}`);
     lines.push(`*Net payout: ${fmt(netPay)}*`);
-    lines.push('');
-    // Payment description (currency-aware via simplePayrollText)
-    try {
-      const desc = simplePayrollText(ts);
-      if (desc && desc !== '—') lines.push(desc);
-    } catch(e) {}
     lines.push('---');
     lines.push(`Pay to: ${payInfo}`);
     return lines.join('\n');
@@ -7279,22 +7069,14 @@ let _pkConfigShared = null;
 function getPeriskopeConfig() {
   let local = null;
   try { local = JSON.parse(localStorage.getItem('pk_config') || 'null'); } catch(e) { local = null; }
-  const shared = _pkConfigShared || null;
-  // Always merge shared (team) config UNDER local, so this device's choices win
-  // where present but the team config fills in ANY field this device is missing.
-  // This fixes the recurring "alerts stop" bug: previously, a local config that
-  // had apikey+phone but a blank/stale payrollGroupId or payrollEnabled=false was
-  // returned wholesale, silently ignoring the correct group set on another device.
-  if (!local && !shared) return null;
-  const merged = { ...(shared || {}), ...(local || {}) };
-  // For the fields that gate sending, prefer whichever source actually has a value
-  // rather than letting a local blank/false override a good shared value.
-  merged.apikey         = local?.apikey         || shared?.apikey         || merged.apikey;
-  merged.phone          = local?.phone          || shared?.phone          || merged.phone;
-  merged.payrollGroupId = local?.payrollGroupId || shared?.payrollGroupId || merged.payrollGroupId;
-  merged.payrollEnabled = (local?.payrollEnabled === true) || (shared?.payrollEnabled === true);
-  merged.enabled        = (local?.enabled === true) || (shared?.enabled === true);
-  return merged;
+  // If this device has a usable local config, prefer it. Otherwise use the shared
+  // team config pulled from Supabase. Merge so a device-local payroll group choice
+  // still works even when the key/phone come from the shared record.
+  if (local?.apikey && local?.phone) return local;
+  if (_pkConfigShared?.apikey && _pkConfigShared?.phone) {
+    return { ..._pkConfigShared, ...(local || {}) , apikey: _pkConfigShared.apikey, phone: _pkConfigShared.phone };
+  }
+  return local || _pkConfigShared || null;
 }
 async function loadPeriskopeConfigShared() {
   if (!supabaseClient) return;
@@ -7432,14 +7214,7 @@ async function sendPeriskopeGroupMessage(groupChatId, message) {
 // Replaces the old CallMeBot clock-out notification. Posts the pay breakdown to
 // the "Payroll (for attendance and clock-out)" group so payroll sees ended shifts.
 async function notifyPayrollClockOut(message) {
-  let pk = getPeriskopeConfig();
-  // If anything required is missing, the shared team config may simply not have
-  // finished loading yet (clock-out fired early, or this device never saved
-  // pk_config locally). Re-pull from Supabase once before giving up.
-  if (!pk?.payrollEnabled || !pk?.payrollGroupId || !pk?.apikey || !pk?.phone) {
-    await loadPeriskopeConfigShared().catch(()=>{});
-    pk = getPeriskopeConfig();
-  }
+  const pk = getPeriskopeConfig();
   if (!pk?.payrollEnabled) {
     console.log('[Payroll] group alert skipped — payroll alerts toggle is OFF');
     toast('Clock-out saved. WhatsApp alert OFF — enable it in WhatsApp Alerts → Payroll clock-out alerts.', 'error');
@@ -7644,71 +7419,6 @@ function selectPayrollGroup(id, name) {
   if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Selected “${name}”. Hit Save, then Test group message.`; }
 }
 
-// ── Outlet WhatsApp group picker (late-arrival alerts) ────────────────────────
-// Fetches the org's WhatsApp groups via Periskope so an outlet can be linked to
-// the group chat its late-arrival alerts post into. The selected id is saved to
-// profileMeta.outlets[key].wa_group_chat_id; the deployed periskope-webhook reads
-// it and posts the late alert there (with ETA) once safeguards pass.
-async function fetchOutletGroups() {
-  const resultEl = document.getElementById('of-wa-result');
-  const listEl = document.getElementById('of-wa-groups-list');
-  const pk = getPeriskopeConfig() || {};
-  const apikey = pk.apikey || '';
-  const phone  = String(pk.phone || '').replace(/\D/g,'');
-  if (!apikey || !phone) {
-    resultEl.style.color='var(--red)';
-    resultEl.textContent = 'Set your Periskope API key + org phone in WhatsApp settings first.';
-    return;
-  }
-  resultEl.style.color = 'var(--text3)'; resultEl.textContent = 'Fetching your groups…';
-  if (listEl) listEl.innerHTML = '';
-  const headers = { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' };
-  const urls = [
-    'https://api.periskope.app/v1/chats?chat_type=group&limit=200',
-    'https://api.periskope.app/v1/chats?limit=200'
-  ];
-  let chats = null, lastErr = '';
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { headers });
-      if (!res.ok) { lastErr = 'HTTP ' + res.status; continue; }
-      const j = await res.json().catch(()=>({}));
-      chats = j.chats || j.data || j.results || (Array.isArray(j) ? j : null);
-      if (Array.isArray(chats)) break;
-    } catch(e) { lastErr = e.message || 'network error'; }
-  }
-  if (!Array.isArray(chats)) {
-    resultEl.style.color='var(--red)';
-    resultEl.textContent = '✗ Could not fetch groups (' + (lastErr || 'unexpected response') + '). You can still paste the @g.us ID manually.';
-    return;
-  }
-  const groups = chats.filter(c => /@g\.us$/.test(String(c.chat_id || c.id || c.chatId || '')))
-    .map(c => ({
-      id: String(c.chat_id || c.id || c.chatId),
-      name: c.chat_name || c.name || c.subject || c.group_name || '(unnamed group)'
-    }));
-  if (!groups.length) {
-    resultEl.style.color='var(--amber, #f59e0b)';
-    resultEl.textContent = '⚠ No groups found on this number. Make sure the org phone is in the outlet group.';
-    return;
-  }
-  resultEl.style.color='var(--text3)'; resultEl.textContent = `Found ${groups.length} group(s) — pick this outlet's:`;
-  if (listEl) {
-    listEl.innerHTML = groups.map(g =>
-      `<button type="button" class="btn btn-ghost btn-sm" style="display:block;width:100%;text-align:left;margin-top:4px;font-size:11.5px;"
-        onclick="selectOutletGroup('${g.id.replace(/'/g,"\\'")}','${String(g.name).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">
-        ${g.name.replace(/</g,'&lt;')} <span style="color:var(--text3);font-family:var(--mono);">${g.id}</span>
-      </button>`
-    ).join('');
-  }
-}
-function selectOutletGroup(id, name) {
-  const field = document.getElementById('of-wa-group');
-  if (field) field.value = id;
-  const resultEl = document.getElementById('of-wa-result');
-  if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Linked “${name}”. Hit Save to apply.`; }
-}
-
 // ── Night reminder message builder ───────────────────────────────────────────
 function buildNightReminderMessage(s) {
   const d = new Date(s.shift_date + 'T00:00:00');
@@ -7742,28 +7452,7 @@ async function autoSendShiftReminders() {
   const tomorrowStr = tomorrowDate.toISOString().slice(0,10);
   const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
 
-  // CRITICAL: never iterate `allShifts` here. That array only holds the shifts for
-  // whatever date/week/outlet is currently being *viewed*. The clock-in reminder
-  // window opens ~3h before a shift, and if ops happens to be looking at any other
-  // date at that moment, today's shifts aren't in memory and nothing ever sends —
-  // which is exactly why auto clock-in reminders "stop working". Query the DB fresh
-  // every tick so today's + tomorrow's shifts are always the source of truth,
-  // independent of the dashboard view. (Same fix pattern as checkPaymentFollowups.)
-  let rows = [];
-  try {
-    const { data, error } = await supabaseClient
-      .from('shifts')
-      .select('*')
-      .in('shift_date', [todayStr, tomorrowStr])
-      .not('cancelled', 'is', true);
-    if (error) { console.warn('[auto-remind] shift query failed', error); return; }
-    rows = data || [];
-  } catch (e) {
-    console.warn('[auto-remind] shift query exception', e);
-    return;
-  }
-
-  for (const s of rows) {
+  for (const s of (allShifts || [])) {
     const workerName = String(s.worker_name || '').trim();
     if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) continue;
     const phone = workerPhone(workerName);
@@ -7782,14 +7471,11 @@ async function autoSendShiftReminders() {
       }
     }
 
-    // ⏰ Clock-in reminder: send ~3 hours before shift start on the day.
-    // Window is 180→150 min before start (a 30-min catch window so a tick is never
-    // missed even if the app was closed at exactly the 3h mark). One send per shift,
-    // deduped team-wide via shift_reminders.clockin_sent.
+    // ⏰ Clock-in reminder: send 60-90 min before shift start on the day
     if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
-      if (nowMins >= shiftMins - 180 && nowMins < shiftMins - 150) {
+      if (nowMins >= shiftMins - 90 && nowMins < shiftMins - 15) {
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
@@ -8354,7 +8040,7 @@ async function offerSlotToStandby(shiftId, workerName) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
   const restriction = assignmentRestriction(workerName, slot.outlet || '');
-  if (restriction) { toast(stripRequirementsSentinel(restriction), 'error'); return; }
+  if (restriction) { toast(restriction, 'error'); return; }
   // Live double-check: never offer to someone already booked that day with a shift
   // whose time overlaps this slot (guards against a stale rendered chip).
   try {
@@ -8495,7 +8181,7 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
     || (function(){ const s = (allShifts||[]).find(x=>String(x.id)===String(shiftId)) || taskShiftCache?.[String(shiftId)]; return s ? { id:s.id, outlet:s.outlet||'', date:s.shift_date||'' } : null; })();
   if (!slot) { toast('Slot no longer open', 'error'); return false; }
   const restriction = assignmentRestriction(worker, slot.outlet || '');
-  if (restriction) { toast(stripRequirementsSentinel(restriction), 'error'); return false; }
+  if (restriction) { toast(restriction, 'error'); return false; }
   // Safety net: never assign a worker into a slot that clashes with another
   // shift they already have that day. allShifts only holds the focused day/week
   // (and maybe one outlet), so check the DB directly for the slot's actual date —
@@ -8724,7 +8410,7 @@ create index if not exists completed_tasks_completed_at_idx on public.completed_
 --    pending reminder shift, then classify the message body:
 --
 --    const body = msg.body.toLowerCase().trim();
---    const ACK = /\\b(ok|okay|yes|y|confirm|confirmed|noted|sure|can|coming|will be there)\\b|👍|👌|✓|✅/;
+--    const ACK = /\\b(ok|okay|yes|y|confirm|confirmed|noted|sure|can|coming|will be there)\\b|👍|✓|✅/;
 --    const DISPUTE = /\\b(cancel|can.?t make|cannot make|not coming|won.?t come|sick|mc|emergency|reschedule|can.?t come|drop)\\b/;
 --    const LATE = /\\b(late|delay|delayed|running late|caught up|stuck|traffic|jam|be there by|reach by|reaching late|slightly late|bit late|few mins late|15 ?min|20 ?min|30 ?min)\\b/;
 --
@@ -8940,13 +8626,6 @@ async function confirmAssignWorker(id) {
   if (!typed) { toast('Please enter a worker name', 'error'); return; }
   const matched = allWorkers.find(w => w.name.toLowerCase() === typed.toLowerCase());
   const name = matched ? matched.name : typed;
-  // Enforce bans / do-not-assign + client booking requirements before assigning.
-  const inlineRestriction = assignmentRestriction(name, s.outlet || '');
-  if (inlineRestriction && !isRequirementsRestriction(inlineRestriction)) { toast(stripRequirementsSentinel(inlineRestriction), 'error'); return; }
-  if (s.outlet && name.toLowerCase() !== 'available' && outletRequirements(s.outlet).length) {
-    const ok = await gateRequirements(name, s.outlet);
-    if (!ok) { toast('Assignment cancelled — requirements not met.', 'error'); return; }
-  }
   const { error } = await supabaseClient.from('shifts').update({ worker_name: name, updated_at: new Date().toISOString() }).eq('id', id);
   if (error) { toast('Failed to assign: ' + error.message, 'error'); return; }
   if (!matched) {
@@ -9773,14 +9452,8 @@ function onWorkerInput() {
   const selectedOutlet = document.getElementById('f-outlet')?.value || '';
   const selectedCountry = outletCountry(selectedOutlet);
   const restriction = assignmentRestriction(name, selectedOutlet);
-  if (restriction && isRequirementsRestriction(restriction)) {
-    // Requirements aren't a hard block here — ops resolves them via the checklist
-    // on confirm. Show an informational note but keep the button enabled.
-    const n = unmetRequirements(name, selectedOutlet).length;
-    document.getElementById('add-block-text').textContent = `${selectedOutlet} has ${n} booking requirement${n!==1?'s':''} to verify for ${name} — you'll confirm them on booking.`;
-    warn.style.display = 'flex'; btn.disabled = false; btn.style.opacity = '1';
-  } else if (restriction) {
-    document.getElementById('add-block-text').textContent = stripRequirementsSentinel(restriction);
+  if (restriction) {
+    document.getElementById('add-block-text').textContent = restriction;
     warn.style.display = 'flex'; btn.disabled = true; btn.style.opacity = '0.4';
   } else if (rawName && w && normaliseCountry(w.country) !== selectedCountry) {
     document.getElementById('add-block-text').textContent = `${w.name} is registered under ${normaliseCountry(w.country)}, but this outlet is under ${selectedCountry}.`;
@@ -9840,18 +9513,7 @@ async function addShift() {
   if (!isThirdParty && name !== 'Available' && isWorkerSuspended(name)) { toast('Worker is suspended', 'error'); return; }
   const selectedWorker = allWorkers.find(x => String(x.name || '').toLowerCase() === String(name || '').toLowerCase());
   const restriction = !isThirdParty ? assignmentRestriction(name, outletName) : null;
-  if (restriction && !isRequirementsRestriction(restriction)) { toast(stripRequirementsSentinel(restriction), 'error'); return; }
-  // Requirements restriction → resolve via the interactive checklist. If ops
-  // cancels or doesn't tick everything, the booking does not proceed.
-  if (restriction && isRequirementsRestriction(restriction)) {
-    const ok = await gateRequirements(name, outletName);
-    if (!ok) { toast('Booking cancelled — requirements not met.', 'error'); return; }
-  } else if (!isThirdParty && name !== 'Available' && outletRequirements(outletName).length) {
-    // All requirements already passed previously: still surface the checklist
-    // (pre-ticked, with a "met previously" note) for a quick one-tap confirm.
-    const ok = await gateRequirements(name, outletName);
-    if (!ok) { toast('Booking cancelled.', 'error'); return; }
-  }
+  if (restriction) { toast(restriction, 'error'); return; }
   if (!isThirdParty && selectedWorker && normaliseCountry(selectedWorker.country) !== selectedCountry) { toast(`${name} is registered under ${normaliseCountry(selectedWorker.country)}, not ${selectedCountry}`, 'error'); return; }
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
@@ -10509,14 +10171,8 @@ async function saveWorker() {
   const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldWorker = editingWorkerId ? allWorkers.find(x => x.id === editingWorkerId) : null;
-  const oldWKey = oldWorker ? normProfileKey(oldWorker.name) : null;
-  const newWKey = normProfileKey(name);
-  // Preserve fields we don't edit here — notably passed_requirements (the per-outlet
-  // requirement-verification history) — and carry it across a rename.
-  const prevWMeta = (oldWKey && profileMeta.workers[oldWKey]) ? profileMeta.workers[oldWKey] : (profileMeta.workers[newWKey] || {});
-  if (oldWorker && oldWKey !== newWKey) delete profileMeta.workers[oldWKey];
-  profileMeta.workers[newWKey] = {
-    ...prevWMeta,
+  if (oldWorker && normProfileKey(oldWorker.name) !== normProfileKey(name)) delete profileMeta.workers[normProfileKey(oldWorker.name)];
+  profileMeta.workers[normProfileKey(name)] = {
     notes: document.getElementById('wf-notes').value.trim(),
     disliked_outlets: wfDislikedOutlets.slice()
   };
@@ -10677,9 +10333,7 @@ function loadOutletsList() {
     <tbody>${filteredOutlets.map(o => {
       const meta = outletProfile(o.name);
       const banned = (meta.banned_workers || []).length ? `<div class="sub-text" style="color:var(--red);margin-top:4px;">Banned: ${escapeHtml(meta.banned_workers.join(', '))}</div>` : '';
-      const reqCount = (Array.isArray(meta.requirements) ? meta.requirements.filter(r => r && r.label) : []).length;
-      const reqBadge = reqCount ? `<div class="sub-text" style="color:var(--accent);margin-top:4px;">📋 ${reqCount} booking requirement${reqCount!==1?'s':''}</div>` : '';
-      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}${reqBadge}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
 }
@@ -10693,12 +10347,7 @@ function resetOutletModal() {
   document.getElementById('of-location').value = '';
   document.getElementById('of-commission').value = '20';
   document.getElementById('of-notes').value = '';
-  document.getElementById('of-wa-group').value = '';
-  document.getElementById('of-wa-groups-list').innerHTML = '';
-  document.getElementById('of-wa-result').textContent = '';
   document.getElementById('of-banned-workers').value = '';
-  ofRequirements = [];
-  renderOfRequirements();
 }
 function openAddOutletModal() { resetOutletModal(); document.getElementById('add-outlet-modal').classList.add('open'); }
 function editOutlet(id) {
@@ -10713,42 +10362,8 @@ function editOutlet(id) {
   const meta = outletProfile(o.name);
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
   document.getElementById('of-notes').value = meta.notes || '';
-  document.getElementById('of-wa-group').value = meta.wa_group_chat_id || '';
-  document.getElementById('of-wa-groups-list').innerHTML = '';
-  document.getElementById('of-wa-result').textContent = '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
-  ofRequirements = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
-  renderOfRequirements();
   document.getElementById('add-outlet-modal').classList.add('open');
-}
-
-// ── Outlet requirements editor (in the outlet modal) ──────────────────────────
-let ofRequirements = []; // working copy [{id,label}] while the modal is open
-function renderOfRequirements() {
-  const wrap = document.getElementById('of-req-list');
-  if (!wrap) return;
-  if (!ofRequirements.length) {
-    wrap.innerHTML = '<div class="sub-text" style="font-style:italic;">No requirements yet. Bookings here proceed without a checklist.</div>';
-    return;
-  }
-  wrap.innerHTML = ofRequirements.map((r, i) => `
-    <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);">
-      <span style="flex:1;font-size:13px;color:var(--text);">${escapeHtml(r.label)}</span>
-      <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red);" title="Delete requirement" onclick="ofRemoveRequirement(${i})">Delete</button>
-    </div>`).join('');
-}
-function ofAddRequirement() {
-  const input = document.getElementById('of-req-new');
-  const label = (input?.value || '').trim();
-  if (!label) { toast('Type a requirement first', 'error'); return; }
-  if (ofRequirements.some(r => r.label.toLowerCase() === label.toLowerCase())) { toast('That requirement is already listed', 'error'); return; }
-  ofRequirements.push({ id: newRequirementId(), label });
-  if (input) input.value = '';
-  renderOfRequirements();
-}
-function ofRemoveRequirement(i) {
-  ofRequirements.splice(i, 1);
-  renderOfRequirements();
 }
 
 async function saveOutlet() {
@@ -10759,27 +10374,11 @@ async function saveOutlet() {
   const { error } = await query;
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldOutlet = editingOutletId ? allOutlets.find(x => x.id === editingOutletId) : null;
-  const oldKey = oldOutlet ? normProfileKey(oldOutlet.name) : null;
-  const newKey = normProfileKey(name);
-  const prevMeta = (oldKey && profileMeta.outlets[oldKey]) ? profileMeta.outlets[oldKey] : (profileMeta.outlets[newKey] || {});
-  if (oldOutlet && oldKey !== newKey) {
-    delete profileMeta.outlets[oldKey];
-    // Migrate every worker's passed-requirements history from the old outlet key
-    // to the new one so a rename doesn't silently reset everyone's verifications.
-    Object.values(profileMeta.workers || {}).forEach(wm => {
-      if (wm && wm.passed_requirements && Object.prototype.hasOwnProperty.call(wm.passed_requirements, oldKey)) {
-        wm.passed_requirements[newKey] = wm.passed_requirements[oldKey];
-        delete wm.passed_requirements[oldKey];
-      }
-    });
-  }
-  profileMeta.outlets[newKey] = {
-    ...prevMeta, // preserve any fields we don't explicitly edit here
+  if (oldOutlet && normProfileKey(oldOutlet.name) !== normProfileKey(name)) delete profileMeta.outlets[normProfileKey(oldOutlet.name)];
+  profileMeta.outlets[normProfileKey(name)] = {
     commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
     notes: document.getElementById('of-notes').value.trim(),
-    wa_group_chat_id: document.getElementById('of-wa-group').value.trim(),
-    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
-    requirements: ofRequirements.map(r => ({ id: r.id, label: r.label }))
+    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value)
   };
   await saveProfileMeta();
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
@@ -12017,120 +11616,7 @@ function cleanOutletName(raw) {
   return raw.replace(ROLE_SUFFIXES, '').trim();
 }
 
-// ============================================================
-// PERSISTENT RECONCILIATION (entity_links)
-// ------------------------------------------------------------
-// A reconciliation you make once is remembered in the Supabase
-// entity_links table and re-applied to every future import. Held
-// in memory as a Map for synchronous lookup during matching; the
-// table is the single source of truth (mirrored to localStorage as
-// a read cache so matching still works if a load momentarily fails).
-// Keys: source_key = entityLinkKey(name); source_phone = last-8 digits.
-// ============================================================
-let entityLinks = { worker: { byKey: {}, byPhone: {} }, outlet: { byKey: {}, byPhone: {} } };
-
-// Normalize a name to a stable lookup key (reuses the app's existing
-// accent-stripping / punctuation-collapsing rules so "Five Guys (iON Mall)"
-// and "Five Guys iON Mall" collapse to the same key).
-function entityLinkKey(name) {
-  return normWorkerKey(name); // lower, strip accents, punctuation→space, collapse spaces
-}
-// Last-8 digits of a phone — matches the cross-country suffix rule used elsewhere.
-function entityLinkPhone(phone) {
-  const d = digitsOnly(phone);
-  return d.length >= 8 ? d.slice(-8) : d;
-}
-
-function indexEntityLinks(rows) {
-  const next = { worker: { byKey: {}, byPhone: {} }, outlet: { byKey: {}, byPhone: {} } };
-  (rows || []).forEach(r => {
-    if (!r || (r.status && r.status === 'rejected')) return; // rejected = "not the same", skip
-    const t = r.entity_type === 'outlet' ? 'outlet' : 'worker';
-    if (r.source_key)   next[t].byKey[r.source_key]     = r;
-    if (r.source_phone) next[t].byPhone[r.source_phone] = r;
-  });
-  entityLinks = next;
-}
-
-async function loadEntityLinks() {
-  try {
-    const { data, error } = await supabaseClient
-      .from('entity_links').select('*').neq('status', 'rejected');
-    if (error) { console.warn('entity_links load failed:', error.message); return; }
-    indexEntityLinks(data || []);
-    try { localStorage.setItem('entity_links_cache', JSON.stringify(data || [])); } catch(e) {}
-  } catch (e) {
-    console.warn('entity_links load error:', e);
-    // Fall back to the local read cache so matching still works offline.
-    try {
-      const cached = JSON.parse(localStorage.getItem('entity_links_cache') || '[]');
-      indexEntityLinks(cached);
-    } catch(_) {}
-  }
-}
-
-// Look up a saved link. Workers: try phone first (strong signal), then name.
-// Outlets: name only. Returns the canonical shiftops_name, or '' if none.
-function entityLinkResolve(type, name, phone) {
-  const t = type === 'outlet' ? 'outlet' : 'worker';
-  if (t === 'worker' && phone) {
-    const hit = entityLinks.worker.byPhone[entityLinkPhone(phone)];
-    if (hit) return hit.shiftops_name || '';
-  }
-  if (name) {
-    const hit = entityLinks[t].byKey[entityLinkKey(name)];
-    if (hit) return hit.shiftops_name || '';
-  }
-  return '';
-}
-
-// Persist a confirmed link so it sticks across imports. Upserts in memory
-// immediately (so the current preview re-resolves at once) and writes to
-// Supabase; an honest toast fires if the write can't reach the team.
-async function entityLinkSave(type, { name, phone, shiftopsName, matchType = 'manual', confidence = 1 }) {
-  const t = type === 'outlet' ? 'outlet' : 'worker';
-  const source_key   = name  ? entityLinkKey(name)   : null;
-  const source_phone = (t === 'worker' && phone) ? entityLinkPhone(phone) : null;
-  if (!source_key && !source_phone) return;
-  if (!shiftopsName) return;
-
-  const row = {
-    entity_type: t, source_key, source_phone,
-    shiftops_name: shiftopsName, match_type: matchType,
-    confidence, status: 'confirmed',
-  };
-  // optimistic in-memory update
-  if (source_key)   entityLinks[t].byKey[source_key]     = row;
-  if (source_phone) entityLinks[t].byPhone[source_phone] = row;
-
-  try {
-    // Clear any existing active link on the same keys, then insert fresh —
-    // avoids relying on a composite upsert against partial unique indexes.
-    if (source_key) {
-      await supabaseClient.from('entity_links').delete()
-        .eq('entity_type', t).eq('source_key', source_key).neq('status', 'rejected');
-    }
-    if (source_phone) {
-      await supabaseClient.from('entity_links').delete()
-        .eq('entity_type', t).eq('source_phone', source_phone).neq('status', 'rejected');
-    }
-    const { error } = await supabaseClient.from('entity_links').insert(row);
-    if (error) {
-      toast('Link saved on this device only (not team-wide): ' + error.message, 'error');
-      try { const c = JSON.parse(localStorage.getItem('entity_links_cache') || '[]'); c.push(row); localStorage.setItem('entity_links_cache', JSON.stringify(c)); } catch(_) {}
-    } else {
-      await loadEntityLinks(); // re-sync canonical state
-    }
-  } catch (e) {
-    toast('Link saved on this device only (not team-wide): ' + (e.message || e), 'error');
-  }
-}
-
 function importOutletAlias(raw) {
-  // 1) Saved reconciliations (team-wide, editable) take priority.
-  const linked = entityLinkResolve('outlet', raw);
-  if (linked) return linked;
-  // 2) Legacy hard-coded aliases as a fallback (now also seeded into the table).
   const n = String(raw || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (/\bfive guys\b/.test(n) && /\bkitchen\b/.test(n)) return 'Five Guys iON Mall';
   if (/\bfive guys\b/.test(n) && /\bcashier\b/.test(n)) return 'Five Guys Plaza Singapura';
@@ -12360,11 +11846,9 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       }
     }
 
-    // Resolve worker — saved link (by name) first, then exact, then fuzzy.
-    const workerLinked = workerRaw ? entityLinkResolve('worker', workerRaw) : '';
-    const workerExact = workerRaw ? (
-      (workerLinked && allWorkers.find(w => w.name === workerLinked)) ||
-      allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase())
+    // Resolve worker — exact first, then fuzzy
+    const workerExact = workerRaw ? allWorkers.find(w =>
+      w.name.trim().toLowerCase() === workerRaw.toLowerCase()
     ) : null;
     const workerFuzzy = workerRaw && !workerExact
       ? importBestMatch(workerRaw, allWorkers.map(w => w.name))
@@ -12967,6 +12451,202 @@ function parseImportPaste() {
   toast(`Parsed ${rows.length} row${rows.length !== 1 ? 's' : ''} — review below then click Confirm`);
 }
 
+async function loadPortalBookings() {
+  // Pulls bookings synced from the portal DB (portal_bookings + portal_shifts +
+  // portal_users) and maps them into the SAME row shape the paste/CSV parsers
+  // produce, so they flow through the existing reconciliation UI, matching, and
+  // confirmImportBookings() unchanged.
+  //
+  // Join chain:
+  //   portal_bookings.user_id   -> portal_users.full_name   (the WORKER)
+  //   portal_bookings.shift_id  -> portal_shifts            (date/time/rate)
+  //   portal_shifts.outlet_id   -> portal_users.business_name (the OUTLET / venue)
+  //
+  // NOTE: in this portal, set_shift.outlet_id references the CLIENT user, and the
+  // venue name lives in that user's business_name (e.g. "Latitude Restaurant
+  // (One 15 Marina)"). full_name on those rows is the contact person, so we use
+  // business_name for the outlet, falling back to full_name only if blank.
+  if (!supabaseClient) { toast('Not connected to the database.', 'error'); return; }
+
+  const btn = document.getElementById('load-portal-btn');
+  const prevLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+
+  try {
+    // Supabase caps a single .select() at 1000 rows. portal_users has ~3.4k rows,
+    // so a plain select silently drops everyone past row 1000 — which made outlet
+    // and worker lookups miss. Page through in 1000-row chunks to get them all.
+    async function fetchAll(table, cols) {
+      const PAGE = 1000;
+      let from = 0;
+      const out = [];
+      // hard stop after 50 pages (50k rows) as a safety valve
+      for (let i = 0; i < 50; i++) {
+        const { data, error } = await supabaseClient
+          .from(table)
+          .select(cols)
+          .order('id', { ascending: true })
+          .range(from, from + PAGE - 1);
+        if (error) throw error;
+        if (!data || !data.length) break;
+        out.push(...data);
+        if (data.length < PAGE) break;
+        from += PAGE;
+      }
+      return out;
+    }
+
+    const [bookings, shifts, users] = await Promise.all([
+      fetchAll('portal_bookings', 'id, shift_id, user_id, clock_in_time, clock_out_time, total_amount, working_status, status, booking_date, job_type'),
+      fetchAll('portal_shifts', 'id, outlet_id, job_type, shift_date, start_time, end_time, rate, status'),
+      fetchAll('portal_users', 'id, type, full_name, business_name, country'),
+    ]);
+
+    if (!bookings.length) {
+      toast('No synced portal bookings found. Run the portal sync first.', 'info');
+      if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
+      return;
+    }
+
+    // Lookup maps (keys coerced to string so int/text id mismatches don't bite)
+    const shiftById = new Map(shifts.map(s => [String(s.id), s]));
+    const userById  = new Map(users.map(u => [String(u.id), u]));
+
+    const outletNameFor = (outletId) => {
+      if (outletId == null) return '';
+      const u = userById.get(String(outletId));
+      if (!u) return '';
+      // venue lives in business_name; fall back to full_name only if blank
+      return (u.business_name && u.business_name.trim())
+        ? u.business_name.trim()
+        : (u.full_name || '').trim();
+    };
+    const outletCountryFor = (outletId) => {
+      const u = outletId != null ? userById.get(String(outletId)) : null;
+      return u?.country || null;
+    };
+    const workerNameFor = (userId) => {
+      if (userId == null) return '';
+      const u = userById.get(String(userId));
+      return u ? (u.full_name || '').trim() : '';
+    };
+
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = [];
+
+    for (const b of bookings) {
+      const shift = b.shift_id != null ? shiftById.get(String(b.shift_id)) : null;
+
+      // Date: prefer the shift's date, else the booking's own date
+      const dateStr = (shift?.shift_date || b.booking_date || '').slice(0, 10);
+      if (!dateStr) continue; // can't place a booking with no date
+
+      const outletRaw = shift ? outletNameFor(shift.outlet_id) : '';
+      const workerRaw = workerNameFor(b.user_id);
+
+      // Scheduled times come from the shift; clock times from the booking
+      const schedStart = importParseTime(shift?.start_time) || null;
+      const schedEnd   = importParseTime(shift?.end_time)   || null;
+      const clockIn    = importParseTime(b.clock_in_time)   || null;
+      const clockOut   = importParseTime(b.clock_out_time)  || null;
+
+      // Role from job_type (booking first, then shift)
+      const roleRaw = (b.job_type || shift?.job_type || '').trim();
+
+      // Worker resolution — exact then fuzzy, mirroring the parsers
+      const isAvailableSlot = !workerRaw && isTodayOrFutureDate(dateStr);
+      const workerExact = workerRaw
+        ? allWorkers.find(w => w.name.trim().toLowerCase() === workerRaw.toLowerCase())
+        : null;
+      const workerFuzzy = workerRaw && !workerExact
+        ? importBestMatch(workerRaw, allWorkers.map(w => w.name))
+        : null;
+      const workerAuto = workerFuzzy?.autoSelect
+        ? allWorkers.find(w => w.name === workerFuzzy.name)
+        : null;
+      const workerMatch = workerExact || workerAuto || null;
+
+      // Outlet resolution — reuse the shared resolver (alias → exact → fuzzy)
+      const outletInfo  = outletRaw ? resolveImportOutlet(outletRaw) : { name: '', match: null, fuzzy: null, alias: null, autoMatch: false };
+      const outletMatch = outletInfo.match;
+
+      // Rate: shift rate if present, else suggested from outlet+role, else 12
+      let resolvedRate = parseFloat(shift?.rate) || 0;
+      if (!resolvedRate && outletMatch) {
+        const suggested = getSuggestedRate(outletMatch.name, roleRaw, new Date(dateStr + 'T00:00:00'));
+        resolvedRate = suggested?.rate || 12;
+      }
+      if (!resolvedRate) resolvedRate = 12;
+
+      const breakMins = defaultBreakMinsForRange(schedStart, schedEnd) || 0;
+
+      // Clock times: if booking has them (completed), keep; otherwise leave null
+      // (the confirm step treats null clock times as scheduled/not-yet-clocked).
+      const finalClockIn  = clockIn || null;
+      const finalClockOut = clockOut || null;
+
+      const country = normaliseCountry(
+        outletCountryFor(shift?.outlet_id) || 'Singapore'
+      );
+
+      rows.push({
+        _workerRaw:         workerRaw || 'Available',
+        _outletRaw:         outletRaw,
+        _workerMatch:       workerMatch?.name || null,
+        _outletMatch:       outletMatch?.name || null,
+        _hasWorkerMismatch: !!workerRaw && !workerMatch,
+        _hasOutletMismatch: !!outletRaw && !outletMatch,
+        _workerAutoMatched: !!workerAuto,
+        _outletAutoMatched: !!outletInfo.autoMatch,
+        _suggestedWorker:   workerFuzzy?.name || null,
+        _suggestedOutlet:   outletInfo.fuzzy?.name || outletInfo.alias || null,
+        _deduction:         0,
+        _portalBookingId:   b.id,   // provenance, in case we want it later
+
+        shift_date:          dateStr,
+        worker_name:         isAvailableSlot ? 'Available' : (workerMatch?.name || workerRaw || 'Available'),
+        outlet:              outletInfo.name || outletRaw || '',
+        role:                roleRaw,
+        scheduled_start:     schedStart || '09:00',
+        scheduled_end:       schedEnd || '17:00',
+        rate:                resolvedRate,
+        break_mins:          breakMins,
+        clock_in:            finalClockIn,
+        clock_out:           finalClockOut,
+        country:             country,
+        cancelled:           false,
+        late_penalty:        0,
+        cancellation_penalty: 0,
+        sr_worker:           null,
+        sr_rate:             null,
+        sr_hours:            null,
+        sr_absorbed:         null,
+      });
+    }
+
+    if (!rows.length) {
+      toast('Synced bookings found, but none had a usable date to import.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
+      return;
+    }
+
+    importRows = rows;
+    renderImportPreview();
+
+    const needMap = rows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
+    toast(
+      `Loaded ${rows.length} synced booking${rows.length !== 1 ? 's' : ''}` +
+      (needMap ? ` — ${needMap} need worker/outlet mapping below.` : ' — all matched, review then Confirm.'),
+      'success'
+    );
+  } catch (e) {
+    console.error('loadPortalBookings failed:', e);
+    toast('Could not load synced bookings: ' + (e.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
+  }
+}
+
 async function handleImportFile(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -13285,10 +12965,8 @@ function onImportWorkerSelect(idx, val) {
       r._workerAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
-  // Remember this reconciliation so it auto-applies on every future import.
-  entityLinkSave('worker', { name: rawName, shiftopsName: val, matchType: 'manual', confidence: 1 });
   renderImportPreview();
-  toast(`Mapped "${rawName}" → "${val}" (remembered)`);
+  toast(`Mapped "${rawName}" → "${val}"`);
 }
 
 // Map an existing outlet to ALL rows that share the same raw name
@@ -13303,10 +12981,8 @@ function onImportOutletSelect(idx, val) {
       r._outletAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
-  // Remember this reconciliation so it auto-applies on every future import.
-  entityLinkSave('outlet', { name: rawName, shiftopsName: val, matchType: 'manual', confidence: 1 });
   renderImportPreview();
-  toast(`Mapped "${rawName}" → "${val}" (remembered)`);
+  toast(`Mapped "${rawName}" → "${val}"`);
 }
 
 // Open new-worker modal, pre-filled but editable
@@ -13449,7 +13125,7 @@ async function confirmImportBookings() {
     const restriction = assignmentRestriction(r.worker_name, r.outlet);
     if (restriction) {
       skipped++;
-      toast(`Skipped ${r.worker_name}: ${stripRequirementsSentinel(restriction)}`, 'error');
+      toast(`Skipped ${r.worker_name}: ${restriction}`, 'error');
       continue;
     }
 
@@ -14103,47 +13779,24 @@ let aiChatOpen = false;
 // ══════════════════════════════════════════════════════════════
 // ── Business Knowledge ────────────────────────────────────────
 async function loadKnowledge() {
-  // Business knowledge is TEAM-WIDE: every internal user must see every entry,
-  // regardless of who uploaded it or which device they're on. The authoritative
-  // store is the shared Supabase `business_knowledge` table. The old code silently
-  // fell back to a per-device localStorage copy whenever the Supabase read failed
-  // (table missing / RLS blocking the anon role) — making entries visible ONLY to
-  // the device that uploaded them. We now read the shared table as the single
-  // source of truth and surface an honest error instead of hiding the team's data.
-  if (supabaseClient) {
-    try {
-      const { data, error } = await supabaseClient.from('business_knowledge').select('*').order('updated_at', { ascending: false });
-      if (!error && data) {
-        allKnowledge = data;
-        try { localStorage.setItem('business_knowledge_local', JSON.stringify(data)); } catch(e) {}
-        return;
-      }
-      if (error) {
-        console.warn('Business knowledge: Supabase read failed —', error.message);
-        toast('⚠️ Could not load team knowledge from Supabase — showing cached copy only. Run the business_knowledge SQL / check RLS.', 'error');
-      }
-    } catch(e) { console.warn('Business knowledge: Supabase read threw —', e?.message || e); }
-  }
+  try {
+    const { data, error } = await supabaseClient.from('business_knowledge').select('*').order('updated_at', { ascending: false });
+    if (!error && data) { allKnowledge = data; return; }
+  } catch(e) {}
   allKnowledge = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]');
 }
 
 async function kbSaveEntry(entry) {
-  if (supabaseClient) {
-    try {
-      if (entry.id) {
-        const { error } = await supabaseClient.from('business_knowledge').update({ ...entry, updated_at: new Date().toISOString() }).eq('id', entry.id);
-        if (!error) { await loadKnowledge(); renderKnowledgePage(); return entry.id; }
-        console.warn('Business knowledge update failed —', error.message);
-      } else {
-        const { data, error } = await supabaseClient.from('business_knowledge').insert({ ...entry, created_by: currentInternalUser, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }).select();
-        if (!error && data) { await loadKnowledge(); renderKnowledgePage(); return data[0].id; }
-        if (error) console.warn('Business knowledge insert failed —', error.message);
-      }
-    } catch(e) { console.warn('Business knowledge save threw —', e?.message || e); }
-  }
-  // localStorage fallback — NOT team-visible. Be honest so the user knows it
-  // won't reach the rest of the team until Supabase is fixed.
-  toast('⚠️ Saved on this device only — NOT visible to your team. Run the business_knowledge SQL / check RLS so it syncs universally.', 'error');
+  try {
+    if (entry.id) {
+      const { error } = await supabaseClient.from('business_knowledge').update({ ...entry, updated_at: new Date().toISOString() }).eq('id', entry.id);
+      if (!error) { await loadKnowledge(); renderKnowledgePage(); return entry.id; }
+    } else {
+      const { data, error } = await supabaseClient.from('business_knowledge').insert({ ...entry, created_by: currentInternalUser, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }).select();
+      if (!error && data) { await loadKnowledge(); renderKnowledgePage(); return data[0].id; }
+    }
+  } catch(e) {}
+  // localStorage fallback
   const rows = JSON.parse(localStorage.getItem('business_knowledge_local') || '[]');
   if (entry.id) {
     const idx = rows.findIndex(r => r.id === entry.id);
@@ -14404,23 +14057,6 @@ function buildSystemContext() {
     today14.push(`${ds}: ${filled} filled, ${avail} available slots`);
   }
 
-  // Explicit per-slot detail for OPEN/AVAILABLE shifts so the assistant can name
-  // each one (outlet/time/role/id) when asked "what available shifts do you have".
-  // The aggregate counts above only give totals; this gives the actual rows.
-  // Sourced from the dedicated availableSlots array (loadAvailableSlots), which
-  // is the authoritative list of unfilled future slots — RECENT SHIFTS above is
-  // assigned-first and truncates open slots out.
-  const openSlotPool = (typeof availableSlots !== 'undefined' && Array.isArray(availableSlots) && availableSlots.length)
-    ? availableSlots.slice(0, 60)
-    : allShifts.filter(s => isOpenSlot(s) && s.shift_date >= todayStr)
-        .sort((a,b) => a.shift_date.localeCompare(b.shift_date)).slice(0, 60);
-  const openSlotList = openSlotPool.length
-    ? openSlotPool.map(s =>
-        `[${s.shift_date} ${s.scheduled_start?.slice(0,5)||'?'}-${s.scheduled_end?.slice(0,5)||'?'}] ` +
-        `${s.outlet||'?'} | role:${s.role||'Any'} | id:${s.id}`
-      ).join('\n')
-    : 'No open/available slots on record.';
-
   const outletList = allOutlets.map(o => `${o.name} (${normaliseCountry(o.country||'')})`).join(', ');
 
   // Assignment restrictions (bans / do-not-assign) so the assistant can refuse
@@ -14436,19 +14072,6 @@ function buildSystemContext() {
     (meta.disliked_outlets || []).forEach(on => restrictionLines.push(`${wName} — should NOT be assigned to ${on}`));
   });
   const restrictionList = restrictionLines.length ? restrictionLines.join('\n') : 'None on record.';
-
-  // Per-outlet client booking requirements (checklist that must be ticked before
-  // a worker can be assigned there). Surfaced so the AI knows a booking may be
-  // gated and can list/add/remove them.
-  const reqLines = [];
-  Object.entries(profileMeta.outlets || {}).forEach(([key, meta]) => {
-    const reqs = Array.isArray(meta.requirements) ? meta.requirements.filter(r => r && r.label) : [];
-    if (reqs.length) {
-      const outletName = (allOutlets.find(o => normProfileKey(o.name) === key) || {}).name || key;
-      reqLines.push(`${outletName}: ${reqs.map(r => r.label).join(' | ')}`);
-    }
-  });
-  const requirementsList = reqLines.length ? reqLines.join('\n') : 'None on record.';
 
   return `
 === SYSTEM CONTEXT (live data) ===
@@ -14466,9 +14089,6 @@ TODAY OVERVIEW (${today}):
 SHIFT AVAILABILITY (next 14 days):
 ${today14.join('\n')}
 
-OPEN / AVAILABLE SLOTS (unfilled future shifts — these ARE the available shifts; cite outlet, time, role, id when asked):
-${openSlotList}
-
 RECENT SHIFTS (up to 40):
 ${shiftList}
 
@@ -14480,9 +14100,6 @@ OUTLETS: ${outletList}
 ASSIGNMENT RESTRICTIONS (bans / do-not-assign — NEVER create a shift that violates these):
 ${restrictionList}
 
-OUTLET BOOKING REQUIREMENTS (must be verified/ticked in-app before a worker can be booked there):
-${requirementsList}
-
 BUSINESS KNOWLEDGE (${allKnowledge.length} entries):
 ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e.outlet+')':''} ${e.topic}: ${e.content}`).join('\n')||'No entries yet.'}
 === END CONTEXT ===`;
@@ -14491,9 +14108,6 @@ ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e
 // Claude API call via Anthropic
 async function callClaude(userMessage) {
   aiHistory.push({ role: 'user', content: userMessage });
-
-  // Make sure the open-slot list the assistant sees is current.
-  try { await loadAvailableSlots(); } catch(e) {}
 
   const systemPrompt = `You are a helpful operations assistant embedded in "Anytime Work Operations", an F&B payroll and shift management system used in Singapore, Malaysia, and the Philippines.
 
@@ -14514,18 +14128,15 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "waivePenalty", "shiftId": "<id>", "workerName": "<name>"}
 {"type": "navigateTo", "page": "attendance|workers|reports|analytics|incidents|activity"}
 {"type": "markPaid", "shiftId": "<id>", "workerName": "<name>"}
-{"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>", "rate": "<OPTIONAL — only include if user specified a custom hourly rate; omit to use the outlet's standard rate>"}
-{"type": "forceCreateShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>", "rate": "<OPTIONAL custom rate; omit to use standard>"}
-{"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>", "rate": "<OPTIONAL custom rate; omit to use standard>"}
-{"type": "batchCreateSlots", "outlet": "<exact outlet name from DB>", "role": "<default role for all slots>", "rate": "<OPTIONAL custom rate for all slots; omit to use standard>", "slots": [{"date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<override role or omit>", "rate": "<OPTIONAL per-slot custom rate>"}, ...]}
-{"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "preferredTime": "Any time|Morning|Afternoon|Evening|Full day", "preferredRole": "<role or Any role>", "area": "<optional area/outlet>", "note": "<optional note>"}
+{"type": "createShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
+{"type": "forceCreateShift", "workerName": "<exact name from DB>", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
+{"type": "createAvailableSlot", "outlet": "<exact outlet name from DB>", "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<role>"}
+{"type": "batchCreateSlots", "outlet": "<exact outlet name from DB>", "role": "<default role for all slots>", "slots": [{"date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breakMins": 0, "role": "<override role or omit>"}, ...]}
+{"type": "addStandby", "workerName": "<exact name from DB>", "availableDate": "YYYY-MM-DD", "note": "<optional note>"}
 {"type": "searchWorker", "query": "<partial or full name to search>"}
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
 {"type": "banWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
 {"type": "unbanWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
-{"type": "addOutletRequirement", "outlet": "<exact outlet name from DB>", "requirement": "<requirement text, phrased as a yes/no check, e.g. Is the worker 18 or above?>"}
-{"type": "removeOutletRequirement", "outlet": "<exact outlet name from DB>", "requirement": "<the requirement text to remove>"}
-{"type": "listOutletRequirements", "outlet": "<exact outlet name from DB>"}
 {"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
 \`\`\`
@@ -14558,12 +14169,6 @@ BREAK TIME RULES (apply automatically — no need to ask):
 - Shifts more than 6 hours at Burma Social OR Vincenzo: 120 min break (set breakMins: 120).
 Always apply these rules when setting breakMins in createShift, createAvailableSlot, and batchCreateSlots actions.
 
-RATE RULES (apply automatically — do NOT invent rates):
-- By default, DO NOT include a "rate" field in createShift, forceCreateShift, createAvailableSlot, or batchCreateSlots. The system automatically applies the outlet's STANDARD rate for that role and day (the same rate the Add Shift form suggests). This keeps rates consistent for each outlet.
-- ONLY include a "rate" field when the user EXPLICITLY gives a custom hourly rate (e.g. "create the slot at $18/hr", "book her at 16 dollars an hour"). In that case set "rate" to just the number (e.g. "18").
-- Never guess or copy a rate from another shift. If the user doesn't mention a rate, omit it and let the standard rate apply.
-- For batchCreateSlots, a custom rate can apply to all slots (top-level "rate") or to individual slots (per-slot "rate"). Only set these if the user specified them.
-
 RULES:
 - Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
 - BEFORE creating a shift: confirm with the user by showing the worker's full name AND phone number from the WORKERS list, plus the exact outlet name. Wait for "yes/confirm" before executing.
@@ -14581,7 +14186,6 @@ RULES:
 - IMPORTANT: saveKnowledge is ONLY for general business knowledge (SOPs, rules, policies). For updating a specific worker's phone, payment method, country, or notes, ALWAYS use updateWorkerProfile instead — never save personal worker data to business knowledge.
 - BANNING: When the user says a worker is banned, barred, blacklisted, or "should not / cannot be assigned" to a specific outlet (e.g. "Ahn Duc is banned from Les Bouchons"), use the banWorkerFromOutlet action with the exact worker and outlet names. To lift a ban ("unban", "allow again", "remove the ban"), use unbanWorkerFromOutlet. This is NOT business knowledge — do not use saveKnowledge for bans. If either the worker or the outlet name is ambiguous or not in context, look them up first (searchWorker / searchOutlet) before banning.
 - ENFORCING BANS: NEVER create or offer to create a shift (createShift, forceCreateShift, batchCreateSlots) that assigns a worker to an outlet they're banned from or marked do-not-assign for — check ASSIGNMENT RESTRICTIONS above first. If asked to do so, refuse and explain the worker is restricted there, and offer to lift the restriction if that's what they want. The system will also hard-block it, but you should catch it before proposing the booking.
-- CLIENT BOOKING REQUIREMENTS: Some outlets have a requirements checklist (e.g. "Is the worker 18 or above?", "Has formal black long-sleeve shirt?") — see OUTLET BOOKING REQUIREMENTS above. To add one, use addOutletRequirement; to remove one, use removeOutletRequirement; to see them, use listOutletRequirements. Phrase added requirements as a clear yes/no check. A worker can only be booked at such an outlet once every requirement has been verified (ticked) at least once; the system remembers who has passed and auto-applies it next time. You CANNOT tick the checklist yourself — it requires a human in the app — so if you try to book a worker who hasn't passed an outlet's requirements, the booking is blocked and you should tell the user to confirm the checklist in the app (it appears automatically when they book). If a user adds a new requirement, existing passers keep their prior ticks and only need the new item verified.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - Speak naturally, like a helpful colleague.`;
 
@@ -14635,14 +14239,8 @@ async function executeAIAction(actionJson) {
       const s = allShifts.find(x => x.id === a.shiftId);
       if (!s) return `❌ Shift not found`;
       const time = a.time || new Date().toTimeString().slice(0,5);
-      const alreadyClockedOut = !!s.clock_out;
       await supabaseClient.from('shifts').update({ clock_out: time, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
       await logActivity('AI: Clocked out', `${a.workerName} clocked out at ${time}`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
-      // Payroll WhatsApp alert — mirror the modal/edit-shift paths. Only fire when
-      // this is a NEW clock-out (not re-clocking an already-completed shift).
-      if (!alreadyClockedOut) {
-        notifyPayrollClockOut(buildClockOutMessage({ ...s, clock_out: time }, time));
-      }
       await loadShifts();
       return `✅ Clocked out **${a.workerName}** at ${time}`;
     }
@@ -14718,9 +14316,6 @@ async function executeAIAction(actionJson) {
       // that outlet, and this is NOT overridable via "confirm override".
       const restriction = assignmentRestriction(w.name, outlet.name);
       if (restriction) {
-        if (isRequirementsRestriction(restriction)) {
-          return `🚫 **Blocked — ${stripRequirementsSentinel(restriction)}** I can't book ${w.name} until those requirements are verified. Open the booking in the app and tick the requirements checklist, or confirm them there once — after that ${w.name} will auto-pass for future bookings at ${outlet.name}.`;
-        }
         return `🚫 **Blocked — ${restriction}** I won't create this shift. To allow it, lift the restriction first (e.g. tell me "unban ${w.name} from ${outlet.name}" or update it in the worker/outlet settings).`;
       }
       if (isWorkerSuspended(w.name)) {
@@ -14747,9 +14342,9 @@ async function executeAIAction(actionJson) {
         return `⚠️ **Conflict detected — please review before I proceed:**\n\n${conflictType} _(already exists)_\n• ${w.name} @ ${outlet.name} — ${a.date}, ${a.start}–${a.end} ← you requested\n${existing}\n\nReply **"confirm override"** to create it anyway, or **"cancel"** to abort.`;
       }
       // ── End conflict check ─────────────────────────────────────
-      // Use the outlet's STANDARD rate (per-role, per-day rate rules) — the same
-      // engine the Add Shift form uses — unless the user explicitly supplied a rate.
-      const rate = aiResolveRate(a, outlet.name, a.role || 'F&B Service Crew', a.date);
+      // Get rate from most recent shift at this outlet for this worker, or fallback
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || w.country);
       const breakMinsCS = defaultBreakMinsForRange(a.start, a.end, outlet.name) ?? parseInt(a.breakMins || 0);
       const { error } = await supabaseClient.from('shifts').insert({
@@ -14781,15 +14376,13 @@ async function executeAIAction(actionJson) {
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
       const fcRestriction = assignmentRestriction(w.name, outlet.name);
       if (fcRestriction) {
-        if (isRequirementsRestriction(fcRestriction)) {
-          return `🚫 **Blocked — ${stripRequirementsSentinel(fcRestriction)}** A conflict override doesn't bypass booking requirements. Tick ${w.name}'s requirements checklist for ${outlet.name} in the app first.`;
-        }
         return `🚫 **Blocked — ${fcRestriction}** A conflict override doesn't lift a ban. Lift the restriction first if you really want to assign them here.`;
       }
       if (isWorkerSuspended(w.name)) {
         return `🚫 **Blocked — ${w.name} is currently suspended** and can't be assigned shifts.`;
       }
-      const rate = aiResolveRate(a, outlet.name, a.role || 'F&B Service Crew', a.date);
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || w.country);
       const breakMinsFC = defaultBreakMinsForRange(a.start, a.end, outlet.name) ?? parseInt(a.breakMins || 0);
       const { error } = await supabaseClient.from('shifts').insert({
@@ -14807,8 +14400,8 @@ async function executeAIAction(actionJson) {
     case 'createAvailableSlot': {
       const outlet = allOutlets.find(o => o.name.toLowerCase() === a.outlet.toLowerCase());
       if (!outlet) return `❌ Outlet "${a.outlet}" not found in database`;
-      const role = a.role || 'F&B Service Crew';
-      const rate = aiResolveRate(a, outlet.name, role, a.date);
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || 'Singapore');
       const breakMinsAS = defaultBreakMinsForRange(a.start, a.end, outlet.name) ?? parseInt(a.breakMins || 0);
       const { error } = await supabaseClient.from('shifts').insert({
@@ -14820,7 +14413,7 @@ async function executeAIAction(actionJson) {
         break_mins: breakMinsAS,
         rate: rate,
         country: country,
-        role: role,
+        role: a.role || 'F&B Service Crew',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       });
@@ -14843,34 +14436,27 @@ async function executeAIAction(actionJson) {
           const wMatch = allWorkers.find(x => x.name.toLowerCase() === wn.toLowerCase());
           const realName = wMatch ? wMatch.name : wn;
           const r = assignmentRestriction(realName, outlet.name);
-          if (r) return `🚫 **Blocked — ${stripRequirementsSentinel(r)}** No slots created. ${isRequirementsRestriction(r) ? 'Verify the requirements checklist in the app first.' : 'Lift the restriction first.'}`;
+          if (r) return `🚫 **Blocked — ${r}** No slots created. Lift the restriction first.`;
           if (isWorkerSuspended(realName)) return `🚫 **Blocked — ${realName} is suspended.** No slots created.`;
         }
       }
+      const prevShift = allShifts.find(s => s.outlet === outlet.name && s.rate && parseFloat(s.rate) > 0);
+      const rate = prevShift ? prevShift.rate : '15';
       const country = normaliseCountry(outlet.country || 'Singapore');
       const now = new Date().toISOString();
-      const rows = a.slots.map(slot => {
-        const slotRole = slot.role || a.role || 'F&B Service Crew';
-        // Per-slot explicit rate wins; else batch-level explicit rate; else the
-        // outlet's standard rate for this slot's role + day.
-        const slotRate = aiResolveRate(
-          { rate: slot.rate ?? slot.hourlyRate ?? a.rate ?? a.hourlyRate },
-          outlet.name, slotRole, slot.date
-        );
-        return {
-          worker_name: 'Available',
-          outlet: outlet.name,
-          shift_date: slot.date,
-          scheduled_start: slot.start.includes(':') ? slot.start + (slot.start.length === 5 ? ':00' : '') : slot.start + ':00',
-          scheduled_end: slot.end.includes(':') ? slot.end + (slot.end.length === 5 ? ':00' : '') : slot.end + ':00',
-          break_mins: defaultBreakMinsForRange(slot.start, slot.end, outlet.name) ?? parseInt(slot.breakMins || 0),
-          rate: slotRate,
-          country: country,
-          role: slotRole,
-          created_at: now,
-          updated_at: now
-        };
-      });
+      const rows = a.slots.map(slot => ({
+        worker_name: 'Available',
+        outlet: outlet.name,
+        shift_date: slot.date,
+        scheduled_start: slot.start.includes(':') ? slot.start + (slot.start.length === 5 ? ':00' : '') : slot.start + ':00',
+        scheduled_end: slot.end.includes(':') ? slot.end + (slot.end.length === 5 ? ':00' : '') : slot.end + ':00',
+        break_mins: defaultBreakMinsForRange(slot.start, slot.end, outlet.name) ?? parseInt(slot.breakMins || 0),
+        rate: rate,
+        country: country,
+        role: slot.role || a.role || 'F&B Service Crew',
+        created_at: now,
+        updated_at: now
+      }));
       const { error } = await supabaseClient.from('shifts').insert(rows);
       if (error) return `❌ Batch insert failed: ${error.message}`;
       await logActivity('AI: Batch slots created', `${rows.length} available slots at ${outlet.name}`, 'shift', null, {});
@@ -14881,33 +14467,22 @@ async function executeAIAction(actionJson) {
     case 'addStandby': {
       const w = allWorkers.find(x => x.name.toLowerCase() === a.workerName.toLowerCase());
       if (!w) return `❌ Worker "${a.workerName}" not found`;
-      // Match the columns the manual "Add standby" form writes (saveStandbyWorker)
-      // so the row is shaped identically and shows up on the Standby page.
       const record = {
-        id: (crypto?.randomUUID ? crypto.randomUUID() : String(Date.now())),
         worker_name: w.name,
         available_date: a.availableDate,
-        preferred_time: a.preferredTime || 'Any time',
-        preferred_role: a.preferredRole || 'Any role',
-        area: a.area || null,
-        notes: a.note || a.notes || null,
-        created_by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) || 'AI',
+        note: a.note || '',
         created_at: new Date().toISOString()
       };
-      let syncedToDb = false;
       try {
         const { error } = await supabaseClient.from('standby_workers').insert(record);
         if (error) throw error;
-        syncedToDb = true;
       } catch(e) {
-        // Surface the real failure instead of a silent localStorage fallback with
-        // a fake success — schema/RLS gaps must not look like a successful save.
-        try { saveStandbyLocal(record); } catch(_) {}
-        await loadStandbyList(); renderStandbyPage(); renderTable();
-        return `⚠️ Could not save **${w.name}** to the team standby list — the database rejected it (${e?.message || 'standby_workers insert failed; check the table columns / RLS policy'}). Saved on this device only as a fallback; it will NOT be visible to the team until the table is fixed.`;
+        // fallback to localStorage
+        const rows = JSON.parse(localStorage.getItem('standby_workers_local') || '[]');
+        rows.push({ ...record, id: Date.now() });
+        localStorage.setItem('standby_workers_local', JSON.stringify(rows));
       }
-      await loadStandbyList(); renderStandbyPage(); renderTable();
-      return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby for ${a.availableDate}${record.preferred_time && record.preferred_time!=='Any time' ? ' · '+record.preferred_time : ''}${record.preferred_role && record.preferred_role!=='Any role' ? ' · '+record.preferred_role : ''}.`;
+      return `✅ **${w.name}** (📞 ${w.phone||w.contact||'N/A'}) added to standby list for ${a.availableDate}`;
     }
 
     case 'updateWorkerProfile': {
@@ -14986,46 +14561,6 @@ async function executeAIAction(actionJson) {
         : `✅ Ban lifted — **${worker.name}** can be assigned to **${outlet.name}** again.`;
     }
 
-    case 'addOutletRequirement':
-    case 'removeOutletRequirement': {
-      const adding = a.type === 'addOutletRequirement';
-      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
-      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
-      const label = String(a.requirement || '').trim();
-      if (!label) return `❌ Please specify the requirement text.`;
-      const oKey = normProfileKey(outlet.name);
-      const existing = profileMeta.outlets[oKey] || {};
-      const list = Array.isArray(existing.requirements) ? existing.requirements.slice() : [];
-      if (adding) {
-        if (list.some(r => r.label.toLowerCase() === label.toLowerCase())) {
-          return `ℹ️ **${outlet.name}** already has the requirement "${label}".`;
-        }
-        list.push({ id: newRequirementId(), label });
-        profileMeta.outlets[oKey] = { ...existing, requirements: list };
-        await saveProfileMeta();
-        try { loadOutletsList(); } catch(e) {}
-        return `✅ Added to **${outlet.name}**: "${label}" (now ${list.length} requirement${list.length!==1?'s':''}: ${list.map(r=>`"${r.label}"`).join(', ')}). It must be ticked before booking. Existing passers keep their ticks — only this new item needs verifying.`;
-      } else {
-        // Remove by fuzzy label match (case-insensitive exact, then contains).
-        const idx = list.findIndex(r => r.label.toLowerCase() === label.toLowerCase());
-        const idx2 = idx > -1 ? idx : list.findIndex(r => r.label.toLowerCase().includes(label.toLowerCase()));
-        if (idx2 === -1) return `ℹ️ Couldn't find a requirement matching "${label}" at **${outlet.name}**. Current requirements: ${list.length ? list.map(r=>`"${r.label}"`).join(', ') : 'none'}.`;
-        const removed = list.splice(idx2, 1)[0];
-        profileMeta.outlets[oKey] = { ...existing, requirements: list };
-        await saveProfileMeta();
-        try { loadOutletsList(); } catch(e) {}
-        return `✅ Removed from **${outlet.name}**: "${removed.label}" (${list.length} requirement${list.length!==1?'s':''} left${list.length?': '+list.map(r=>`"${r.label}"`).join(', '):''}).`;
-      }
-    }
-
-    case 'listOutletRequirements': {
-      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
-      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
-      const reqs = outletRequirements(outlet.name);
-      if (!reqs.length) return `**${outlet.name}** has no booking requirements set.`;
-      return `**${outlet.name}** booking requirements (all must be ticked to book):\n${reqs.map((r,i)=>`${i+1}. ${r.label}`).join('\n')}`;
-    }
-
     case 'saveKnowledge': {
       const existing = a.existingId ? allKnowledge.find(e => e.id === a.existingId) : null;
       await kbSaveEntry({
@@ -15065,14 +14600,13 @@ async function renderAIReply(reply) {
 
   let successCount = 0;
   const errors = [];
-  const successes = [];
   for (let i = 0; i < actionMatches.length; i++) {
     try {
       const result = await executeAIAction(actionMatches[i][1].trim());
       if (result) {
-        if (result.startsWith('✅')) { successCount++; successes.push(result); }
+        if (result.startsWith('✅')) successCount++;
         else errors.push(result);
-        // Only show individual results inline for small batches (≤3)
+        // Only show individual results for small batches (≤3)
         if (actionMatches.length <= 3) {
           const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
           aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
@@ -15083,15 +14617,11 @@ async function renderAIReply(reply) {
     }
   }
 
-  // For large batches, show a summary that STILL lists what each action did
-  // (previously only the count survived, so e.g. added requirements were invisible).
+  // For large batches, show a summary instead of individual messages
   if (actionMatches.length > 3) {
     if (progressEl) progressEl.remove();
     let summary = `✅ **${successCount} of ${actionMatches.length} actions completed successfully.**`;
-    if (successes.length) {
-      summary += `<br><br>` + successes.map(s => '• ' + s.replace(/^✅\s*/, '')).join('<br>');
-    }
-    if (errors.length) summary += `<br><br>⚠️ ${errors.length} error(s):<br>` + errors.map(e => escapeHtml(e)).join('<br>');
+    if (errors.length) summary += `<br>⚠️ ${errors.length} error(s):<br>` + errors.map(e => escapeHtml(e)).join('<br>');
     aiAddMsg(summary.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'), successCount > 0 ? 'bot' : 'error');
   } else if (errors.length && actionMatches.length <= 3) {
     errors.forEach(e => aiAddMsg(e, 'error'));
@@ -18062,24 +17592,18 @@ const TEAM_CHAT_SCHEMA_SQL = `create table if not exists team_chat (
   id uuid primary key default gen_random_uuid(),
   sender text not null,
   body text not null,
-  recipient text,
   delivered_to text[] not null default '{}',
   read_by text[] not null default '{}',
   created_at timestamptz not null default now()
 );
--- If the table already exists, add the receipt + DM columns:
+-- If the table already exists, add the receipt columns:
 alter table team_chat add column if not exists delivered_to text[] not null default '{}';
 alter table team_chat add column if not exists read_by text[] not null default '{}';
-alter table team_chat add column if not exists recipient text;
 alter table team_chat enable row level security;
 create policy "team_chat_all" on team_chat for all using (true) with check (true);`;
 
 let teamChatMessages = [];        // cached rows (newest-last)
 let teamChatOpen = false;
-// Active conversation: null = the group "Team" channel; a username string = a 1:1
-// DM thread with that person. DMs are stored in the same team_chat table with a
-// `recipient` column set (group messages leave recipient NULL).
-let teamChatActiveConvo = null;
 let teamChatPollTimer = null;
 let teamChatLastSeenId = localStorage.getItem('team_chat_last_seen') || null;
 let teamChatLastSeenTs = localStorage.getItem('team_chat_last_seen_ts') || null;
@@ -18146,51 +17670,19 @@ async function loadTeamChat() {
   }
 }
 
-// Messages within the rolling 48h window (all conversations — used for the badge).
-function teamChatRecentAll() {
+// Messages within the rolling 48h window (shown in the popup).
+function teamChatRecent() {
   const cutoff = Date.now() - TEAM_CHAT_WINDOW_MS;
   return teamChatMessages.filter(m => new Date(m.created_at).getTime() >= cutoff);
 }
 
-// Does a message belong to the currently-open conversation?
-// Group thread = recipient empty/null. DM thread with X = sender/recipient are me&X.
-function chatMsgInConvo(m, convo) {
-  const rcpt = m.recipient || null;
-  if (!convo) return !rcpt;                       // group channel
-  const me = currentInternalUser;
-  if (!rcpt) return false;                          // group msg, not this DM
-  return (m.sender === me && rcpt === convo) ||
-         (m.sender === convo && rcpt === me);
-}
-
-// Messages within the rolling 48h window for the ACTIVE conversation (shown in popup).
-function teamChatRecent() {
-  return teamChatRecentAll().filter(m => chatMsgInConvo(m, teamChatActiveConvo));
-}
-
-// Unread = recent messages from someone else, newer than what we last saw —
-// across every conversation visible to me (the group channel + any DM addressed
-// to me). DMs between two other people never count toward my badge.
+// Unread = recent messages from someone else, newer than what we last saw.
 function teamChatUnreadCount() {
   if (!chatAllowedForCurrentUser()) return 0;
   const me = currentInternalUser;
   const seenTs = teamChatLastSeenTs ? new Date(teamChatLastSeenTs).getTime() : 0;
-  return teamChatRecentAll().filter(m => {
-    if (m.sender === me) return false;
-    const rcpt = m.recipient || null;
-    if (rcpt && rcpt !== me) return false;        // a DM not meant for me
-    return new Date(m.created_at).getTime() > seenTs;
-  }).length;
-}
-
-// Per-conversation unread count, for the dots next to each thread in the switcher.
-function teamChatConvoUnread(convo) {
-  const me = currentInternalUser;
-  const seenTs = teamChatLastSeenTs ? new Date(teamChatLastSeenTs).getTime() : 0;
-  return teamChatRecentAll().filter(m =>
-    m.sender !== me &&
-    chatMsgInConvo(m, convo) &&
-    new Date(m.created_at).getTime() > seenTs
+  return teamChatRecent().filter(m =>
+    m.sender !== me && new Date(m.created_at).getTime() > seenTs
   ).length;
 }
 
@@ -18345,22 +17837,14 @@ create policy "team_chat_all" on team_chat for all using (true) with check (true
   toast(`Write works ✓ — “${me}” recorded as a reader. NOTE: your teammates must REFRESH their app (Cmd+Shift+R) for THEIR name to appear under your messages — the reader's device writes the receipt.`, 'info');
 }
 
-// Who counts as "the team" — the full internal roster (so you can start a DM with
-// anyone, even before they've spoken), unioned with anyone who has ever appeared
-// as a sender. Finance is excluded since they have no chat access. Me removed.
+// Who counts as "the team" for read receipts — everyone except me who could be
+// reading. We derive it from people who've ever appeared as a sender, so it grows
+// naturally without a hardcoded roster.
 function teamChatKnownMembers() {
   const set = new Set();
-  try {
-    (INTERNAL_USER_ACCOUNTS || []).forEach(u => {
-      if (u && u.username && (u.role === 'owner' || u.role === 'ops')) set.add(u.username);
-    });
-  } catch (e) {}
-  teamChatMessages.forEach(m => {
-    if (m.sender) set.add(m.sender);
-    if (m.recipient) set.add(m.recipient);
-  });
+  teamChatMessages.forEach(m => { if (m.sender) set.add(m.sender); });
   set.delete(currentInternalUser);
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
+  return Array.from(set);
 }
 
 // While a message hasn't round-tripped to the DB yet, show a small clock so it's
@@ -18378,12 +17862,8 @@ function renderTeamChatMessages() {
   if (!wrap) return;
   const recent = teamChatRecent();
   if (!recent.length) {
-    const convo = teamChatActiveConvo;
-    const emptyMsg = convo
-      ? `No messages with ${escapeHtml(convo)} in the last 48 hours.<br>Start the conversation 👋`
-      : `No messages in the last 48 hours.<br>Say hi to the team 👋`;
     wrap.innerHTML = `<div style="margin:auto;text-align:center;color:var(--text3);font-size:12px;padding:24px 12px;">
-      ${emptyMsg}<br>
+      No messages in the last 48 hours.<br>Say hi to the team 👋<br>
       <span style="font-size:11px;">Older messages live in <b>Chat History</b> in the sidebar.</span></div>`;
     renderTypingIndicator();
     return;
@@ -18418,40 +17898,7 @@ function renderTeamChatMessages() {
   wrap.scrollTop = wrap.scrollHeight;
 }
 
-// Renders the Team + DM tabs along the top of the chat panel.
-function renderChatConvoBar() {
-  const bar = document.getElementById('chat-convo-bar');
-  if (!bar) return;
-  const tabStyle = (active) => `flex-shrink:0;cursor:pointer;border:1px solid ${active ? '#3a7bd5' : 'var(--border2)'};
-    background:${active ? 'rgba(58,123,213,0.18)' : 'var(--bg2)'};color:${active ? '#7fb0f0' : 'var(--text2)'};
-    border-radius:999px;padding:4px 11px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:5px;position:relative;`;
-  const dot = (n) => n > 0
-    ? `<span style="min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;">${n > 9 ? '9+' : n}</span>`
-    : '';
-  let html = `<div onclick="switchChatConvo(null)" style="${tabStyle(teamChatActiveConvo === null)}" title="Group channel — everyone on the ops team">👥 Team ${dot(teamChatConvoUnread(null))}</div>`;
-  teamChatKnownMembers().forEach(name => {
-    const initials = name.slice(0, 2).toUpperCase();
-    html += `<div onclick="switchChatConvo('${name.replace(/'/g, "\\'")}')" style="${tabStyle(teamChatActiveConvo === name)}" title="Direct message ${escapeHtml(name)}">
-      <span style="width:18px;height:18px;border-radius:50%;background:var(--grad-accent);color:#fff;font-size:9px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;">${escapeHtml(initials)}</span>
-      ${escapeHtml(name)} ${dot(teamChatConvoUnread(name))}</div>`;
-  });
-  bar.innerHTML = html;
-}
-
-// Switch the active conversation (null = group, or a username for a 1:1 DM).
-function switchChatConvo(convo) {
-  teamChatActiveConvo = convo;
-  // Update the input placeholder + header subtitle to reflect the thread.
-  const input = document.getElementById('chat-input');
-  if (input) input.placeholder = convo ? `Message ${convo}…` : 'Message the team…';
-  const sub = document.getElementById('chat-header-sub');
-  if (sub) sub.textContent = convo ? `Direct message · ${convo}` : 'Ops team · last 48h shown';
-  renderChatConvoBar();
-  renderTeamChatMessages();
-  markChatSeen();
-  markChatReceipts({ markRead: true }).then(() => { renderTeamChatMessages(); renderChatConvoBar(); });
-  setTimeout(() => document.getElementById('chat-input')?.focus(), 30);
-}
+// Renders the "X is typing…" row at the bottom of the message list.
 function renderTypingIndicator() {
   const wrap = document.getElementById('chat-messages');
   if (!wrap) return;
@@ -18490,20 +17937,19 @@ async function sendTeamChat() {
   if (!chatAllowedForCurrentUser()) { toast('Chat is for the ops team.', 'error'); return; }
   if (!supabaseClient) { toast('No database connection', 'error'); return; }
   const sender = currentInternalUser || 'Unknown';
-  const recipient = teamChatActiveConvo || null; // null = group channel
   input.value = '';
   input.style.height = 'auto';
   stopTypingNow();
 
   // Optimistic echo so it feels instant.
-  const optimistic = { id: 'tmp-' + Date.now(), sender, body, recipient, created_at: new Date().toISOString() };
+  const optimistic = { id: 'tmp-' + Date.now(), sender, body, created_at: new Date().toISOString() };
   teamChatMessages.push(optimistic);
   renderTeamChatMessages();
 
   try {
     const { data, error } = await supabaseClient
       .from('team_chat')
-      .insert(recipient ? { sender, body, recipient } : { sender, body })
+      .insert({ sender, body })
       .select();
     if (error) {
       // Roll back optimistic message and surface the real reason (no silent fallback).
@@ -18512,9 +17958,6 @@ async function sendTeamChat() {
       if (/relation .*does not exist/i.test(error.message || '')) {
         toast('Chat table missing — run the setup SQL (see console).', 'error');
         console.log(TEAM_CHAT_SCHEMA_SQL);
-      } else if (/column .*recipient.* does not exist|'recipient' column|recipient.*schema cache/i.test(error.message || '')) {
-        toast('Direct messages need the new `recipient` column. Run this in Supabase, then refresh:\n\nalter table team_chat add column if not exists recipient text;', 'error');
-        console.log('[Chat][DM] Missing column. Run:\nalter table team_chat add column if not exists recipient text;');
       } else if (/row-level security|permission|policy/i.test(error.message || '')) {
         toast('Chat insert blocked by RLS — add a permissive policy (see console).', 'error');
         console.log(TEAM_CHAT_SCHEMA_SQL);
@@ -18542,7 +17985,6 @@ function teamChatShow() {
   if (!panel) return;
   teamChatOpen = true;
   panel.style.display = 'flex';
-  renderChatConvoBar();
   renderTeamChatMessages();
   markChatSeen();
   markChatReceipts({ markRead: true }).then(() => renderTeamChatMessages());
@@ -18629,35 +18071,25 @@ async function renderChatHistoryPage() {
   const countEl = document.getElementById('chat-history-count');
   if (!body) return;
   await loadTeamChat();
-  const me = currentInternalUser;
-  // DM privacy: only show the group channel + DMs that involve me. Other people's
-  // private 1:1 threads must never appear in my history view.
-  const visible = teamChatMessages.filter(m => {
-    const rcpt = m.recipient || null;
-    if (!rcpt) return true;                 // group channel
-    return m.sender === me || rcpt === me;  // a DM I'm part of
-  });
-  if (countEl) countEl.textContent = `${visible.length} message${visible.length === 1 ? '' : 's'}`;
-  if (!visible.length) {
+  const msgs = teamChatMessages.slice().reverse(); // newest first
+  if (countEl) countEl.textContent = `${teamChatMessages.length} message${teamChatMessages.length === 1 ? '' : 's'}`;
+  if (!msgs.length) {
     body.innerHTML = `<div class="empty-state"><div class="empty-icon">💬</div><p>No chat history yet.</p></div>`;
     return;
   }
+  const me = currentInternalUser;
   let html = '<div style="padding:8px 0;">';
   let lastDay = '';
   // Render oldest-first within each day for readability, but days newest-first.
-  const chrono = visible.slice();
+  const chrono = teamChatMessages.slice();
   let buf = [];
   let curDay = '';
   const flush = () => {
     if (!buf.length) return;
     html += `<div class="chat-hist-day">${escapeHtml(curDay)}</div>`;
     buf.forEach(m => {
-      const rcpt = m.recipient || null;
-      const dmTag = rcpt
-        ? `<span class="badge" style="background:rgba(58,123,213,0.15);color:#7fb0f0;margin-left:6px;">DM → ${escapeHtml(rcpt)}</span>`
-        : '';
       html += `<div class="chat-hist-row">
-        <span class="chat-hist-sender">${escapeHtml(m.sender || '?')}${dmTag}</span>
+        <span class="chat-hist-sender">${escapeHtml(m.sender || '?')}</span>
         <span class="chat-hist-body">${escapeHtml(m.body || '')}</span>
         <span class="chat-hist-time">${new Date(m.created_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
       </div>`;
@@ -18842,15 +18274,10 @@ function renderChatSoundControls() {
 // Called after each poll. `me` is excluded so I never ding on my own messages.
 function maybePlayChatSound() {
   const me = currentInternalUser;
-  // Find recent messages addressed to me (group channel OR a DM to me) from others
-  // that we have NOT already dinged for, by id. Using teamChatRecentAll (not the
-  // convo-scoped list) so a DM in another thread still notifies me.
-  const fresh = teamChatRecentAll().filter(m => {
-    if (m.sender === me || m.id == null || teamChatHeardIds.has(String(m.id))) return false;
-    const rcpt = m.recipient || null;
-    if (rcpt && rcpt !== me) return false;        // a DM not meant for me
-    return true;
-  });
+  // Find recent messages from others that we have NOT already dinged for, by id.
+  const fresh = teamChatRecent().filter(m =>
+    m.sender !== me && m.id != null && !teamChatHeardIds.has(String(m.id))
+  );
   // Mark them all heard regardless of mute, so unmuting later doesn't replay them.
   fresh.forEach(m => teamChatHeardIds.add(String(m.id)));
   // Keep the legacy timestamp marker in sync (used elsewhere) + persist.
@@ -18887,7 +18314,7 @@ function startTeamChatPolling() {
     // chat is actually open & visible.
     await markChatReceipts({ markRead: true });
     updateChatUnreadBadge();
-    if (teamChatOpen) { renderTeamChatMessages(); renderChatConvoBar(); }
+    if (teamChatOpen) renderTeamChatMessages();
     // Keep the history page live if it's the one being viewed.
     if (document.getElementById('page-chathistory')?.style.display === 'block') {
       try { renderChatHistoryPage(); } catch (e) {}
@@ -19184,7 +18611,7 @@ async function initTeamChat() {
       <span style="font-size:22px;">💬</span>
       <div>
         <div style="font-weight:700;color:#fff;font-size:14px;">Team Chat</div>
-        <div style="font-size:10.5px;color:rgba(255,255,255,0.75);" id="chat-header-sub">Ops team · last 48h shown</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.75);">Ops team · last 48h shown</div>
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:6px;">
@@ -19202,9 +18629,6 @@ async function initTeamChat() {
         font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
     </div>
   </div>
-  <!-- Conversation switcher: Team channel + per-person DMs -->
-  <div id="chat-convo-bar" style="display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);
-    background:var(--bg3);overflow-x:auto;flex-shrink:0;white-space:nowrap;"></div>
   <!-- Messages -->
   <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;
     flex-direction:column;gap:7px;min-height:0;"></div>
