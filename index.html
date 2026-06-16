@@ -5545,6 +5545,7 @@ async function loadShifts() {
   await loadRecentCancellations();
   await loadStandbyList();
   await loadAvailableSlots();
+  await buildPortalSyncIndex();
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
@@ -5947,6 +5948,93 @@ function renderCompletedTasksPage() {
 }
 
 // ── Render table ─────────────────────────────────────────────
+// ── Portal-sync match index ─────────────────────────────────
+// A shift is considered "synced" if it matches a booking that came from the
+// portal (the app). We build a Set of normalized keys from portal_bookings +
+// portal_shifts + portal_users (same resolution the import loader uses) and
+// check each live shift against it. No DB column needed — this reflects the
+// real match state and updates whenever the portal data is re-synced.
+let portalSyncIndex = new Set();
+let portalSyncIndexLoaded = false;
+
+function portalMatchKey(outlet, worker, date, start) {
+  const o = String(outlet || '').trim().toLowerCase();
+  const w = String(worker || '').trim().toLowerCase();
+  const d = String(date || '').slice(0, 10);
+  const t = String(start || '').slice(0, 5);
+  return `${o}|${w}|${d}|${t}`;
+}
+
+async function buildPortalSyncIndex() {
+  if (!supabaseClient) return;
+  try {
+    const PAGE = 1000;
+    async function fetchAllIdx(table, cols) {
+      let from = 0; const out = [];
+      for (let i = 0; i < 50; i++) {
+        const { data, error } = await supabaseClient
+          .from(table).select(cols).order('id', { ascending: true }).range(from, from + PAGE - 1);
+        if (error) throw error;
+        if (!data || !data.length) break;
+        out.push(...data);
+        if (data.length < PAGE) break;
+        from += PAGE;
+      }
+      return out;
+    }
+    const [bookings, shifts, users] = await Promise.all([
+      fetchAllIdx('portal_bookings', 'shift_id, user_id, booking_date'),
+      fetchAllIdx('portal_shifts', 'id, outlet_id, shift_date, start_time'),
+      fetchAllIdx('portal_users', 'id, full_name, business_name'),
+    ]);
+    const shiftById = new Map(shifts.map(s => [String(s.id), s]));
+    const userById  = new Map(users.map(u => [String(u.id), u]));
+    const outletNameFor = (oid) => {
+      if (oid == null) return '';
+      const u = userById.get(String(oid));
+      if (!u) return '';
+      return (u.business_name && u.business_name.trim()) ? u.business_name.trim() : (u.full_name || '').trim();
+    };
+    const idx = new Set();
+    for (const b of bookings) {
+      const sh = b.shift_id != null ? shiftById.get(String(b.shift_id)) : null;
+      const date = (sh?.shift_date || b.booking_date || '').slice(0, 10);
+      if (!date) continue;
+      const outlet = sh ? outletNameFor(sh.outlet_id) : '';
+      const worker = (userById.get(String(b.user_id))?.full_name || '').trim();
+      const start = importParseTime(sh?.start_time) || '';
+      // Index by full key (outlet+worker+date+time) and a looser key (outlet+date+time)
+      // so a synced shift still flags even if the worker name differs slightly.
+      idx.add(portalMatchKey(outlet, worker, date, start));
+      idx.add(portalMatchKey(outlet, '', date, start));
+    }
+    portalSyncIndex = idx;
+    portalSyncIndexLoaded = true;
+  } catch (e) {
+    console.warn('buildPortalSyncIndex failed (sync dots will be hidden):', e);
+    portalSyncIndex = new Set();
+    portalSyncIndexLoaded = false;
+  }
+}
+
+function isShiftPortalSynced(s) {
+  if (!portalSyncIndexLoaded || !portalSyncIndex.size) return false;
+  const worker = String(s.worker_name || '').trim();
+  const full = portalMatchKey(s.outlet, worker, s.shift_date, s.scheduled_start);
+  if (portalSyncIndex.has(full)) return true;
+  const loose = portalMatchKey(s.outlet, '', s.shift_date, s.scheduled_start);
+  return portalSyncIndex.has(loose);
+}
+
+// Small compact dot: green ⬇ when matched to an app/portal booking, orange ⚠ when not.
+function syncDot(s) {
+  if (!portalSyncIndexLoaded) return ''; // index not ready — show nothing rather than mislead
+  const synced = isShiftPortalSynced(s);
+  return synced
+    ? `<span title="Synced — matched to an app booking" style="display:inline-flex;align-items:center;font-size:11px;color:var(--green);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">⬇</span>`
+    : `<span title="Not synced — no matching app booking" style="display:inline-flex;align-items:center;font-size:11px;color:var(--amber);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">⚠</span>`;
+}
+
 function statusBadge(s) {
   if (isWorkerSuspended(s.worker_name)) return '<span class="badge badge-red">🚫 Suspended</span>';
   if (s.cancelled && s.mc_url) return '<span class="badge badge-amber">MC waived</span>';
@@ -6300,7 +6388,7 @@ function renderTable() {
         ${pendingOpAction1}
         <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
       return `<tr class="${rowClass}" id="row-${s.id}">
-        <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
+        <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
         <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
         <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
         <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -6391,7 +6479,7 @@ function renderTable() {
           ${pendingOpAction2}
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
+          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -6492,7 +6580,7 @@ function renderTable() {
             <tr>
               <td style="padding:8px 14px;vertical-align:middle;min-width:160px;">
                 <div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div>
-                <div class="sub-text">${s.outlet}</div>
+                <div class="sub-text">${syncDot(s)}${s.outlet}</div>
                 ${srTag}${reminderPanelHtml(s)}
                 <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button>
               </td>
@@ -6598,7 +6686,7 @@ function renderTable() {
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
         return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
+          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -6660,7 +6748,7 @@ function renderWeeklyGrid() {
       const toggleFn = `event.stopPropagation();if(!event.target.closest('button,input,a')){if(expandedRows.has('${s.id}'){expandedRows.delete('${s.id}')}else{expandedRows.add('${s.id}')}renderTable();}`;
       if (!isExp) {
         return `<div class="week-shift${cls}${expandedCls}" onclick="if(!event.target.closest('button,input,a')){expandedRows.has('${s.id}')?expandedRows.delete('${s.id}'):expandedRows.add('${s.id}');renderTable();}" draggable="false">
-          <div class="week-meta" style="color:var(--text);font-weight:600;font-size:12px;">${escapeHtml(s.outlet||'—')}</div>
+          <div class="week-meta" style="color:var(--text);font-weight:600;font-size:12px;">${syncDot(s)}${escapeHtml(s.outlet||'—')}</div>
           <div class="week-meta" style="font-size:11px;">${isAvailable?'<span class="available-name">Available</span>':`<strong style="font-size:12px;">${escapeHtml(workerName)}</strong>`}</div>
           <div class="week-time" style="font-size:11px;">${scheduledRange(s)}</div>
           <div class="week-meta" style="font-size:11px;color:var(--text3);">${escapeHtml(s.role||'—')}</div>
@@ -6673,7 +6761,7 @@ function renderWeeklyGrid() {
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
             <span style="font-size:10px;color:var(--accent);font-family:var(--mono);font-weight:700;">▲ COLLAPSE</span>
           </div>
-          <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
+          <div class="week-meta" style="color:var(--text);font-weight:600;">${syncDot(s)}${s.outlet || '—'}</div>
           <div class="week-meta">${nameHtml}</div>
           <div class="week-time">${scheduledRange(s)}</div>
           <div class="week-meta">${s.role || '—'}${hours ? ' · '+hours+'h' : ''}</div>
@@ -6685,7 +6773,7 @@ function renderWeeklyGrid() {
     }
     // ── Normal (full) week card ──
     return `<div class="week-shift${cls}" draggable="${!s.cancelled}" ondragstart="handleShiftDragStart(event, '${s.id}')" ondragend="handleShiftDragEnd(event)">
-      <div class="week-meta" style="color:var(--text);font-weight:600;">${s.outlet || '—'}</div>
+      <div class="week-meta" style="color:var(--text);font-weight:600;">${syncDot(s)}${s.outlet || '—'}</div>
       <div class="week-meta">${nameHtml}</div>
       <div class="week-time">${scheduledRange(s)}</div>
       <div class="week-meta">${s.role || '—'}${hours ? ' · '+hours+'h' : ''}</div>
