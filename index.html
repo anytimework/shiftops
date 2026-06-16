@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v51 — Console-confirmed the final mismatch: the portal stores the worker as "Hui Ling Chong" (full_name) but her ops-panel shift's worker_name is "Hui Ling". The v50 wd|name|date key was therefore "wd|hui ling chong|2026-06-16" while the attendance lookup built "wd|hui ling|2026-06-16" — exact-normalised keys can't bridge a subset/superset name. FIX: buildPortalSyncIndex now also stores a per-date list of portal worker TOKEN-SETS (portalWorkerTokensByDate), and isShiftPortalSynced falls back to a token-subset test — a panel shift counts as synced if its worker's name tokens are a subset (or superset) of any portal worker's tokens that date ("hui ling" ⊆ "hui ling chong"). Every token of the shorter name must be present, so unrelated people don't match; it's the same loosening the import reconciler already does, now applied to the attendance sync icon. Flips Hui Ling 16 Jun ⚠️→🔄 with no schema change. Added importNameTokens()/tokensSubset() helpers. (sync_source column still absent in this DB per console — fully optional; everything works off the live portal feed.) -->
+<!-- Build patch: v50 — Pinpointed via console: Hui Ling's 16 Jun panel shift has scheduled_start "08:00:00" (with seconds), and the sync_source column does NOT exist (markShiftSyncSource fails: "Could not find the 'sync_source' column"). So durable stamping is impossible AND the v49 timed worker key (w|name|date|HH:MM) could still miss when the portal shift's start_time is stored/parsed differently or is blank. FIX: buildPortalSyncIndex now also adds a time-INDEPENDENT key wd|workerNorm|date, and isShiftPortalSynced falls back to it — so a worker with ANY portal booking on that date reads as synced regardless of time-format ("08:00:00" vs "08:00") or a missing portal start_time. This makes Hui Ling's attendance icon go ⚠️→🔄 with no schema change. (Safe because a worker almost never has two distinct bookings on the same date.) Strongly recommended for durable, teammate-visible, cross-session origin tags: run once in Supabase SQL — alter table shifts add column sync_source text; — after which the import explicitly stamps matched shifts and the icon no longer depends on feed-matching at all. -->
+<!-- Build patch: v49 — The real reason Hui Ling (and others) stayed on the amber ⚠️ and "vanished" on outlet-select: the portal-sync index keyed on outlet|worker|date|time, but the portal's outlet name (from business_name) differs from the ops-panel outlet string whenever the import had to MAP the outlet (e.g. "Baggie's" → "Baggies' Butcher & Deli"). So isShiftPortalSynced() missed, the attendance row showed ⚠️, and on the import side the no-op match was treated as "not synced". FIX: buildPortalSyncIndex now ALSO indexes an outlet-independent key (worker-normalised-name|date|start), and isShiftPortalSynced() falls back to it. This flips Hui Ling's attendance icon ⚠️→🔄 WITHOUT needing the sync_source column at all (works purely off the live portal feed). On the import side it means such bookings are correctly recognised as already-synced. (2) onImportOutletSelect / onImportWorkerSelect are now async + await re-tagging, and onImportOutletSelect calls a new shared autoStampSyncRows() so mapping an outlet that reveals a "Mark as synced" row stamps it immediately (when the column exists) instead of leaving it dangling, and the toast now explains where the row went ("already in the ops panel, moved to the section below") rather than it silently disappearing. (3) Extracted autoStampSyncRows() and reused it in loadPortalBookings (was duplicated inline). NOTE on sync_source: if that column was never added to the shifts table, durable stamping is impossible, but the v49 portal-feed worker+date+time fallback means the green 🔄 still shows for genuinely-synced bookings; only the durable cross-session/teammate origin tag needs the column (alter table shifts add column sync_source text). No required schema change. -->
+<!-- Build patch: v48 — Fixed the v47 "Mark as synced" rows being unsaveable and the attendance ⚠️ not clearing. THREE fixes: (1) Confirm could not save them because newly-selectable rows (mapped, or resolved to "Mark as synced") weren't ticked by default — applyImportRows now ticks any selectable row whose _selected is still undefined (explicit user unticks preserved), so they're included on Confirm and the button enables. (2) Stamping wasn't counted as a write: wroteCount = saved + merged ignored the no-op sync stamp, so the post-confirm loadShifts()/re-tag/re-render block was SKIPPED when the only action was stamping — the DB got stamped but the UI never refreshed. Added a `stamped` counter, folded it into wroteCount, messaging ("marked N synced"), and the refresh trigger. (3) loadPortalBookings now AUTO-stamps on load: a portal booking IS the app booking, so any that match an unlinked panel shift (no sync_source / not in live feed) are stamped sync_source='merged' silently and dropped into the "Already in the ops panel" section as Merged — no manual Mark-as-synced/Confirm needed, no flooding of the actionable list, and the attendance icon flips ⚠️→🔄. Manual outlet/worker mapping afterward still surfaces a visible, ticked "Mark as synced" row (so it no longer vanishes on map, addressing the original complaint) that stamps on Confirm. ALSO: stamp-only state is gated on _syncSourceColumnMissing — if the sync_source column was never added (alter table shifts add column sync_source text), stamping is impossible so no-op matches fall back to hiding as already-imported (pre-v47 behaviour) instead of showing a Mark-as-synced action that can't complete. No schema change (sync_source still optional). -->
 <!-- Build patch: v47 — Fixed two linked Import Bookings problems reported on already-in-panel bookings (e.g. Hui Ling). (1) Mapping a suggested outlet/worker made the row silently vanish into "Already in the ops panel" before the user could Confirm. (2) Such a booking still showed the amber ⚠️ "ops-only" sync icon on its attendance row afterwards, because matching it during import only DETECTED the panel shift — it never stamped sync_source, and the live portal-feed key often misses when the outlet name had to be mapped (panel string ≠ portal string). Root cause: a no-op match (same clock times) was unconditionally hidden as "already imported", even when the matched panel shift wasn't actually linked to the app. Now: tagExistingShifts only hides a no-op match when the panel shift is genuinely synced (sync_source set, or present in the live portal feed) via new importPanelShiftIsSynced(); otherwise the row STAYS visible as a ticked "🔗 Mark as synced" action (new _syncStampOnly state + status branch + action-bar note). Confirming a Mark-as-synced row stamps the panel shift sync_source='merged' (no duplicate, no data change) so its attendance row flips to the green 🔄. The confirm-time no-op skip does the same stamping. tagExistingShifts and the confirm merge-target query now select * so sync_source flows through. Already-genuinely-synced bookings still drop straight into the bottom section as before. No schema change (sync_source column from v45 still optional; stamping is a no-op if absent). -->
 <!-- Build patch: v46 — Already-in-panel import rows moved out of the main list into their own collapsible "Already in the ops panel" section at the bottom of the import preview (collapsed by default). Synced/merged/created bookings no longer interleave with actionable rows and are never re-offered when you re-click "Load synced portal bookings" — the section just shows them with a Synced / Merged / Created label and a count breakdown so you can audit what was skipped. Confirm now stamps each written row with _importedThisSession ('created' or 'merged') so the section can label how it entered the panel this session; pre-existing matches read as Synced. Removed the old inline "Show/Hide already-imported" toggle (replaced by the section's expand/collapse header). ALSO FIXED: a same booking kept resurfacing as "Merge into existing" (e.g. Hui Ling 15 Jun) because the panel stores clock_in/out as HH:MM:SS while imports parse to HH:MM, so the "is there newer clock data?" check compared "07:54:00" !== "07:54" and always saw a difference. Added importHHMM() to normalise both sides to HH:MM in all three comparison sites (tagExistingShifts exact + same-worker/outlet fallback, and the confirm-time skip), and the confirm-time no-op skip now stamps the row as already-imported so it drops into the bottom section. No schema change. -->
 <!-- Build patch: v45 — Origin-aware attendance icons + sturdier import de-dup. (A) syncDot now reflects how a shift entered the panel: 🔄 (green, "synced") when it matches the live portal feed OR an import was merged into it (sync_source='merged'); 📱 (blue) when it was created from an app booking via Import Bookings with no prior panel shift to reconcile (sync_source='import'); ⚠️ (amber) only for ops-panel-only shifts with no app booking behind them. This requires a new nullable column — run:  alter table shifts add column sync_source text;  The code degrades gracefully if it's absent (falls back to the portal-feed check) and stops retrying after the first failure. confirmImportBookings stamps sync_source on every insert ('import') and merge ('merged'). loadShifts already selects * so the column flows through. (B) tagExistingShifts no longer relies solely on time-overlap: if there's no overlapping match it now also treats a same worker + same outlet + same date panel shift as the existing booking, so a reconciled shift won't reappear as "new" after exit + re-load even if the stored scheduled times drifted from a prior merge. No other behaviour changed. -->
@@ -5997,6 +6001,22 @@ function renderCompletedTasksPage() {
 // real match state and updates whenever the portal data is re-synced.
 let portalSyncIndex = new Set();
 let portalSyncIndexLoaded = false;
+// Per-date list of portal worker token-sets, e.g. "2026-06-16" -> [Set{hui,ling,chong}, ...].
+// Lets the attendance sync check match a panel worker whose stored name is a
+// SUBSET of the portal name (e.g. panel "Hui Ling" vs portal "Hui Ling Chong"),
+// which exact-normalised keys can't bridge. Built in buildPortalSyncIndex.
+let portalWorkerTokensByDate = new Map();
+
+// Split a name into normalised word tokens (lowercase, punctuation-stripped).
+function importNameTokens(name) {
+  return importNormName(name).split(' ').filter(Boolean);
+}
+// True when every token of `a` appears in `b` (a ⊆ b), with a non-empty a.
+function tokensSubset(a, b) {
+  if (!a.length) return false;
+  const bset = b instanceof Set ? b : new Set(b);
+  return a.every(t => bset.has(t));
+}
 
 function portalMatchKey(outlet, worker, date, start) {
   const o = String(outlet || '').trim().toLowerCase();
@@ -6037,6 +6057,7 @@ async function buildPortalSyncIndex() {
       return (u.business_name && u.business_name.trim()) ? u.business_name.trim() : (u.full_name || '').trim();
     };
     const idx = new Set();
+    const tokensByDate = new Map();
     for (const b of bookings) {
       const sh = b.shift_id != null ? shiftById.get(String(b.shift_id)) : null;
       const date = (sh?.shift_date || b.booking_date || '').slice(0, 10);
@@ -6048,12 +6069,38 @@ async function buildPortalSyncIndex() {
       // so a synced shift still flags even if the worker name differs slightly.
       idx.add(portalMatchKey(outlet, worker, date, start));
       idx.add(portalMatchKey(outlet, '', date, start));
+      // ALSO index by worker+date+time with NO outlet. The portal's outlet name
+      // (from business_name) often differs from the ops-panel outlet string —
+      // e.g. when the import had to map "Baggie's" → "Baggies' Butcher & Deli" —
+      // which made the outlet-keyed lookups miss and left the attendance row on
+      // the amber ⚠️ even though the booking really is in the app. Keying on the
+      // worker's normalised name + date + start is robust to that mismatch.
+      const wNormKey = importNormName(worker);
+      if (wNormKey) {
+        idx.add(`w|${wNormKey}|${date}|${start}`);
+        // Final, time-independent fallback: worker + date with NO time. The
+        // portal shift's start_time can be stored differently from the panel's
+        // scheduled_start ("08:00:00" vs "08:00"), or be blank when the booking
+        // had no linked shift row — either of which makes the timed key miss. A
+        // worker almost never has two distinct bookings on the same date, so
+        // worker+date is a safe "this person is in the app that day" signal.
+        idx.add(`wd|${wNormKey}|${date}`);
+        // Token-set per date so a panel name that's a SUBSET of the portal name
+        // still matches — e.g. panel "Hui Ling" vs portal "Hui Ling Chong".
+        const toks = importNameTokens(worker);
+        if (toks.length) {
+          if (!tokensByDate.has(date)) tokensByDate.set(date, []);
+          tokensByDate.get(date).push(new Set(toks));
+        }
+      }
     }
     portalSyncIndex = idx;
+    portalWorkerTokensByDate = tokensByDate;
     portalSyncIndexLoaded = true;
   } catch (e) {
     console.warn('buildPortalSyncIndex failed (sync dots will be hidden):', e);
     portalSyncIndex = new Set();
+    portalWorkerTokensByDate = new Map();
     portalSyncIndexLoaded = false;
   }
 }
@@ -6064,7 +6111,30 @@ function isShiftPortalSynced(s) {
   const full = portalMatchKey(s.outlet, worker, s.shift_date, s.scheduled_start);
   if (portalSyncIndex.has(full)) return true;
   const loose = portalMatchKey(s.outlet, '', s.shift_date, s.scheduled_start);
-  return portalSyncIndex.has(loose);
+  if (portalSyncIndex.has(loose)) return true;
+  // Outlet-independent fallback: same worker + date + start time. Robust to the
+  // portal/ops-panel outlet names differing (the common cause of a real synced
+  // booking still showing the amber ⚠️).
+  const wNormKey = importNormName(worker);
+  const t = String(s.scheduled_start || '').slice(0, 5);
+  const d = String(s.shift_date || '').slice(0, 10);
+  if (wNormKey && portalSyncIndex.has(`w|${wNormKey}|${d}|${t}`)) return true;
+  // Time-independent fallback: the same worker has any portal booking that day.
+  // Handles "08:00:00" vs "08:00" and blank portal start times.
+  if (wNormKey && portalSyncIndex.has(`wd|${wNormKey}|${d}`)) return true;
+  // Token-subset fallback: the panel name is a subset (or superset) of a portal
+  // worker's name on that date — e.g. panel "Hui Ling" vs portal "Hui Ling
+  // Chong". Requires every token of the shorter name to be present in the other,
+  // so it won't match unrelated people. This is the same loosening the import
+  // reconciler does; the attendance index needs it too.
+  const panelToks = importNameTokens(worker);
+  if (panelToks.length) {
+    const dayList = portalWorkerTokensByDate.get(d);
+    if (dayList && dayList.some(portalSet =>
+      tokensSubset(panelToks, portalSet) || tokensSubset([...portalSet], new Set(panelToks))
+    )) return true;
+  }
+  return false;
 }
 
 // Durably tag a shift with how it entered the ops panel, so the attendance-row
@@ -11893,8 +11963,10 @@ async function tagExistingShifts(rows) {
         const addsClockOut = importCout && importCout !== importHHMM(ex.clock_out);
         const nothingNew = !addsClockIn && !addsClockOut;
         // Hide as "already imported" only when the panel shift is genuinely
-        // synced. If it isn't, keep the row visible so confirming will stamp it.
-        if (nothingNew && importPanelShiftIsSynced(ex)) {
+        // synced. If it isn't, keep the row visible so confirming will stamp it —
+        // but only if we CAN stamp (sync_source column present). If the column is
+        // missing, stamping is impossible, so fall back to hiding the no-op match.
+        if (nothingNew && (importPanelShiftIsSynced(ex) || _syncSourceColumnMissing)) {
           r._alreadyImported = true;
         } else if (nothingNew) {
           r._alreadyImported = false;
@@ -11924,11 +11996,11 @@ async function tagExistingShifts(rows) {
       const addsClockOut = importCout && importCout !== panelCout;
       const nothingNew = !addsClockIn && !addsClockOut;
       // Hide as "already imported" only when the panel shift is genuinely synced
-      // (durably stamped, or present in the live portal feed). If it's nothing-new
-      // but the panel shift isn't linked to the app yet, keep the row visible as a
-      // one-click "mark synced" merge so confirming stamps sync_source — otherwise
-      // the attendance row keeps showing the amber ⚠️ "ops-only" icon forever.
-      if (nothingNew && importPanelShiftIsSynced(exact)) {
+      // (durably stamped, or present in the live portal feed), OR when we can't
+      // stamp anyway because the sync_source column is missing. Otherwise it's a
+      // no-op match against an unlinked panel shift — keep it visible as a
+      // one-click "Mark as synced" merge so confirming stamps sync_source.
+      if (nothingNew && (importPanelShiftIsSynced(exact) || _syncSourceColumnMissing)) {
         r._alreadyImported = true;
       } else if (nothingNew) {
         r._alreadyImported = false;
@@ -13058,6 +13130,12 @@ async function loadPortalBookings() {
 
     await applyImportRows(rows);
 
+    // Portal bookings ARE the app bookings, so any that match a panel shift which
+    // isn't linked yet (no sync_source / not in the live feed) get stamped synced
+    // automatically — no manual step needed. They drop into the bottom section and
+    // their attendance-row icon flips ⚠️→🔄.
+    await autoStampSyncRows();
+
     const needMap = rows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
     const seenCount = rows.filter(r => r._alreadyImported).length;
     const newCount  = rows.length - seenCount;
@@ -13138,6 +13216,15 @@ async function applyImportRows(rows) {
   } catch (e) {
     console.warn('applyImportRows tagging failed:', e);
   }
+  // Tick every selectable row that the user hasn't explicitly touched yet. A row
+  // can BECOME selectable after this pass (e.g. mapping an outlet, or a no-op
+  // match resolving to a "Mark as synced" row), and it must be ticked by default
+  // so it's included on Confirm — otherwise mapped/stamp-only rows silently sit
+  // unselected and can't be saved. Explicit user unticks (_selected === false)
+  // are preserved.
+  importRows.forEach(r => {
+    if (importRowIsSelectable(r) && r._selected === undefined) r._selected = true;
+  });
   renderImportPreview();
 }
 
@@ -13656,7 +13743,7 @@ function importFilterOutlets(query, listId) {
 // Map an existing worker. The row you click is always updated. Other rows that
 // share the same raw name are only updated if they're STILL UNMAPPED — so
 // editing one already-mapped row never rewrites unrelated rows.
-function onImportWorkerSelect(idx, val) {
+async function onImportWorkerSelect(idx, val) {
   if (!val) return;
   const target = importRows[idx];
   if (!target) return;
@@ -13678,12 +13765,16 @@ function onImportWorkerSelect(idx, val) {
       r._workerAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
-  applyImportRows(importRows);
-  toast(wasUnmapped ? `Mapped "${rawName}" → "${val}"` : `Changed worker → "${val}"`);
+  await applyImportRows(importRows);
+  if (target._alreadyImported) {
+    toast(`Mapped "${rawName}" → "${val}" — this booking is already in the ops panel, moved to the section below.`, 'info');
+  } else {
+    toast(wasUnmapped ? `Mapped "${rawName}" → "${val}"` : `Changed worker → "${val}"`);
+  }
 }
 
 // Map an existing outlet. Same single-row-safe rule as the worker handler.
-function onImportOutletSelect(idx, val) {
+async function onImportOutletSelect(idx, val) {
   if (!val) return;
   const target = importRows[idx];
   if (!target) return;
@@ -13701,8 +13792,52 @@ function onImportOutletSelect(idx, val) {
       r._outletAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
-  applyImportRows(importRows);
-  toast(wasUnmapped ? `Mapped "${rawName}" → "${val}"` : `Changed outlet → "${val}"`);
+  await applyImportRows(importRows);
+
+  // If mapping revealed that any of these rows are no-op matches against an
+  // unlinked panel shift ("Mark as synced"), stamp them synced now so they're
+  // actually linked to the app (attendance row → 🔄) and drop into the section
+  // below cleanly — instead of just disappearing with nothing happening.
+  await autoStampSyncRows(r => r.outlet === val);
+
+  if (target._alreadyImported) {
+    const reallySynced = importPanelShiftIsSynced(target._existingShift) || target._importedThisSession === 'merged';
+    toast(reallySynced
+      ? `Mapped "${rawName}" → "${val}" — already in the ops panel & synced, moved to the section below.`
+      : `Mapped "${rawName}" → "${val}" — already in the ops panel, moved to the section below.`,
+      'info');
+  } else {
+    toast(wasUnmapped ? `Mapped "${rawName}" → "${val}"` : `Changed outlet → "${val}"`);
+  }
+}
+
+// Stamp any preview rows that are no-op matches against an unlinked panel shift
+// (_syncStampOnly) as synced, refresh panel data + re-tag so they move into the
+// "Already in the ops panel" section and their attendance icon flips ⚠️→🔄.
+// `filterFn` optionally restricts which rows to act on (e.g. the just-mapped one).
+async function autoStampSyncRows(filterFn) {
+  const toStamp = importRows.filter(r =>
+    r._syncStampOnly && r._existingShift && r._existingShift.id &&
+    (typeof filterFn !== 'function' || filterFn(r))
+  );
+  if (!toStamp.length) return 0;
+  let ok = 0;
+  for (const r of toStamp) {
+    try {
+      await markShiftSyncSource(r._existingShift.id, 'merged');
+      r._importedShiftId = r._existingShift.id;
+      r._importedThisSession = 'merged';
+      r._alreadyImported = true;
+      r._syncStampOnly = false;
+      ok++;
+    } catch (e) { /* non-fatal */ }
+  }
+  if (ok) {
+    try { await loadShifts(); } catch (e) {}
+    try { await tagExistingShifts(importRows); } catch (e) {}
+    renderImportPreview();
+  }
+  return ok;
 }
 
 // Open new-worker modal, pre-filled but editable
@@ -13864,7 +13999,7 @@ async function confirmImportBookings() {
 
 async function _confirmImportBookingsInner() {
 
-  let saved = 0, merged = 0, skipped = 0;
+  let saved = 0, merged = 0, skipped = 0, stamped = 0;
 
   for (const r of importRows) {
     // Always skip unmapped rows — user must explicitly map or add before confirming
@@ -13997,8 +14132,10 @@ async function _confirmImportBookingsInner() {
         if (!importPanelShiftIsSynced(mergeTarget)) {
           await markShiftSyncSource(mergeTarget.id, 'merged');
           r._importedThisSession = 'merged';
+          stamped++;
+        } else {
+          skipped++;
         }
-        skipped++;
         r._importedShiftId = mergeTarget.id;
         r._alreadyImported = true;
         r._syncStampOnly = false;
@@ -14111,10 +14248,11 @@ async function _confirmImportBookingsInner() {
   await loadWorkers();
   await loadOutlets();
 
-  const wroteCount = saved + merged;
+  const wroteCount = saved + merged + stamped;
   let msg = [];
   if (saved)  msg.push(`saved ${saved} new`);
   if (merged) msg.push(`merged ${merged}`);
+  if (stamped) msg.push(`marked ${stamped} synced`);
   if (!msg.length) msg.push('no changes');
   let resultMsg = msg.join(', ');
   if (skipped) resultMsg += ` (${skipped} skipped)`;
@@ -14123,14 +14261,13 @@ async function _confirmImportBookingsInner() {
   if (wroteCount > 0) {
     logActivity(
       'Import bookings',
-      `Imported ${saved} new + merged ${merged} existing shift${(saved+merged) !== 1 ? 's' : ''}${skipped ? ` (${skipped} skipped — unmapped, already-synced or clash)` : ''}`,
+      `Imported ${saved} new + merged ${merged} existing${stamped ? ` + marked ${stamped} synced` : ''} shift${(saved+merged+stamped) !== 1 ? 's' : ''}${skipped ? ` (${skipped} skipped — unmapped, already-synced or clash)` : ''}`,
       'import', ''
     );
     // Re-tag the remaining preview rows against the now-updated panel so saved/
-    // merged rows flip to "already imported" and disappear from the unseen view.
+    // merged/stamped rows flip to "already imported" and disappear from the
+    // unseen view, and so the attendance sync icons refresh.
     await loadShifts();
-    // Re-tag everything and re-render; rows now in the panel become
-    // _alreadyImported and are hidden by default, leaving only what's unseen.
     await tagExistingShifts(importRows);
     renderImportPreview();
 
