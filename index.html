@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v54 — Four fixes. (1) IGNORE BOOKINGS: new durable team-synced "import_ignored" ledger (app_settings key='import_ignored', parallel to import_handled, same stable importBookingKey). Every actionable import-preview row gets a "🚫 Ignore" button; ignored bookings drop into a new collapsible "Ignored — won't be imported" section and never resurface on reload/refresh/new session/teammate. Each is un-ignorable from that section. tagExistingShifts flags ignored rows first; importRowIsSelectable excludes them; loaded at boot + before each reconcile. No schema change. (2) AI CLOCK-OUT ALERT: the AI chatbot's clockOut action updated the DB + logged but never called notifyPayrollClockOut, so AI-driven clock-outs sent no WhatsApp group alert (manual + edit-shift paths already did). Now fires buildClockOutMessage→notifyPayrollClockOut on a NEW clock-out only. (3) CLIENT WHATSAPP GROUP DROPDOWN restored on the Add/Edit outlet modal: "🔍 Fetch my WhatsApp groups" button + select reusing the Periskope chats endpoint (same as WhatsApp Alerts), writes the @g.us id into of-chat-link; resets on modal open; manual paste still works. (4) Estimated Payment card was NOT removed — confirmed still rendered in the metrics block; no structure touched. -->
 <!-- Build patch: v53 — DURABLE import-handled ledger fixes the recurring "I already merged/mapped this booking but it keeps coming back after refresh" complaint, WITHOUT the long-blocked schema change (the sync_source column still doesn't exist in the live DB, so markShiftSyncSource still no-ops and feed-matching alone is too fragile across mapped outlets + subset names). New team-synced app_settings row key='import_handled' records, for every booking imported/merged/mapped-to-existing, a stable key → the panel shift id it went into. tagExistingShifts now consults this ledger FIRST (after the same-session _importedShiftId check, before the fragile worker+outlet+time matching): if the row's key is recorded and that shift still exists, it's recognised as already-in-panel and drops into the "Already in the ops panel" section — surviving refresh, new sessions, and other teammates. Self-cleaning: a ledger entry whose shift was deleted is pruned so the booking can be re-imported. Stable key uses _portalBookingId when present, else token-SORTED worker name + date + scheduled start/end, deliberately EXCLUDING the outlet (the outlet is exactly what gets remapped, e.g. "Baggie's" → "Baggies' Butcher & Deli", so keying on it is what made prior recognition miss after a remap). Recorded at all reconcile points: manual merge, auto-merge, no-op/mark-synced, new insert, autoStampSyncRows, and on worker/outlet map-reveal of an already-in-panel booking. Loaded at boot + before each reconcile (loadImportHandledRemote), flushed via saveImportHandled (localStorage instant + Supabase merge-union so concurrent devices don't clobber). Mirrors the outlet_groups storage pattern. Adding the sync_source column later still works and is complementary; this ledger makes it unnecessary for de-dup. -->
 <!-- Build patch: v52 — Currency fix: Malaysian-outlet shifts (e.g. Khairul at Five Guys (Pavillion Mall)) showed $ instead of RM on the gross/net amounts while the per-hour subline correctly showed RM. Cause: the paste/upload importer stamped each shift's country from the "Default Country" dropdown (often Singapore) even for a Malaysian outlet, and the payment renderer trusted that stale stored country. FIX (display): resolvedCountryForShift() now treats the matched OUTLET's country as the source of truth for currency, falling back to the stored s.country only when the outlet can't be resolved — so moneyForShift/countryForShift display the correct currency for all existing data immediately. FIX (data): all three paste/upload parsers now stamp country from the matched outlet (falling back to the default dropdown only when no outlet matched), and mapping/changing an outlet in the import preview re-stamps the row's country from the chosen outlet. ALSO (reconciler robustness): tagExistingShifts now has outlet-INDEPENDENT fallbacks — a same-worker (token-subset) panel shift on the same date that is portal-synced, and a same-worker overlapping shift whose only difference is an UNMAPPED outlet, are both treated as the same already-in-panel booking instead of resurfacing as new. The portal sync index is built before reconciling so these fallbacks have data on first load. -->
 <!-- Build patch: v51 — Console-confirmed the final mismatch: the portal stores the worker as "Hui Ling Chong" (full_name) but her ops-panel shift's worker_name is "Hui Ling". The v50 wd|name|date key was therefore "wd|hui ling chong|2026-06-16" while the attendance lookup built "wd|hui ling|2026-06-16" — exact-normalised keys can't bridge a subset/superset name. FIX: buildPortalSyncIndex now also stores a per-date list of portal worker TOKEN-SETS (portalWorkerTokensByDate), and isShiftPortalSynced falls back to a token-subset test — a panel shift counts as synced if its worker's name tokens are a subset (or superset) of any portal worker's tokens that date ("hui ling" ⊆ "hui ling chong"). Every token of the shorter name must be present, so unrelated people don't match; it's the same loosening the import reconciler already does, now applied to the attendance sync icon. Flips Hui Ling 16 Jun ⚠️→🔄 with no schema change. Added importNameTokens()/tokensSubset() helpers. (sync_source column still absent in this DB per console — fully optional; everything works off the live portal feed.) -->
@@ -2059,7 +2060,13 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option><option value="Philippines">Philippines</option></select></div>
     <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
-    <div class="form-row"><label>WhatsApp group / chat link</label><input type="text" id="of-chat-link" placeholder="e.g. https://chat.whatsapp.com/… or wa.me/65…"></div>
+    <div class="form-row"><label>WhatsApp group / chat link</label><input type="text" id="of-chat-link" placeholder="e.g. https://chat.whatsapp.com/… or wa.me/65… or pick a group below">
+      <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchOutletWhatsappGroups()">🔍 Fetch my WhatsApp groups</button>
+        <select id="of-chat-group-select" style="display:none;flex:1;min-width:200px;font-size:12px;padding:6px 8px;border-radius:6px;background:var(--bg3);border:1px solid var(--border2);color:var(--text);" onchange="onOutletWhatsappGroupPick(this.value)"></select>
+      </div>
+      <div id="of-chat-group-status" style="font-size:11px;color:var(--text3);margin-top:4px;"></div>
+    </div>
     <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
     <div class="modal-footer">
@@ -2650,6 +2657,91 @@ function markImportHandled(row, shiftId) {
   };
 }
 
+// ── Import IGNORE ledger ──────────────────────────────────────────────────────
+// A booking the user explicitly never wants to import (e.g. a portal booking
+// that shouldn't be in the ops panel at all). Keyed by the same stable
+// importBookingKey, stored in the team-synced app_settings store. On every
+// import/reload, ignored bookings are dropped straight into the "Ignored —
+// won't be imported" section instead of resurfacing as actionable rows. The
+// user can undo (un-ignore) from that section. Survives refresh / new session /
+// teammates, exactly like import_handled. Self-contained — no schema change.
+let importIgnored = loadImportIgnored(); // { [bookingKey]: { when, by, label } }
+let importIgnoredLoaded = false;
+function loadImportIgnored() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('import_ignored_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch(e) { return {}; }
+}
+async function loadImportIgnoredRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'import_ignored').maybeSingle();
+    if (error) { console.warn('importIgnored remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      importIgnored = { ...importIgnored, ...data.value };
+      localStorage.setItem('import_ignored_v1', JSON.stringify(importIgnored));
+    } else {
+      const local = loadImportIgnored();
+      if (Object.keys(local).length) { importIgnored = local; await saveImportIgnored(); }
+    }
+    importIgnoredLoaded = true;
+  } catch(e) { console.warn('importIgnored remote load error:', e); }
+}
+async function saveImportIgnored() {
+  localStorage.setItem('import_ignored_v1', JSON.stringify(importIgnored));
+  if (!supabaseClient) return false;
+  try {
+    let merged = importIgnored;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'import_ignored').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        merged = { ...data.value, ...importIgnored };
+        importIgnored = merged;
+        localStorage.setItem('import_ignored_v1', JSON.stringify(importIgnored));
+      }
+    } catch(e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'import_ignored', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('importIgnored remote save failed:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('importIgnored remote save error:', e); return false; }
+}
+function isImportIgnored(row) {
+  const key = importBookingKey(row);
+  return !!(key && importIgnored[key]);
+}
+// Mark a preview row ignored, persist, and re-render so it moves to the section.
+async function ignoreImportRow(idx) {
+  const r = importRows[idx];
+  if (!r) return;
+  const key = importBookingKey(r);
+  if (!key) return;
+  importIgnored[key] = {
+    when: new Date().toISOString(),
+    by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : '',
+    label: `${r.worker_name || '—'} · ${r.shift_date || ''} · ${(r.scheduled_start||'').slice(0,5)}–${(r.scheduled_end||'').slice(0,5)}`
+  };
+  r._ignored = true;
+  r._selected = false;
+  try { await saveImportIgnored(); } catch(e){}
+  renderImportPreview();
+  toast('Booking ignored — it won’t be re-imported.');
+}
+// Un-ignore: remove from the ledger so it returns to the actionable list.
+async function unignoreImportRow(idx) {
+  const r = importRows[idx];
+  if (!r) return;
+  const key = importBookingKey(r);
+  if (key && importIgnored[key]) delete importIgnored[key];
+  r._ignored = false;
+  try { await saveImportIgnored(); } catch(e){}
+  renderImportPreview();
+  toast('Booking un-ignored — it can be imported again.');
+}
+
 // exactly what bans/restrictions are in Supabase vs. this device's local copy.
 // This pinpoints whether a ban failed to save (missing in Supabase) or failed to
 // sync (in Supabase but not applied locally). Safe, read-only.
@@ -2924,6 +3016,9 @@ async function init() {
   // Team-wide durable "import handled" ledger so already-merged/mapped bookings
   // stay recognised across refreshes, sessions and teammates (no schema change).
   loadImportHandledRemote().catch(()=>{});
+  // Team-wide durable "import ignored" ledger so deliberately-skipped bookings
+  // don't resurface on refresh/session/teammate (no schema change).
+  loadImportIgnoredRemote().catch(()=>{});
   // Team-wide Periskope config so every device can send WhatsApp (not just the one
   // where the API key was first entered).
   loadPeriskopeConfigShared().catch(()=>{});
@@ -7776,6 +7871,78 @@ function selectPayrollGroup(id, name) {
   if (resultEl) { resultEl.style.color='var(--green)'; resultEl.textContent = `Selected “${name}”. Hit Save, then Test group message.`; }
 }
 
+// ── Outlet modal: pick the client's WhatsApp group from a dropdown ────────────
+// Restores the dropdown picker on the Add/Edit outlet modal. Reuses the same
+// Periskope chats endpoint as "Fetch my groups" in WhatsApp Alerts, so ops can
+// pick the real @g.us chat_id instead of hand-typing it. Falls back to the
+// free-text field if the fetch fails. Cached for the session so re-opening the
+// modal doesn't re-hit the API.
+let _outletWaGroupsCache = null;
+async function fetchOutletWhatsappGroups() {
+  const statusEl = document.getElementById('of-chat-group-status');
+  const selectEl = document.getElementById('of-chat-group-select');
+  const pk = getPeriskopeConfig();
+  const apikey = pk?.apikey || (document.getElementById('pk-apikey')?.value || '').trim();
+  const phone  = (pk?.phone || (document.getElementById('pk-phone')?.value || '').trim()).replace(/\D/g,'');
+  if (!apikey || !phone) {
+    if (statusEl) { statusEl.style.color='var(--amber, #f59e0b)'; statusEl.textContent = 'Set your Periskope API key + org phone in WhatsApp Alerts first, then try again. You can still paste a link above.'; }
+    return;
+  }
+  if (statusEl) { statusEl.style.color='var(--text3)'; statusEl.textContent = 'Fetching your WhatsApp groups…'; }
+  let groups = _outletWaGroupsCache;
+  if (!groups) {
+    const headers = { 'Authorization': `Bearer ${apikey}`, 'x-phone': phone, 'Content-Type': 'application/json' };
+    const urls = [
+      'https://api.periskope.app/v1/chats?chat_type=group&limit=200',
+      'https://api.periskope.app/v1/chats?limit=200'
+    ];
+    let chats = null, lastErr = '';
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { headers });
+        if (!res.ok) { lastErr = 'HTTP ' + res.status; continue; }
+        const j = await res.json().catch(()=>({}));
+        chats = j.chats || j.data || j.results || (Array.isArray(j) ? j : null);
+        if (Array.isArray(chats)) break;
+      } catch(e) { lastErr = e.message || 'network error'; }
+    }
+    if (!Array.isArray(chats)) {
+      if (statusEl) { statusEl.style.color='var(--red)'; statusEl.textContent = '✗ Could not fetch groups (' + (lastErr || 'unexpected response') + '). Paste the link manually above.'; }
+      return;
+    }
+    groups = chats.filter(c => /@g\.us$/.test(String(c.chat_id || c.id || c.chatId || '')))
+      .map(c => ({
+        id: String(c.chat_id || c.id || c.chatId),
+        name: c.chat_name || c.name || c.subject || c.group_name || '(unnamed group)'
+      }));
+    _outletWaGroupsCache = groups;
+  }
+  if (!groups.length) {
+    if (statusEl) { statusEl.style.color='var(--amber, #f59e0b)'; statusEl.textContent = '⚠ No groups found on this number. Make sure the org phone is in the client group.'; }
+    return;
+  }
+  if (selectEl) {
+    const current = (document.getElementById('of-chat-link')?.value || '').trim();
+    selectEl.innerHTML = '<option value="">— Pick a WhatsApp group —</option>'
+      + groups.map(g => `<option value="${escapeAttr(g.id)}" ${g.id===current?'selected':''}>${escapeHtml(g.name)} (${escapeHtml(g.id)})</option>`).join('');
+    selectEl.style.display = '';
+  }
+  if (statusEl) { statusEl.style.color='var(--text3)'; statusEl.textContent = `Found ${groups.length} group(s) — pick the client's group, or keep the link above.`; }
+}
+function onOutletWhatsappGroupPick(id) {
+  if (!id) return;
+  const field = document.getElementById('of-chat-link');
+  if (field) field.value = id;
+  const statusEl = document.getElementById('of-chat-group-status');
+  if (statusEl) { statusEl.style.color='var(--green)'; statusEl.textContent = '✓ Group set. Save changes to keep it.'; }
+}
+function resetOutletWhatsappGroupPicker() {
+  const selectEl = document.getElementById('of-chat-group-select');
+  const statusEl = document.getElementById('of-chat-group-status');
+  if (selectEl) { selectEl.style.display = 'none'; selectEl.innerHTML = ''; }
+  if (statusEl) { statusEl.textContent = ''; statusEl.style.color = 'var(--text3)'; }
+}
+
 // ── Night reminder message builder ───────────────────────────────────────────
 function buildNightReminderMessage(s) {
   const d = new Date(s.shift_date + 'T00:00:00');
@@ -10705,6 +10872,7 @@ function resetOutletModal() {
   document.getElementById('of-location').value = '';
   document.getElementById('of-commission').value = '20';
   document.getElementById('of-chat-link').value = '';
+  resetOutletWhatsappGroupPicker();
   document.getElementById('of-notes').value = '';
   document.getElementById('of-banned-workers').value = '';
 }
@@ -10721,6 +10889,7 @@ function editOutlet(id) {
   const meta = outletProfile(o.name);
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
   document.getElementById('of-chat-link').value = meta.chat_link || '';
+  resetOutletWhatsappGroupPicker();
   document.getElementById('of-notes').value = meta.notes || '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
   document.getElementById('add-outlet-modal').classList.add('open');
@@ -11897,6 +12066,7 @@ let importHideReconciled = true;
 // bottom of the preview (see renderImportPreview). Collapsed by default so the
 // actionable list stays clean; the user can expand to audit what was skipped.
 let importShowReconciledSection = false;
+let importShowIgnoredSection = false;
 
 // Classify an already-imported row so the bottom section can label HOW it got
 // into the ops panel: merged into a prior shift, created fresh from an app
@@ -12010,6 +12180,18 @@ async function tagExistingShifts(rows) {
   for (const r of rows) {
     if (!r.worker_name || r.worker_name === 'Available') continue;
     const candidates = byDate.get(r.shift_date) || [];
+
+    // IGNORE LEDGER CHECK (survives refresh / new session / other teammates).
+    // If the user explicitly ignored this booking, never offer it as actionable
+    // again — flag it so it drops into the "Ignored — won't be imported" section.
+    if (isImportIgnored(r)) {
+      r._ignored = true;
+      r._alreadyImported = false; // it's not in the panel; it's deliberately skipped
+      continue;
+    } else if (r._ignored) {
+      // Was ignored in-session but the ledger entry is gone (un-ignored) — clear.
+      r._ignored = false;
+    }
 
     // If this row was already written this session, keep it marked done as long
     // as its target booking still exists in the panel — independent of whether
@@ -13403,6 +13585,7 @@ async function applyImportRows(rows) {
   // tagging, so previously merged/mapped bookings are recognised even on a fresh
   // device or by another teammate who didn't perform the original import.
   try { if (!importHandledLoaded) await loadImportHandledRemote(); } catch (e) {}
+  try { if (!importIgnoredLoaded) await loadImportIgnoredRemote(); } catch (e) {}
   try {
     await tagExistingShifts(importRows);
   } catch (e) {
@@ -13427,7 +13610,8 @@ function importRowIsSelectable(r) {
   return !r._cancelled
     && !r._hasWorkerMismatch
     && !r._hasOutletMismatch
-    && !r._alreadyImported;
+    && !r._alreadyImported
+    && !r._ignored;
 }
 // Rows default to selected unless the user has explicitly unticked them.
 function importRowIsSelected(r) {
@@ -13495,6 +13679,8 @@ function renderImportPreview() {
     // actionable table — they're collected into their own section at the bottom
     // so re-loading synced portal bookings doesn't keep re-listing them here.
     if (r._alreadyImported) return '';
+    // Deliberately-ignored rows go into their own "Ignored" section instead.
+    if (r._ignored) return '';
     // ── Helper: search dropdown for mapping ──
     const searchDropdown = (type, idx, listId) => `
       <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;">
@@ -13661,6 +13847,9 @@ function renderImportPreview() {
         </select>
       </div>`;
     };
+    // "Never import this" — adds the booking to the durable ignore ledger so it
+    // drops into the "Ignored" section and never resurfaces on reload/refresh.
+    const ignoreBtn = `<button style="margin-top:4px;margin-left:5px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--text3);border-radius:4px;color:var(--text3);cursor:pointer;" title="Never import this booking — it won't come back on refresh" onclick="ignoreImportRow(${idx})">🚫 Ignore</button>`;
     let statusCell;
     if (r._forceMergeId) {
       // User manually tagged this row to merge into a specific existing booking.
@@ -13702,7 +13891,7 @@ function renderImportPreview() {
           Already in the panel (${escapeHtml(ex.scheduled_start||'')}–${escapeHtml(ex.scheduled_end||'')})<br>
           Confirm to link it to the app — no duplicate created
         </div>
-        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipMerge=${!r._skipMerge};renderImportPreview()">${r._skipMerge ? 'Will skip — undo' : 'Skip this one'}</button>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipMerge=${!r._skipMerge};renderImportPreview()">${r._skipMerge ? 'Will skip — undo' : 'Skip this one'}</button>${ignoreBtn}
         ${mergePicker()}
       </td>`;
     } else if (r._existingMatch === 'exact') {
@@ -13715,7 +13904,7 @@ function renderImportPreview() {
           Updates the booking already in the panel<br>
           (${escapeHtml(ex.clock_in||'—')}–${escapeHtml(ex.clock_out||'—')} → ${escapeHtml(r.clock_in||'—')}–${escapeHtml(r.clock_out||'—')})
         </div>
-        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipMerge=${!r._skipMerge};renderImportPreview()">${r._skipMerge ? 'Will skip — undo' : 'Skip this one'}</button>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipMerge=${!r._skipMerge};renderImportPreview()">${r._skipMerge ? 'Will skip — undo' : 'Skip this one'}</button>${ignoreBtn}
         ${mergePicker()}
       </td>`;
     } else if (r._existingMatch === 'overlap') {
@@ -13726,14 +13915,14 @@ function renderImportPreview() {
         <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
           Already booked ${escapeHtml(ex.scheduled_start||'')}–${escapeHtml(ex.scheduled_end||'')}<br>at <b>${escapeHtml(ex.outlet||'')}</b> (different outlet)
         </div>
-        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Skip</button>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Skip</button>${ignoreBtn}
         ${mergePicker()}
       </td>`;
     } else {
       const st = (r.clock_in && r.clock_out) ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-blue">Scheduled</span>';
       statusCell = `<td>
         ${st}
-        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Cancel</button>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Cancel</button>${ignoreBtn}
         ${mergePicker()}
       </td>`;
     }
@@ -13769,11 +13958,11 @@ function renderImportPreview() {
   // Main table now holds only actionable (not-yet-in-panel) rows. If everything
   // loaded is already in the ops panel, the main table is empty — show a short
   // placeholder and let the bottom "already in ops panel" section carry the detail.
-  const visibleCount = importRows.filter(r => !r._alreadyImported).length;
+  const visibleCount = importRows.filter(r => !r._alreadyImported && !r._ignored).length;
   const tbodyFinal = visibleCount === 0 && importRows.length > 0
     ? `<tr><td colspan="13" style="padding:26px 18px;text-align:center;color:var(--text2);font-size:13px;">
-         ✓ All ${importRows.length} booking${importRows.length !== 1 ? 's are' : ' is'} already in the ops panel — nothing new to import.<br>
-         <span style="color:var(--text3);font-size:12px;">See “Already in the ops panel” below.</span>
+         ✓ Nothing new to import — all ${importRows.length} booking${importRows.length !== 1 ? 's are' : ' is'} already in the ops panel or ignored.<br>
+         <span style="color:var(--text3);font-size:12px;">See the sections below.</span>
        </td></tr>`
     : tbodyRows;
 
@@ -13867,6 +14056,58 @@ function renderImportPreview() {
       </div>`;
   }
 
+  // ── "Ignored — won't be imported" section ───────────────────────────────
+  // Bookings the user explicitly ignored. They never appear in the actionable
+  // list and never resurface on reload/refresh (durable, team-synced ledger).
+  // Each can be un-ignored to bring it back. Collapsed by default.
+  const ignoredRows = importRows.filter(r => r._ignored);
+  let ignoredSection = '';
+  if (ignoredRows.length) {
+    const sectionRows = ignoredRows.map(r => {
+      const idx = importRows.indexOf(r);
+      const worker = escapeHtml(r.worker_name || r._workerRaw || 'Available');
+      const outlet = escapeHtml(r.outlet || r._outletRaw || '—');
+      const role   = escapeHtml(r.role || '—');
+      const times  = `${escapeHtml(r.scheduled_start || '—')}–${escapeHtml(r.scheduled_end || '—')}`;
+      const clock  = (r.clock_in || r.clock_out)
+        ? `${escapeHtml(r.clock_in || '—')}–${escapeHtml(r.clock_out || '—')}`
+        : '—';
+      return `<tr style="opacity:0.7;">
+        <td style="font-family:var(--mono);font-size:12px;">${escapeHtml(r.shift_date || '')}</td>
+        <td style="font-size:12px;">${worker}</td>
+        <td style="font-size:12px;">${outlet}</td>
+        <td style="font-size:12px;">${role}</td>
+        <td style="font-family:var(--mono);font-size:12px;">${times}</td>
+        <td style="font-family:var(--mono);font-size:12px;">${clock}</td>
+        <td><span class="badge" style="background:rgba(150,156,174,0.18);color:var(--text2);">🚫 Ignored</span>
+          <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--accent);border-radius:4px;color:var(--accent);cursor:pointer;" onclick="unignoreImportRow(${idx})">Un-ignore</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+    ignoredSection = `
+      <div style="border-top:1px solid var(--border);margin-top:0;">
+        <div style="padding:12px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;"
+             onclick="importShowIgnoredSection=!importShowIgnoredSection;renderImportPreview()">
+          <span style="font-size:13px;font-weight:600;color:var(--text);">
+            ${importShowIgnoredSection ? '▼' : '▶'} Ignored — won't be imported
+          </span>
+          <span class="badge" style="background:rgba(150,156,174,0.18);color:var(--text2);">${ignoredRows.length}</span>
+          <span style="font-size:12px;color:var(--text2);">Deliberately skipped — won't come back on refresh. Un-ignore to restore.</span>
+        </div>
+        ${importShowIgnoredSection ? `
+        <div style="overflow-x:auto;padding:0 0 8px;">
+          <table>
+            <thead><tr>
+              <th>Date</th><th>Worker</th><th>Outlet / Client</th><th>Role</th>
+              <th>Scheduled</th><th>Clock</th><th>Status</th>
+            </tr></thead>
+            <tbody>${sectionRows}</tbody>
+          </table>
+        </div>` : ''}
+      </div>`;
+  }
+
   const saveLabel = activeCount === 0
     ? '✓ Confirm &amp; Save'
     : (mergeCount > 0
@@ -13893,7 +14134,8 @@ function renderImportPreview() {
       ${allDoneNote}
       <span style="font-size:12px;color:var(--text3);">Worker, client, role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>
-    ${reconciledSection}`;
+    ${reconciledSection}
+    ${ignoredSection}`;
 }
 
 // Search filter helpers for import mapping dropdowns
@@ -15534,8 +15776,14 @@ async function executeAIAction(actionJson) {
       const s = allShifts.find(x => x.id === a.shiftId);
       if (!s) return `❌ Shift not found`;
       const time = a.time || new Date().toTimeString().slice(0,5);
+      const wasClockedOut = !!s.clock_out;
       await supabaseClient.from('shifts').update({ clock_out: time, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
       await logActivity('AI: Clocked out', `${a.workerName} clocked out at ${time}`, 'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+      // Fire the payroll WhatsApp group alert just like the manual/edit clock-out
+      // paths do — only when clock-out is NEWLY added (not a re-clockout).
+      if (!wasClockedOut) {
+        try { notifyPayrollClockOut(buildClockOutMessage({ ...s, clock_out: time }, time)); } catch(e) { console.warn('[AI clockOut] payroll alert failed:', e); }
+      }
       await loadShifts();
       return `✅ Clocked out **${a.workerName}** at ${time}`;
     }
