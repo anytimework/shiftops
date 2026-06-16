@@ -13228,36 +13228,56 @@ function importFilterOutlets(query, listId) {
   ).join('');
 }
 
-// Map an existing worker to ALL rows that share the same raw name
+// Map an existing worker. The row you click is always updated. Other rows that
+// share the same raw name are only updated if they're STILL UNMAPPED — so
+// editing one already-mapped row never rewrites unrelated rows.
 function onImportWorkerSelect(idx, val) {
   if (!val) return;
-  const rawName = importRows[idx]._workerRaw;
-  importRows.forEach(r => {
-    if (r._workerRaw === rawName) {
+  const target = importRows[idx];
+  if (!target) return;
+  const rawName = target._workerRaw;
+  const wasUnmapped = target._hasWorkerMismatch;
+  // A blank/placeholder raw name isn't a reliable group key — only update the
+  // clicked row in that case so unrelated blank rows aren't swept up.
+  const canBulk = wasUnmapped && rawName && rawName.trim() && rawName !== 'Available';
+
+  importRows.forEach((r, i) => {
+    const isThisRow = i === idx;
+    // Bulk-apply only to other rows that share the raw name AND are unmapped,
+    // and only when this click was itself resolving an unmapped row.
+    const shareAndUnmapped = canBulk && r._workerRaw === rawName && r._hasWorkerMismatch;
+    if (isThisRow || shareAndUnmapped) {
       r.worker_name = val;
       r._workerMatch = val;
       r._hasWorkerMismatch = false;
       r._workerAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
-  renderImportPreview();
-  toast(`Mapped "${rawName}" → "${val}"`);
+  applyImportRows(importRows);
+  toast(wasUnmapped ? `Mapped "${rawName}" → "${val}"` : `Changed worker → "${val}"`);
 }
 
-// Map an existing outlet to ALL rows that share the same raw name
+// Map an existing outlet. Same single-row-safe rule as the worker handler.
 function onImportOutletSelect(idx, val) {
   if (!val) return;
-  const rawName = importRows[idx]._outletRaw;
-  importRows.forEach(r => {
-    if (r._outletRaw === rawName) {
+  const target = importRows[idx];
+  if (!target) return;
+  const rawName = target._outletRaw;
+  const wasUnmapped = target._hasOutletMismatch;
+  const canBulk = wasUnmapped && rawName && rawName.trim();
+
+  importRows.forEach((r, i) => {
+    const isThisRow = i === idx;
+    const shareAndUnmapped = canBulk && r._outletRaw === rawName && r._hasOutletMismatch;
+    if (isThisRow || shareAndUnmapped) {
       r.outlet = val;
       r._outletMatch = val;
       r._hasOutletMismatch = false;
       r._outletAutoMatched = false; // user explicitly chose — clear auto flag
     }
   });
-  renderImportPreview();
-  toast(`Mapped "${rawName}" → "${val}"`);
+  applyImportRows(importRows);
+  toast(wasUnmapped ? `Mapped "${rawName}" → "${val}"` : `Changed outlet → "${val}"`);
 }
 
 // Open new-worker modal, pre-filled but editable
