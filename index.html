@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v46 — Already-in-panel import rows moved out of the main list into their own collapsible "Already in the ops panel" section at the bottom of the import preview (collapsed by default). Synced/merged/created bookings no longer interleave with actionable rows and are never re-offered when you re-click "Load synced portal bookings" — the section just shows them with a Synced / Merged / Created label and a count breakdown so you can audit what was skipped. Confirm now stamps each written row with _importedThisSession ('created' or 'merged') so the section can label how it entered the panel this session; pre-existing matches read as Synced. Removed the old inline "Show/Hide already-imported" toggle (replaced by the section's expand/collapse header). ALSO FIXED: a same booking kept resurfacing as "Merge into existing" (e.g. Hui Ling 15 Jun) because the panel stores clock_in/out as HH:MM:SS while imports parse to HH:MM, so the "is there newer clock data?" check compared "07:54:00" !== "07:54" and always saw a difference. Added importHHMM() to normalise both sides to HH:MM in all three comparison sites (tagExistingShifts exact + same-worker/outlet fallback, and the confirm-time skip), and the confirm-time no-op skip now stamps the row as already-imported so it drops into the bottom section. No schema change. -->
 <!-- Build patch: v45 — Origin-aware attendance icons + sturdier import de-dup. (A) syncDot now reflects how a shift entered the panel: 🔄 (green, "synced") when it matches the live portal feed OR an import was merged into it (sync_source='merged'); 📱 (blue) when it was created from an app booking via Import Bookings with no prior panel shift to reconcile (sync_source='import'); ⚠️ (amber) only for ops-panel-only shifts with no app booking behind them. This requires a new nullable column — run:  alter table shifts add column sync_source text;  The code degrades gracefully if it's absent (falls back to the portal-feed check) and stops retrying after the first failure. confirmImportBookings stamps sync_source on every insert ('import') and merge ('merged'). loadShifts already selects * so the column flows through. (B) tagExistingShifts no longer relies solely on time-overlap: if there's no overlapping match it now also treats a same worker + same outlet + same date panel shift as the existing booking, so a reconciled shift won't reappear as "new" after exit + re-load even if the stored scheduled times drifted from a prior merge. No other behaviour changed. -->
 <!-- Build patch: v44 — (1) Attendance-row sync indicator restored + clarified per ops request: app-originated bookings (matched to the Anytime Work app / portal feed) now show a green 📱⬇ "app booking — synced"; shifts that exist ONLY in the ops panel with no matching app booking show the amber ⚠️ again so the team knows to add them to the app. (2) Import de-dup now persists across restarts: tagExistingShifts marks an exact same-booking match as already-imported (hidden) whenever the import has no NEWER clock-in/out to push — so re-running the whole import no longer re-offers a booking that's already in the panel. It only resurfaces if the import carries fresh clock data to sync, or the panel shift is deleted/cancelled. The confirm-time merge skip uses the same "nothing new" test, so it won't re-write no-op merges. No schema change. -->
 <!-- Build patch: v43 — Attendance-row sync indicator no longer reads as an error for imported bookings. Previously any shift not present in the LIVE portal_bookings feed showed an amber ⚠ ("Not synced"), including perfectly valid bookings brought in via Import Bookings (paste/upload), which are in the ops panel and count for payroll but aren't in the live portal feed. The unsynced state is now a neutral grey ○ with a clarifying tooltip; the green ⬇ still marks a confirmed live-portal match. Purely cosmetic — no change to matching, payroll, or data. No schema change. -->
@@ -11708,6 +11709,30 @@ function exportReportCsv() {
 // (already imported / merged) so you only see what's new and unreconciled.
 let importHideReconciled = true;
 
+// Already-in-panel rows are moved into their own collapsible section at the
+// bottom of the preview (see renderImportPreview). Collapsed by default so the
+// actionable list stays clean; the user can expand to audit what was skipped.
+let importShowReconciledSection = false;
+
+// Classify an already-imported row so the bottom section can label HOW it got
+// into the ops panel: merged into a prior shift, created fresh from an app
+// booking, or simply present/synced. Mirrors the attendance-row sync_source
+// logic (v44/v45) but works from the import-preview row metadata we have here.
+function importReconciledTag(r) {
+  // Stamped when THIS session wrote the row (insert vs merge tracked at confirm).
+  if (r._importedThisSession === 'merged') {
+    return { label: 'Merged', cls: 'badge-blue', note: 'Merged into the existing ops-panel booking this session.' };
+  }
+  if (r._importedThisSession === 'created') {
+    return { label: 'Created', cls: 'badge-green', note: 'Created in the ops panel from this booking this session.' };
+  }
+  // Otherwise it was already in the panel before this load.
+  if (r._existingMatch === 'exact') {
+    return { label: 'Synced', cls: 'badge-green', note: 'Already in the ops panel — nothing new to import.' };
+  }
+  return { label: 'Synced', cls: 'badge-green', note: 'Already in the ops panel.' };
+}
+
 // Normalise a name for loose comparison (case/space/punct-insensitive)
 function importNormName(s) {
   return String(s || '')
@@ -11846,10 +11871,10 @@ async function tagExistingShifts(rows) {
         const ex = sameWorkerOutletDate;
         r._existingShift = ex;
         r._existingMatch = 'exact';
-        const importCin  = r.clock_in  || '';
-        const importCout = r.clock_out || '';
-        const addsClockIn  = importCin  && importCin  !== (ex.clock_in  || '');
-        const addsClockOut = importCout && importCout !== (ex.clock_out || '');
+        const importCin  = importHHMM(r.clock_in);
+        const importCout = importHHMM(r.clock_out);
+        const addsClockIn  = importCin  && importCin  !== importHHMM(ex.clock_in);
+        const addsClockOut = importCout && importCout !== importHHMM(ex.clock_out);
         r._alreadyImported = !addsClockIn && !addsClockOut;
       }
       continue;
@@ -11864,10 +11889,10 @@ async function tagExistingShifts(rows) {
       // merge if the import genuinely has NEWER clock data to push into the
       // panel. Otherwise treat it as already-imported so it stays hidden — even
       // across a fresh import restart — unless the panel shift gets deleted.
-      const importCin  = r.clock_in  || '';
-      const importCout = r.clock_out || '';
-      const panelCin   = exact.clock_in  || '';
-      const panelCout  = exact.clock_out || '';
+      const importCin  = importHHMM(r.clock_in);
+      const importCout = importHHMM(r.clock_out);
+      const panelCin   = importHHMM(exact.clock_in);
+      const panelCout  = importHHMM(exact.clock_out);
       // "Nothing new" when the import adds no clock-in/out the panel is missing,
       // and doesn't change an existing one. (Identical times, or the import is
       // scheduled-only, or the panel already holds the same/again clock data.)
@@ -11933,6 +11958,17 @@ function importParseTime(raw) {
     return `${String(Math.floor(totalMins/60)).padStart(2,'0')}:${String(totalMins%60).padStart(2,'0')}`;
   }
   return null;
+}
+
+// Normalise any stored/parsed time to HH:MM for equality checks. The panel
+// stores clock_in/out as "HH:MM:SS" while imports parse to "HH:MM", so a raw
+// string compare ("07:54:00" !== "07:54") would wrongly read the same booking
+// as carrying newer clock data — which kept already-synced rows resurfacing as
+// "Merge into existing". Trimming both sides to HH:MM fixes that.
+function importHHMM(t) {
+  if (!t) return '';
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2,'0')}:${m[2]}` : String(t).trim();
 }
 
 function importParseRate(raw) {
@@ -12991,7 +13027,7 @@ async function loadPortalBookings() {
     const newCount  = rows.length - seenCount;
     toast(
       `Loaded ${rows.length} synced booking${rows.length !== 1 ? 's' : ''}` +
-      (seenCount ? ` — ${newCount} new, ${seenCount} already in ops panel (hidden).` : '') +
+      (seenCount ? ` — ${newCount} new, ${seenCount} already in the ops panel (shown in the section below).` : '') +
       (needMap ? ` ${needMap} need worker/outlet mapping below.` : (seenCount ? '' : ' — all matched, review then Confirm.')),
       'success'
     );
@@ -13140,9 +13176,10 @@ function renderImportPreview() {
   const SEL_STYLE = 'font-size:12px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--amber);border-radius:4px;';
 
   const tbodyRows = importRows.map((r, idx) => {
-    // Hide rows already in the ops panel (already imported / merged) unless the
-    // user has chosen to show them. Keeps idx stable for the onclick handlers.
-    if (importHideReconciled && r._alreadyImported) return '';
+    // Already-in-panel rows (synced / merged / created) never appear in the main
+    // actionable table — they're collected into their own section at the bottom
+    // so re-loading synced portal bookings doesn't keep re-listing them here.
+    if (r._alreadyImported) return '';
     // ── Helper: search dropdown for mapping ──
     const searchDropdown = (type, idx, listId) => `
       <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;">
@@ -13399,13 +13436,14 @@ function renderImportPreview() {
     </tr>`;
   }).join('');
 
-  // If every row is hidden (all already imported), show a friendly placeholder
-  // inside the table instead of a bare empty body.
-  const visibleCount = importRows.filter(r => !(importHideReconciled && r._alreadyImported)).length;
+  // Main table now holds only actionable (not-yet-in-panel) rows. If everything
+  // loaded is already in the ops panel, the main table is empty — show a short
+  // placeholder and let the bottom "already in ops panel" section carry the detail.
+  const visibleCount = importRows.filter(r => !r._alreadyImported).length;
   const tbodyFinal = visibleCount === 0 && importRows.length > 0
     ? `<tr><td colspan="13" style="padding:26px 18px;text-align:center;color:var(--text2);font-size:13px;">
-         ✓ All ${importRows.length} booking${importRows.length !== 1 ? 's are' : ' is'} already in the ops panel — nothing new to import.
-         <button class="btn btn-ghost btn-sm" style="margin-left:8px;" onclick="importHideReconciled=false;renderImportPreview()">Show them anyway</button>
+         ✓ All ${importRows.length} booking${importRows.length !== 1 ? 's are' : ' is'} already in the ops panel — nothing new to import.<br>
+         <span style="color:var(--text3);font-size:12px;">See “Already in the ops panel” below.</span>
        </td></tr>`
     : tbodyRows;
 
@@ -13434,9 +13472,67 @@ function renderImportPreview() {
   const selectionNote = deselectedCount > 0
     ? `<span style="font-size:12px;color:var(--text2);">☐ ${deselectedCount} unticked — will be left for later. <a href="#" onclick="setAllImportRows(true);return false;" style="color:var(--accent);text-decoration:none;">Select all</a></span>`
     : '';
-  const reconciledToggle = alreadyCount > 0
-    ? `<button class="btn btn-ghost btn-sm" onclick="importHideReconciled=!importHideReconciled;renderImportPreview()">${importHideReconciled ? `Show ${alreadyCount} already-imported` : 'Hide already-imported'}</button>`
-    : '';
+  // ── "Already in the ops panel" section ──────────────────────────────────
+  // Synced / merged / created rows live in their own collapsible block at the
+  // bottom, so they don't clutter the actionable list or get re-offered each
+  // time synced portal bookings are loaded. Collapsed by default.
+  const reconciledRows = importRows.filter(r => r._alreadyImported);
+  let reconciledSection = '';
+  if (reconciledRows.length) {
+    const sectionRows = reconciledRows.map(r => {
+      const tag = importReconciledTag(r);
+      const worker = escapeHtml(r.worker_name || r._workerRaw || 'Available');
+      const outlet = escapeHtml(r.outlet || r._outletRaw || '—');
+      const role   = escapeHtml(r.role || '—');
+      const times  = `${escapeHtml(r.scheduled_start || '—')}–${escapeHtml(r.scheduled_end || '—')}`;
+      const clock  = (r.clock_in || r.clock_out)
+        ? `${escapeHtml(r.clock_in || '—')}–${escapeHtml(r.clock_out || '—')}`
+        : '—';
+      return `<tr style="opacity:0.85;">
+        <td style="font-family:var(--mono);font-size:12px;">${escapeHtml(r.shift_date || '')}</td>
+        <td style="font-size:12px;">${worker}</td>
+        <td style="font-size:12px;">${outlet}</td>
+        <td style="font-size:12px;">${role}</td>
+        <td style="font-family:var(--mono);font-size:12px;">${times}</td>
+        <td style="font-family:var(--mono);font-size:12px;">${clock}</td>
+        <td><span class="badge ${tag.cls}">${tag.label}</span>
+          <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">${escapeHtml(tag.note)}</div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    const mergedN  = reconciledRows.filter(r => importReconciledTag(r).label === 'Merged').length;
+    const createdN = reconciledRows.filter(r => importReconciledTag(r).label === 'Created').length;
+    const syncedN  = reconciledRows.length - mergedN - createdN;
+    const breakdown = [
+      syncedN  ? `${syncedN} synced`   : '',
+      mergedN  ? `${mergedN} merged`   : '',
+      createdN ? `${createdN} created` : '',
+    ].filter(Boolean).join(' · ');
+
+    reconciledSection = `
+      <div style="border-top:1px solid var(--border);margin-top:0;">
+        <div style="padding:12px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;"
+             onclick="importShowReconciledSection=!importShowReconciledSection;renderImportPreview()">
+          <span style="font-size:13px;font-weight:600;color:var(--text);">
+            ${importShowReconciledSection ? '▼' : '▶'} Already in the ops panel
+          </span>
+          <span class="badge badge-green">${reconciledRows.length}</span>
+          <span style="font-size:12px;color:var(--text2);">${breakdown} — skipped, won't be re-imported.</span>
+        </div>
+        ${importShowReconciledSection ? `
+        <div style="overflow-x:auto;padding:0 0 8px;">
+          <table>
+            <thead><tr>
+              <th>Date</th><th>Worker</th><th>Outlet / Client</th><th>Role</th>
+              <th>Scheduled</th><th>Clock</th><th>Status</th>
+            </tr></thead>
+            <tbody>${sectionRows}</tbody>
+          </table>
+        </div>` : ''}
+      </div>`;
+  }
+
   const saveLabel = activeCount === 0
     ? '✓ Confirm &amp; Save'
     : (mergeCount > 0
@@ -13445,7 +13541,7 @@ function renderImportPreview() {
 
   // If everything left is already imported, say so plainly.
   const allDoneNote = (activeCount === 0 && alreadyCount > 0 && unmappedCount === 0)
-    ? `<span style="font-size:12px;color:var(--green);">✓ Everything here is already in the ops panel — nothing new to import.</span>`
+    ? `<span style="font-size:12px;color:var(--green);">✓ Everything here is already in the ops panel — see the section below.</span>`
     : '';
 
   body.innerHTML = `
@@ -13455,14 +13551,14 @@ function renderImportPreview() {
     <div style="padding:14px 18px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
       <button class="btn btn-primary btn-sm" onclick="confirmImportBookings()" ${activeCount === 0 ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''}>${saveLabel}</button>
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
-      ${reconciledToggle}
       ${mergeNote}
       ${clashNote}
       ${selectionNote}
       ${unmappedNote}
       ${allDoneNote}
       <span style="font-size:12px;color:var(--text3);">Worker, client, role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
-    </div>`;
+    </div>
+    ${reconciledSection}`;
 }
 
 // Search filter helpers for import mapping dropdowns
@@ -13792,6 +13888,7 @@ async function _confirmImportBookingsInner() {
         // of how time-overlap re-tagging resolves against the updated booking.
         r._importedShiftId = r._forceMergeId;
         r._alreadyImported = true;
+        r._importedThisSession = 'merged';
         r._existingMatch = 'exact';
         await markShiftSyncSource(r._forceMergeId, 'merged');
         r._forceMergeId = null;
@@ -13833,9 +13930,17 @@ async function _confirmImportBookingsInner() {
       // "New" means the import has a clock-in/out the panel is missing or that
       // differs; a scheduled-only re-import of an already-saved booking is a
       // no-op and must not resurface.
-      const addsClockIn  = (r.clock_in  || '') && (r.clock_in  || '') !== (mergeTarget.clock_in  || '');
-      const addsClockOut = (r.clock_out || '') && (r.clock_out || '') !== (mergeTarget.clock_out || '');
-      if (!addsClockIn && !addsClockOut) { skipped++; continue; }
+      const addsClockIn  = importHHMM(r.clock_in)  && importHHMM(r.clock_in)  !== importHHMM(mergeTarget.clock_in);
+      const addsClockOut = importHHMM(r.clock_out) && importHHMM(r.clock_out) !== importHHMM(mergeTarget.clock_out);
+      if (!addsClockIn && !addsClockOut) {
+        // No-op merge: stamp it as already-synced so it drops into the bottom
+        // section instead of staying in the actionable list.
+        skipped++;
+        r._importedShiftId = mergeTarget.id;
+        r._alreadyImported = true;
+        r._existingMatch = 'exact';
+        continue;
+      }
 
       // Merge: update the existing shift with the fresher portal data so the
       // single booking stays in sync, instead of inserting a duplicate.
@@ -13874,6 +13979,7 @@ async function _confirmImportBookingsInner() {
         merged++;
         r._importedShiftId = mergeTarget.id;
         r._alreadyImported = true;
+        r._importedThisSession = 'merged';
         r._existingMatch = 'exact';
         // Durable origin tag: an import reconciled into an existing panel shift
         // → counts as synced (🔄). (No-op if column not present.)
@@ -13930,6 +14036,7 @@ async function _confirmImportBookingsInner() {
       // in the panel rather than offering to insert it a second time.
       r._importedShiftId = (insRows && insRows[0] && insRows[0].id) || r._importedShiftId || null;
       r._alreadyImported = true;
+      r._importedThisSession = 'created';
       r._existingMatch = 'exact';
       // Durable origin tag: created from an app booking, no prior panel shift
       // to reconcile against → shows the 📱 icon. (No-op if column not present.)
