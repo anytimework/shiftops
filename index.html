@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v45 — Origin-aware attendance icons + sturdier import de-dup. (A) syncDot now reflects how a shift entered the panel: 🔄 (green, "synced") when it matches the live portal feed OR an import was merged into it (sync_source='merged'); 📱 (blue) when it was created from an app booking via Import Bookings with no prior panel shift to reconcile (sync_source='import'); ⚠️ (amber) only for ops-panel-only shifts with no app booking behind them. This requires a new nullable column — run:  alter table shifts add column sync_source text;  The code degrades gracefully if it's absent (falls back to the portal-feed check) and stops retrying after the first failure. confirmImportBookings stamps sync_source on every insert ('import') and merge ('merged'). loadShifts already selects * so the column flows through. (B) tagExistingShifts no longer relies solely on time-overlap: if there's no overlapping match it now also treats a same worker + same outlet + same date panel shift as the existing booking, so a reconciled shift won't reappear as "new" after exit + re-load even if the stored scheduled times drifted from a prior merge. No other behaviour changed. -->
+<!-- Build patch: v44 — (1) Attendance-row sync indicator restored + clarified per ops request: app-originated bookings (matched to the Anytime Work app / portal feed) now show a green 📱⬇ "app booking — synced"; shifts that exist ONLY in the ops panel with no matching app booking show the amber ⚠️ again so the team knows to add them to the app. (2) Import de-dup now persists across restarts: tagExistingShifts marks an exact same-booking match as already-imported (hidden) whenever the import has no NEWER clock-in/out to push — so re-running the whole import no longer re-offers a booking that's already in the panel. It only resurfaces if the import carries fresh clock data to sync, or the panel shift is deleted/cancelled. The confirm-time merge skip uses the same "nothing new" test, so it won't re-write no-op merges. No schema change. -->
+<!-- Build patch: v43 — Attendance-row sync indicator no longer reads as an error for imported bookings. Previously any shift not present in the LIVE portal_bookings feed showed an amber ⚠ ("Not synced"), including perfectly valid bookings brought in via Import Bookings (paste/upload), which are in the ops panel and count for payroll but aren't in the live portal feed. The unsynced state is now a neutral grey ○ with a clarifying tooltip; the green ⬇ still marks a confirmed live-portal match. Purely cosmetic — no change to matching, payroll, or data. No schema change. -->
 <!-- Build patch: v42 — Merge now respects the ops-panel rate. When an imported row merges into a booking that already exists in the ops panel (auto-match or manual "Merge into existing"), Confirm KEEPS the panel's rate and special-rate fields (sr_rate/sr_worker/sr_absorbed) instead of overwriting them with the imported value — because special rates often live only in the panel, not in the source app. New bookings that aren't yet in the panel still use the imported/app rate as before. The preview now shows the kept panel rate (in accent colour, "kept from ops panel", with the import's value noted when it differs) for merge rows, so what you see matches what saves. Both merge SELECTs now fetch rate + SR fields. No schema change. -->
 <!-- Build patch: v41 — Rate lookup hardened against outlet-name corruption. getSuggestedRate / ensureOutletRates and the Rates editor now resolve rateRules through a tolerant key match (_rateRulesKeyFor), so an outlet stored under a backslash-escaped apostrophe (e.g. "Baggies\' Butcher & Deli") or differing whitespace/casing still finds its configured per-day rates instead of falling back to the role default (which is $12 Mon–Thu for Kitchen Assistant). This prevents the import from showing $12 on a weekday when the outlet is configured at $15. Note: a rate present in the pasted/portal SOURCE row still takes precedence over the outlet rule by design — that's unchanged. No schema change. -->
 <!-- Build patch: v40 — Fixed two Import Bookings issues. (1) Double-save / "runs forever": confirmImportBookings now takes an in-flight lock and disables + relabels the Confirm button ("⏳ Saving…") while writing, so a second click can't kick off a concurrent pass that merges/saves the same rows again (the repeated activity-log entries). It also fast-skips already-imported and unticked rows before any DB query, so importing a single booking out of a big paste no longer scans every row. (2) Already-merged booking reappearing: each row that's actually written this session is now stamped with _importedShiftId and kept marked done; tagExistingShifts preserves that stamp as long as the target booking still exists, so a saved/merged shift won't be offered again on the next import. New inserts capture their id via .select('id'). No schema change. -->
@@ -6062,13 +6065,58 @@ function isShiftPortalSynced(s) {
   return portalSyncIndex.has(loose);
 }
 
-// Small compact dot: green ⬇ when matched to an app/portal booking, orange ⚠ when not.
+// Durably tag a shift with how it entered the ops panel, so the attendance-row
+// icon can reflect origin across restarts and teammates. Values:
+//   'import' — created in the panel from an app booking via Import Bookings,
+//              not (yet) reconciled to a pre-existing panel shift.
+//   'merged' — an import that was merged into an existing panel booking.
+// Writes defensively: if the `sync_source` column doesn't exist yet, the update
+// fails harmless and we just fall back to the live portal-feed check.
+let _syncSourceColumnMissing = false;
+async function markShiftSyncSource(shiftId, source) {
+  if (!supabaseClient || !shiftId || _syncSourceColumnMissing) return;
+  try {
+    const { error } = await supabaseClient
+      .from('shifts').update({ sync_source: source }).eq('id', shiftId);
+    if (error) {
+      // The only thing this update touches is sync_source, so any error here is
+      // almost certainly a missing column / schema issue. Stop trying this
+      // session so we don't spam failures, and fall back to the portal-feed check.
+      _syncSourceColumnMissing = true;
+      console.warn('sync_source update failed — origin icons will rely on the portal feed only until the column exists. Add it with:  alter table shifts add column sync_source text;  Error:', error.message);
+    }
+  } catch (e) { /* non-fatal */ }
+}
+
+// Attendance-row origin indicator. Per ops requirements:
+//   • 🔄 (green) "synced"  — booking is confirmed present in the app: either it
+//     matches the live portal feed, OR an import was merged into this panel
+//     shift (sync_source='merged').
+//   • 📱 (blue)  "from app import" — created from an app booking via Import
+//     Bookings but not reconciled to a prior panel shift (sync_source='import')
+//     and not (yet) seen in the portal feed.
+//   • ⚠️ (amber) "ops-only" — exists only in the ops panel with no app booking
+//     behind it. Flagged so the team adds it to the Anytime Work app.
 function syncDot(s) {
-  if (!portalSyncIndexLoaded) return ''; // index not ready — show nothing rather than mislead
-  const synced = isShiftPortalSynced(s);
-  return synced
-    ? `<span title="Synced — matched to an app booking" style="display:inline-flex;align-items:center;font-size:11px;color:var(--green);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">⬇</span>`
-    : `<span title="Not synced — no matching app booking" style="display:inline-flex;align-items:center;font-size:11px;color:var(--amber);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">⚠</span>`;
+  const src = s && s.sync_source ? String(s.sync_source) : '';
+  const inPortalFeed = isShiftPortalSynced(s);
+
+  // Synced: confirmed in the app (portal feed match or merged via import).
+  if (inPortalFeed || src === 'merged') {
+    return `<span title="Synced — this booking is in the Anytime Work app${src === 'merged' ? ' (import merged into this shift)' : ''}" style="display:inline-flex;align-items:center;font-size:11px;color:var(--green);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">🔄</span>`;
+  }
+  // From app import, not reconciled to a prior panel shift → phone only.
+  if (src === 'import') {
+    return `<span title="Imported from an app booking — no prior ops-panel shift to reconcile against" style="display:inline-flex;align-items:center;font-size:11px;color:var(--accent);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">📱</span>`;
+  }
+  // Index not ready and no durable origin tag — show nothing rather than mislead.
+  if (!portalSyncIndexLoaded) return '';
+  // Ops-panel only, no app booking behind it.
+  return `<span title="Ops-panel only — no matching app booking yet. Add this shift in the Anytime Work app to sync it." style="display:inline-flex;align-items:center;font-size:11px;color:var(--amber);font-weight:700;line-height:1;margin-right:5px;vertical-align:middle;">⚠️</span>`;
+}
+function _syncDot_unused_old(s) {
+  if (!portalSyncIndexLoaded) return '';
+  return '';
 }
 
 function statusBadge(s) {
@@ -11784,17 +11832,49 @@ async function tagExistingShifts(rows) {
     if (r._forceMergeId && !ordered.some(s => s.id === r._forceMergeId)) {
       r._forceMergeId = null;
     }
-    if (!sameWorker.length) continue;
+    if (!sameWorker.length) {
+      // No time-overlap match — but a portal re-load (or paste) of the SAME
+      // worker at the SAME outlet on the SAME date is almost certainly the same
+      // booking even if the stored scheduled times drifted (e.g. a prior merge
+      // rewrote them, or the portal start_time resolved differently). Treat that
+      // as the existing booking so a reconciled shift doesn't reappear as new.
+      const sameWorkerOutletDate = candidates.find(s =>
+        importNormName(s.worker_name) === wNorm &&
+        importOutletKey(s.outlet) === oNorm
+      );
+      if (sameWorkerOutletDate) {
+        const ex = sameWorkerOutletDate;
+        r._existingShift = ex;
+        r._existingMatch = 'exact';
+        const importCin  = r.clock_in  || '';
+        const importCout = r.clock_out || '';
+        const addsClockIn  = importCin  && importCin  !== (ex.clock_in  || '');
+        const addsClockOut = importCout && importCout !== (ex.clock_out || '');
+        r._alreadyImported = !addsClockIn && !addsClockOut;
+      }
+      continue;
+    }
 
     // Prefer a same-outlet match (true duplicate of the same booking)
     const exact = sameWorker.find(s => importOutletKey(s.outlet) === oNorm);
     if (exact) {
       r._existingShift = exact;
       r._existingMatch = 'exact';
-      // Already fully reconciled if clock times already match (or both empty)
-      const sameCin  = (exact.clock_in || '')  === (r.clock_in || '');
-      const sameCout = (exact.clock_out || '') === (r.clock_out || '');
-      r._alreadyImported = sameCin && sameCout;
+      // The booking is already in the ops panel. It should only resurface as a
+      // merge if the import genuinely has NEWER clock data to push into the
+      // panel. Otherwise treat it as already-imported so it stays hidden — even
+      // across a fresh import restart — unless the panel shift gets deleted.
+      const importCin  = r.clock_in  || '';
+      const importCout = r.clock_out || '';
+      const panelCin   = exact.clock_in  || '';
+      const panelCout  = exact.clock_out || '';
+      // "Nothing new" when the import adds no clock-in/out the panel is missing,
+      // and doesn't change an existing one. (Identical times, or the import is
+      // scheduled-only, or the panel already holds the same/again clock data.)
+      const addsClockIn  = importCin  && importCin  !== panelCin;
+      const addsClockOut = importCout && importCout !== panelCout;
+      const nothingNew = !addsClockIn && !addsClockOut;
+      r._alreadyImported = nothingNew;
     } else {
       // Same worker + time but a different outlet — genuine clash to review
       r._existingShift = sameWorker[0];
@@ -13713,6 +13793,7 @@ async function _confirmImportBookingsInner() {
         r._importedShiftId = r._forceMergeId;
         r._alreadyImported = true;
         r._existingMatch = 'exact';
+        await markShiftSyncSource(r._forceMergeId, 'merged');
         r._forceMergeId = null;
       }
       continue;
@@ -13748,10 +13829,13 @@ async function _confirmImportBookingsInner() {
       // User explicitly chose to skip this merge.
       if (r._skipMerge) { skipped++; continue; }
 
-      // Nothing new to sync (clock times already identical) → treat as seen.
-      const sameCin  = (mergeTarget.clock_in  || '') === (r.clock_in  || '');
-      const sameCout = (mergeTarget.clock_out || '') === (r.clock_out || '');
-      if (sameCin && sameCout) { skipped++; continue; }
+      // Nothing new to sync → treat as seen and skip (don't re-write a no-op).
+      // "New" means the import has a clock-in/out the panel is missing or that
+      // differs; a scheduled-only re-import of an already-saved booking is a
+      // no-op and must not resurface.
+      const addsClockIn  = (r.clock_in  || '') && (r.clock_in  || '') !== (mergeTarget.clock_in  || '');
+      const addsClockOut = (r.clock_out || '') && (r.clock_out || '') !== (mergeTarget.clock_out || '');
+      if (!addsClockIn && !addsClockOut) { skipped++; continue; }
 
       // Merge: update the existing shift with the fresher portal data so the
       // single booking stays in sync, instead of inserting a duplicate.
@@ -13791,6 +13875,9 @@ async function _confirmImportBookingsInner() {
         r._importedShiftId = mergeTarget.id;
         r._alreadyImported = true;
         r._existingMatch = 'exact';
+        // Durable origin tag: an import reconciled into an existing panel shift
+        // → counts as synced (🔄). (No-op if column not present.)
+        await markShiftSyncSource(mergeTarget.id, 'merged');
       }
       continue;
     }
@@ -13844,6 +13931,9 @@ async function _confirmImportBookingsInner() {
       r._importedShiftId = (insRows && insRows[0] && insRows[0].id) || r._importedShiftId || null;
       r._alreadyImported = true;
       r._existingMatch = 'exact';
+      // Durable origin tag: created from an app booking, no prior panel shift
+      // to reconcile against → shows the 📱 icon. (No-op if column not present.)
+      if (r._importedShiftId) await markShiftSyncSource(r._importedShiftId, 'import');
     }
   }
 
