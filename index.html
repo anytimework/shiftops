@@ -4190,8 +4190,19 @@ function currencySymbolForCountry(country) {
 }
 function currencySymbolForOutlet(outletName) { return currencySymbolForCountry(outletCountry(outletName)); }
 function moneyForCountry(n, country) { return currencySymbolForCountry(country) + Number(n || 0).toFixed(2); }
-function moneyForShift(n, s) { return moneyForCountry(n, s?.country || outletCountry(s?.outlet)); }
-function countryForShift(s) { return normaliseCountry(s?.country || outletCountry(s?.outlet)); }
+// The outlet is the source of truth for currency/country: a Five Guys (Pavillion Mall)
+// shift is always paid in RM regardless of what country was stamped on the shift row at
+// import time (the paste/upload importer used to stamp the dropdown's default country,
+// which could be Singapore even for a Malaysian outlet — showing $ instead of RM). So if
+// the shift's outlet resolves to a known outlet, trust that outlet's country; only fall
+// back to the stored s.country when the outlet can't be resolved.
+function resolvedCountryForShift(s) {
+  const outlet = s?.outlet ? allOutlets.find(o => o.name === s.outlet) : null;
+  if (outlet && outlet.country) return normaliseCountry(outlet.country);
+  return normaliseCountry(s?.country || outletCountry(s?.outlet));
+}
+function moneyForShift(n, s) { return moneyForCountry(n, resolvedCountryForShift(s)); }
+function countryForShift(s) { return resolvedCountryForShift(s); }
 
 // ── Country-scoped access (PH partner / Hiro) ───────────────────
 // When the logged-in user is locked to a single country, strip every other
@@ -11972,6 +11983,33 @@ async function tagExistingShifts(rows) {
           r._alreadyImported = false;
           r._syncStampOnly = true;   // matches a panel shift not yet linked to the app
         }
+        continue;
+      }
+
+      // STILL no match — the common cause is an UNMAPPED outlet: the import row's
+      // outlet (e.g. "Baggie's") never resolved to the panel outlet it was saved
+      // under (e.g. "Baggies' Butcher & Deli"), so the worker+outlet+date lookup
+      // above missed even though the booking really IS in the ops panel and is
+      // portal-synced. This is exactly why Hui Ling's already-merged 16 Jun
+      // booking kept reappearing in Import Bookings on every reload.
+      // Fall back to an OUTLET-INDEPENDENT match: find a same-worker panel shift
+      // on this date (allowing a name token-subset, e.g. panel "Hui Ling" vs
+      // import "Hui Ling Chong") that is already portal-synced. If found, the
+      // booking is already in the panel — mark it imported so it drops into the
+      // "Already in the ops panel" section instead of resurfacing as new.
+      const importToks = importNameTokens(r.worker_name);
+      const syncedSameWorkerDate = candidates.find(s => {
+        const sToks = importNameTokens(s.worker_name);
+        const nameMatches =
+          importNormName(s.worker_name) === wNorm ||
+          (importToks.length && (tokensSubset(importToks, sToks) || tokensSubset(sToks, importToks)));
+        if (!nameMatches) return false;
+        return importPanelShiftIsSynced(s);
+      });
+      if (syncedSameWorkerDate) {
+        r._existingShift = syncedSameWorkerDate;
+        r._existingMatch = 'exact';
+        r._alreadyImported = true;
       }
       continue;
     }
@@ -12009,9 +12047,25 @@ async function tagExistingShifts(rows) {
         r._alreadyImported = false;
       }
     } else {
-      // Same worker + time but a different outlet — genuine clash to review
-      r._existingShift = sameWorker[0];
-      r._existingMatch = 'overlap';
+      // Same worker + overlapping time but the outlet key differs. Usually a
+      // genuine clash to review — BUT if the import row's outlet is unmapped
+      // (didn't resolve to a real panel outlet) and the overlapping panel shift
+      // is already portal-synced, this is almost certainly the same booking saved
+      // under the panel's proper outlet name. Treat it as already-imported so it
+      // doesn't keep resurfacing as a clash on every reload.
+      const overlap = sameWorker[0];
+      const outletUnresolved = (() => {
+        try { return !resolveImportOutlet(r.outlet)?.match; } catch (_) { return true; }
+      })();
+      if (outletUnresolved && importPanelShiftIsSynced(overlap)) {
+        r._existingShift = overlap;
+        r._existingMatch = 'exact';
+        r._alreadyImported = true;
+      } else {
+        // Same worker + time but a different outlet — genuine clash to review
+        r._existingShift = overlap;
+        r._existingMatch = 'overlap';
+      }
     }
   }
 }
@@ -12455,7 +12509,7 @@ function parseShiftOpsFormat(lines, defaultCountry, importMode) {
       break_mins:          breakMins,
       clock_in:            finalClockIn,
       clock_out:           finalClockOut,
-      country:             normaliseCountry(defaultCountry),
+      country:             normaliseCountry((outletMatch && outletMatch.country) || (outletInfo.name ? outletCountry(outletInfo.name) : null) || defaultCountry),
       cancelled:           false,
       late_penalty:        latePenalty,
       cancellation_penalty: cancelPenalty,
@@ -12652,7 +12706,7 @@ function parseHeaderFormat(lines, defaultCountry, importMode) {
       scheduled_start: startRaw||'09:00', scheduled_end: endRaw||'17:00',
       rate: resolvedRate, break_mins: breakMins,
       clock_in: finalClockIn, clock_out: finalClockOut,
-      country: normaliseCountry(countryRaw),
+      country: normaliseCountry((outletMatch && outletMatch.country) || (outletInfo.name ? outletCountry(outletInfo.name) : null) || countryRaw),
       cancelled: false, late_penalty: 0, cancellation_penalty: 0,
     });
   }
@@ -12814,7 +12868,7 @@ function parseNaturalRosterFormat(lines, defaultCountry, importMode, fullText = 
       break_mins: defaultBreakMinsForRange(startRaw, endRaw) || 0,
       clock_in: forceCompleted ? startRaw : null,
       clock_out: forceCompleted ? endRaw : null,
-      country: normaliseCountry(defaultCountry),
+      country: normaliseCountry((outletMatch && outletMatch.country) || (outletInfo.name ? outletCountry(outletInfo.name) : null) || defaultCountry),
       cancelled: false,
       late_penalty: 0,
       cancellation_penalty: 0,
@@ -13211,6 +13265,10 @@ let _importNewOutletIdx = null;
 async function applyImportRows(rows) {
   importRows = rows;
   renderImportPreview();
+  // Make sure the portal sync index is available before reconciling — the
+  // "already in the ops panel & synced" fallback (which stops an already-merged
+  // booking with an unmapped outlet from reappearing as new) depends on it.
+  try { if (!portalSyncIndexLoaded) await buildPortalSyncIndex(); } catch (e) {}
   try {
     await tagExistingShifts(importRows);
   } catch (e) {
@@ -13790,6 +13848,10 @@ async function onImportOutletSelect(idx, val) {
       r._outletMatch = val;
       r._hasOutletMismatch = false;
       r._outletAutoMatched = false; // user explicitly chose — clear auto flag
+      // Re-stamp the row's country from the chosen outlet so the saved shift is paid
+      // in the outlet's currency (e.g. a Malaysian outlet → RM, not the import default).
+      const chosenOutlet = allOutlets.find(o => o.name === val);
+      if (chosenOutlet && chosenOutlet.country) r.country = normaliseCountry(chosenOutlet.country);
     }
   });
   await applyImportRows(importRows);
