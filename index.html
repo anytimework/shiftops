@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v40 — Fixed two Import Bookings issues. (1) Double-save / "runs forever": confirmImportBookings now takes an in-flight lock and disables + relabels the Confirm button ("⏳ Saving…") while writing, so a second click can't kick off a concurrent pass that merges/saves the same rows again (the repeated activity-log entries). It also fast-skips already-imported and unticked rows before any DB query, so importing a single booking out of a big paste no longer scans every row. (2) Already-merged booking reappearing: each row that's actually written this session is now stamped with _importedShiftId and kept marked done; tagExistingShifts preserves that stamp as long as the target booking still exists, so a saved/merged shift won't be offered again on the next import. New inserts capture their id via .select('id'). No schema change. -->
 <!-- Build patch: v39 — Import preview now has a per-row tick column so you can import a subset of bookings instead of all-or-nothing. Every importable row (mapped, not cancelled, not already-imported) shows a checkbox, ticked by default; a header checkbox selects/deselects all. Confirm only writes ticked rows — unticked ones stay in the preview for a later batch. Action-bar counts and the save button ("Save N selected shifts") reflect the current selection, with a "N unticked — will be left for later · Select all" hint. No schema change. -->
 <!-- Build patch: v38 — Manual merge picker is now scoped to the import row's OWN date: a 19 Jun shift only lists other 19 Jun bookings in the "🔗 Merge into existing…" dropdown. Dropped the cross-date worker fetch (and its extra query); candidates come straight from the same-date pool, ordered same worker+overlap → same worker same date → anyone else that date. Date removed from option labels since every option shares the row's date. No schema change. -->
 <!-- Build patch: v37 — Manual merge picker is now available on every row that has any existing booking to target, not just time-overlap matches. tagExistingShifts now also pulls each named worker's other recent bookings (any date, up to 400) and builds a broad _mergeCandidates list per row, ordered: same worker+overlap that date → same worker that date → same worker other dates → anyone else that date. The "🔗 Merge into existing…" dropdown now shows on Scheduled/Completed, Clash, auto-Merge and Already-imported rows, lists the date + outlet + time (and worker name when different), and on Confirm updates the chosen booking. No schema change. -->
@@ -11670,7 +11671,9 @@ function importOutletKey(name) {
 async function tagExistingShifts(rows) {
   if (!supabaseClient || !rows || !rows.length) return;
 
-  // Reset tags first
+  // Reset tags first. We keep any _importedShiftId stamp from a just-completed
+  // confirm so a row that WAS written this session stays marked done even if
+  // time-overlap matching would resolve it differently.
   rows.forEach(r => {
     r._existingShift = null;
     r._existingMatch = null;
@@ -11706,6 +11709,22 @@ async function tagExistingShifts(rows) {
   for (const r of rows) {
     if (!r.worker_name || r.worker_name === 'Available') continue;
     const candidates = byDate.get(r.shift_date) || [];
+
+    // If this row was already written this session, keep it marked done as long
+    // as its target booking still exists in the panel — independent of whether
+    // time-overlap matching would re-detect it. Prevents a saved/merged booking
+    // from reappearing as "to import" next time.
+    if (r._importedShiftId) {
+      const stillThere = candidates.some(s => s.id === r._importedShiftId)
+        || (existing || []).some(s => s.id === r._importedShiftId);
+      if (stillThere) {
+        r._existingShift = candidates.find(s => s.id === r._importedShiftId) || r._existingShift;
+        r._existingMatch = 'exact';
+        r._alreadyImported = true;
+        continue;
+      }
+    }
+
     const wNorm = importNormName(r.worker_name);
     const oNorm = importOutletKey(r.outlet);
 
@@ -13524,8 +13543,46 @@ function renderImportMetrics() {
   `;
 }
 
+let _importInFlight = false;
 async function confirmImportBookings() {
   if (!importRows.length) { toast('Nothing to import', 'error'); return; }
+
+  // Guard against double-clicks / re-entry. The serial DB work below can take a
+  // few seconds on a large paste; without this lock a second click would kick
+  // off a concurrent pass and write/merge everything twice (the duplicate
+  // activity-log entries seen before).
+  if (_importInFlight) return;
+  _importInFlight = true;
+
+  // Disable + relabel the confirm button so it's clearly working and can't be
+  // re-fired while in progress.
+  const confirmBtn = document.querySelector('#import-preview-body .btn-primary');
+  let prevBtnHtml = null;
+  if (confirmBtn) {
+    prevBtnHtml = confirmBtn.innerHTML;
+    confirmBtn.disabled = true;
+    confirmBtn.style.opacity = '0.6';
+    confirmBtn.style.cursor = 'wait';
+    confirmBtn.innerHTML = '⏳ Saving…';
+  }
+
+  try {
+    await _confirmImportBookingsInner();
+  } catch (e) {
+    console.error('Import failed:', e);
+    toast('Import failed: ' + (e?.message || e), 'error');
+  } finally {
+    _importInFlight = false;
+    if (confirmBtn && document.body.contains(confirmBtn)) {
+      confirmBtn.disabled = false;
+      confirmBtn.style.opacity = '';
+      confirmBtn.style.cursor = '';
+      if (prevBtnHtml != null) confirmBtn.innerHTML = prevBtnHtml;
+    }
+  }
+}
+
+async function _confirmImportBookingsInner() {
 
   let saved = 0, merged = 0, skipped = 0;
 
@@ -13545,6 +13602,11 @@ async function confirmImportBookings() {
 
     // Skip rows the user has unticked — they're left for a later import batch.
     if (r._selected === false) { skipped++; continue; }
+
+    // Fast-skip rows that are already fully in the panel (same booking, same
+    // clock times). No DB round-trip needed — avoids the slow per-row queries
+    // for the bulk of a large paste where most rows are already synced.
+    if (r._alreadyImported && !r._forceMergeId) { skipped++; continue; }
 
     const restriction = assignmentRestriction(r.worker_name, r.outlet);
     if (restriction) {
@@ -13589,6 +13651,12 @@ async function confirmImportBookings() {
         skipped++;
       } else {
         merged++;
+        // Stamp the row as done so it won't be re-offered next time, regardless
+        // of how time-overlap re-tagging resolves against the updated booking.
+        r._importedShiftId = r._forceMergeId;
+        r._alreadyImported = true;
+        r._existingMatch = 'exact';
+        r._forceMergeId = null;
       }
       continue;
     }
@@ -13651,6 +13719,9 @@ async function confirmImportBookings() {
         skipped++;
       } else {
         merged++;
+        r._importedShiftId = mergeTarget.id;
+        r._alreadyImported = true;
+        r._existingMatch = 'exact';
       }
       continue;
     }
@@ -13691,13 +13762,19 @@ async function confirmImportBookings() {
       updated_at:       new Date().toISOString(),
     };
 
-    const { error } = await supabaseClient.from('shifts').insert(payload);
+    const { data: insRows, error } = await supabaseClient
+      .from('shifts').insert(payload).select('id');
     if (error) {
       console.error('Import row failed:', error.message, payload);
       toast(`Failed to save ${r.worker_name}: ${error.message}`, 'error');
       skipped++;
     } else {
       saved++;
+      // Mark as imported so re-tagging (and any re-click) treats it as already
+      // in the panel rather than offering to insert it a second time.
+      r._importedShiftId = (insRows && insRows[0] && insRows[0].id) || r._importedShiftId || null;
+      r._alreadyImported = true;
+      r._existingMatch = 'exact';
     }
   }
 
