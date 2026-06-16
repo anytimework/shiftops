@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v53 — DURABLE import-handled ledger fixes the recurring "I already merged/mapped this booking but it keeps coming back after refresh" complaint, WITHOUT the long-blocked schema change (the sync_source column still doesn't exist in the live DB, so markShiftSyncSource still no-ops and feed-matching alone is too fragile across mapped outlets + subset names). New team-synced app_settings row key='import_handled' records, for every booking imported/merged/mapped-to-existing, a stable key → the panel shift id it went into. tagExistingShifts now consults this ledger FIRST (after the same-session _importedShiftId check, before the fragile worker+outlet+time matching): if the row's key is recorded and that shift still exists, it's recognised as already-in-panel and drops into the "Already in the ops panel" section — surviving refresh, new sessions, and other teammates. Self-cleaning: a ledger entry whose shift was deleted is pruned so the booking can be re-imported. Stable key uses _portalBookingId when present, else token-SORTED worker name + date + scheduled start/end, deliberately EXCLUDING the outlet (the outlet is exactly what gets remapped, e.g. "Baggie's" → "Baggies' Butcher & Deli", so keying on it is what made prior recognition miss after a remap). Recorded at all reconcile points: manual merge, auto-merge, no-op/mark-synced, new insert, autoStampSyncRows, and on worker/outlet map-reveal of an already-in-panel booking. Loaded at boot + before each reconcile (loadImportHandledRemote), flushed via saveImportHandled (localStorage instant + Supabase merge-union so concurrent devices don't clobber). Mirrors the outlet_groups storage pattern. Adding the sync_source column later still works and is complementary; this ledger makes it unnecessary for de-dup. -->
+<!-- Build patch: v52 — Currency fix: Malaysian-outlet shifts (e.g. Khairul at Five Guys (Pavillion Mall)) showed $ instead of RM on the gross/net amounts while the per-hour subline correctly showed RM. Cause: the paste/upload importer stamped each shift's country from the "Default Country" dropdown (often Singapore) even for a Malaysian outlet, and the payment renderer trusted that stale stored country. FIX (display): resolvedCountryForShift() now treats the matched OUTLET's country as the source of truth for currency, falling back to the stored s.country only when the outlet can't be resolved — so moneyForShift/countryForShift display the correct currency for all existing data immediately. FIX (data): all three paste/upload parsers now stamp country from the matched outlet (falling back to the default dropdown only when no outlet matched), and mapping/changing an outlet in the import preview re-stamps the row's country from the chosen outlet. ALSO (reconciler robustness): tagExistingShifts now has outlet-INDEPENDENT fallbacks — a same-worker (token-subset) panel shift on the same date that is portal-synced, and a same-worker overlapping shift whose only difference is an UNMAPPED outlet, are both treated as the same already-in-panel booking instead of resurfacing as new. The portal sync index is built before reconciling so these fallbacks have data on first load. -->
 <!-- Build patch: v51 — Console-confirmed the final mismatch: the portal stores the worker as "Hui Ling Chong" (full_name) but her ops-panel shift's worker_name is "Hui Ling". The v50 wd|name|date key was therefore "wd|hui ling chong|2026-06-16" while the attendance lookup built "wd|hui ling|2026-06-16" — exact-normalised keys can't bridge a subset/superset name. FIX: buildPortalSyncIndex now also stores a per-date list of portal worker TOKEN-SETS (portalWorkerTokensByDate), and isShiftPortalSynced falls back to a token-subset test — a panel shift counts as synced if its worker's name tokens are a subset (or superset) of any portal worker's tokens that date ("hui ling" ⊆ "hui ling chong"). Every token of the shorter name must be present, so unrelated people don't match; it's the same loosening the import reconciler already does, now applied to the attendance sync icon. Flips Hui Ling 16 Jun ⚠️→🔄 with no schema change. Added importNameTokens()/tokensSubset() helpers. (sync_source column still absent in this DB per console — fully optional; everything works off the live portal feed.) -->
 <!-- Build patch: v50 — Pinpointed via console: Hui Ling's 16 Jun panel shift has scheduled_start "08:00:00" (with seconds), and the sync_source column does NOT exist (markShiftSyncSource fails: "Could not find the 'sync_source' column"). So durable stamping is impossible AND the v49 timed worker key (w|name|date|HH:MM) could still miss when the portal shift's start_time is stored/parsed differently or is blank. FIX: buildPortalSyncIndex now also adds a time-INDEPENDENT key wd|workerNorm|date, and isShiftPortalSynced falls back to it — so a worker with ANY portal booking on that date reads as synced regardless of time-format ("08:00:00" vs "08:00") or a missing portal start_time. This makes Hui Ling's attendance icon go ⚠️→🔄 with no schema change. (Safe because a worker almost never has two distinct bookings on the same date.) Strongly recommended for durable, teammate-visible, cross-session origin tags: run once in Supabase SQL — alter table shifts add column sync_source text; — after which the import explicitly stamps matched shifts and the icon no longer depends on feed-matching at all. -->
 <!-- Build patch: v49 — The real reason Hui Ling (and others) stayed on the amber ⚠️ and "vanished" on outlet-select: the portal-sync index keyed on outlet|worker|date|time, but the portal's outlet name (from business_name) differs from the ops-panel outlet string whenever the import had to MAP the outlet (e.g. "Baggie's" → "Baggies' Butcher & Deli"). So isShiftPortalSynced() missed, the attendance row showed ⚠️, and on the import side the no-op match was treated as "not synced". FIX: buildPortalSyncIndex now ALSO indexes an outlet-independent key (worker-normalised-name|date|start), and isShiftPortalSynced() falls back to it. This flips Hui Ling's attendance icon ⚠️→🔄 WITHOUT needing the sync_source column at all (works purely off the live portal feed). On the import side it means such bookings are correctly recognised as already-synced. (2) onImportOutletSelect / onImportWorkerSelect are now async + await re-tagging, and onImportOutletSelect calls a new shared autoStampSyncRows() so mapping an outlet that reveals a "Mark as synced" row stamps it immediately (when the column exists) instead of leaving it dangling, and the toast now explains where the row went ("already in the ops panel, moved to the section below") rather than it silently disappearing. (3) Extracted autoStampSyncRows() and reused it in loadPortalBookings (was duplicated inline). NOTE on sync_source: if that column was never added to the shifts table, durable stamping is impossible, but the v49 portal-feed worker+date+time fallback means the green 🔄 still shows for genuinely-synced bookings; only the durable cross-session/teammate origin tag needs the column (alter table shifts add column sync_source text). No required schema change. -->
@@ -2555,6 +2557,99 @@ async function silentSyncOutletGroups() {
   } catch(e) { /* silent */ }
 }
 
+// ── Durable "import handled" ledger ──────────────────────────────────────────
+// The root cause of "I already merged/mapped this booking but it keeps coming
+// back after refresh" is that the only proof a booking was handled lived on the
+// in-memory importRows array (_importedShiftId / _importedThisSession), which is
+// wiped on reload. The intended durable proof was a `sync_source` column on the
+// shifts table, but that column was never added to the live DB, so every stamp
+// silently no-ops and recognition falls back to a fragile live-feed name/time
+// match that misses on mapped outlets and subset names.
+//
+// This ledger fixes that WITHOUT any schema change to `shifts`: it records, in
+// the same team-synced app_settings store used for outlet_groups, a stable key
+// for every booking we've imported/merged, pointing at the panel shift it went
+// into. On the next import, tagExistingShifts consults this ledger first — if a
+// row's key is recorded AND that shift still exists in the panel, the row is
+// recognised as already-handled and drops into the "Already in the ops panel"
+// section instead of resurfacing. Persists across refreshes, sessions, devices
+// and teammates. Self-cleaning: entries whose shift no longer exists are pruned.
+let importHandled = loadImportHandled(); // { [bookingKey]: { shiftId, when, by } }
+let importHandledLoaded = false;
+function loadImportHandled() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('import_handled_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch(e) { return {}; }
+}
+async function loadImportHandledRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'import_handled').maybeSingle();
+    if (error) { console.warn('importHandled remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      // Merge remote onto local so an in-flight local stamp isn't lost; remote
+      // entries win on conflict (they're the shared source of truth).
+      importHandled = { ...importHandled, ...data.value };
+      localStorage.setItem('import_handled_v1', JSON.stringify(importHandled));
+    } else {
+      const local = loadImportHandled();
+      if (Object.keys(local).length) { importHandled = local; await saveImportHandled(); }
+    }
+    importHandledLoaded = true;
+  } catch(e) { console.warn('importHandled remote load error:', e); }
+}
+async function saveImportHandled() {
+  localStorage.setItem('import_handled_v1', JSON.stringify(importHandled));
+  if (!supabaseClient) return false;
+  try {
+    // Merge with the current shared row before writing so concurrent imports on
+    // another device aren't clobbered (union of both ledgers).
+    let merged = importHandled;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'import_handled').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        merged = { ...data.value, ...importHandled };
+        importHandled = merged;
+        localStorage.setItem('import_handled_v1', JSON.stringify(importHandled));
+      }
+    } catch(e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'import_handled', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('importHandled remote save failed:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('importHandled remote save error:', e); return false; }
+}
+// Stable identity for a booking, independent of outlet-name mapping and name
+// subset/superset. Prefers the portal booking id when present (the most stable),
+// else falls back to worker(token-sorted) + date + scheduled start/end. Outlet is
+// deliberately EXCLUDED from the fallback key because the same booking is exactly
+// what gets remapped (e.g. "Baggie's" → "Baggies' Butcher & Deli"), and including
+// a mutable outlet name is what made prior keys miss after a remap.
+function importBookingKey(row) {
+  if (row && row._portalBookingId != null && row._portalBookingId !== '') {
+    return 'pb|' + String(row._portalBookingId);
+  }
+  const w = (importNameTokens(row?.worker_name || '')).slice().sort().join(' ');
+  const d = String(row?.shift_date || '').slice(0, 10);
+  const ss = String(row?.scheduled_start || '').slice(0, 5);
+  const se = String(row?.scheduled_end || '').slice(0, 5);
+  return ['k', w, d, ss, se].join('|');
+}
+// Record that a booking row was imported/merged into a specific panel shift.
+function markImportHandled(row, shiftId) {
+  if (!row || !shiftId) return;
+  const key = importBookingKey(row);
+  if (!key) return;
+  importHandled[key] = {
+    shiftId: String(shiftId),
+    when: new Date().toISOString(),
+    by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : ''
+  };
+}
+
 // exactly what bans/restrictions are in Supabase vs. this device's local copy.
 // This pinpoints whether a ban failed to save (missing in Supabase) or failed to
 // sync (in Supabase but not applied locally). Safe, read-only.
@@ -2826,6 +2921,9 @@ async function init() {
   loadOutletGroupsRemote().then(() => {
     try { if (document.getElementById('page-reports')?.style.display !== 'none') { populateReportOutletSelect(); renderGroupManager(); } } catch(e){}
   }).catch(()=>{});
+  // Team-wide durable "import handled" ledger so already-merged/mapped bookings
+  // stay recognised across refreshes, sessions and teammates (no schema change).
+  loadImportHandledRemote().catch(()=>{});
   // Team-wide Periskope config so every device can send WhatsApp (not just the one
   // where the API key was first entered).
   loadPeriskopeConfigShared().catch(()=>{});
@@ -11924,6 +12022,34 @@ async function tagExistingShifts(rows) {
       }
     }
 
+    // DURABLE LEDGER CHECK (survives refresh / new session / other teammates).
+    // If we previously imported or merged this exact booking, the ledger holds
+    // the panel shift id it went into. As long as that shift still exists, the
+    // booking is already in the ops panel — recognise it immediately, before the
+    // fragile worker+outlet+time matching that misses on remapped outlets and
+    // subset names. This is what stops an already-merged/mapped booking from
+    // reappearing every time you re-paste/reload the import.
+    {
+      const ledgerKey = importBookingKey(r);
+      const handled = ledgerKey && importHandled[ledgerKey];
+      if (handled && handled.shiftId) {
+        const hit = candidates.find(s => String(s.id) === String(handled.shiftId))
+          || (existing || []).find(s => String(s.id) === String(handled.shiftId));
+        if (hit) {
+          r._existingShift = hit;
+          r._existingMatch = 'exact';
+          r._alreadyImported = true;
+          r._importedShiftId = hit.id;
+          continue;
+        }
+        // The recorded shift no longer exists (deleted/cancelled). Prune the stale
+        // ledger entry so this booking can be re-imported cleanly, and persist the
+        // cleanup in the background.
+        delete importHandled[ledgerKey];
+        try { saveImportHandled(); } catch(e){}
+      }
+    }
+
     const wNorm = importNormName(r.worker_name);
     const oNorm = importOutletKey(r.outlet);
 
@@ -13269,6 +13395,10 @@ async function applyImportRows(rows) {
   // "already in the ops panel & synced" fallback (which stops an already-merged
   // booking with an unmapped outlet from reappearing as new) depends on it.
   try { if (!portalSyncIndexLoaded) await buildPortalSyncIndex(); } catch (e) {}
+  // Make sure the durable "import handled" ledger is loaded (team-wide) before
+  // tagging, so previously merged/mapped bookings are recognised even on a fresh
+  // device or by another teammate who didn't perform the original import.
+  try { if (!importHandledLoaded) await loadImportHandledRemote(); } catch (e) {}
   try {
     await tagExistingShifts(importRows);
   } catch (e) {
@@ -13824,6 +13954,13 @@ async function onImportWorkerSelect(idx, val) {
     }
   });
   await applyImportRows(importRows);
+  // If mapping this worker revealed that the booking is already in the ops panel,
+  // record it durably so it stays recognised after refresh (and doesn't reappear
+  // unmapped on the next paste). Persist in the background.
+  if (target._alreadyImported && target._existingShift && target._existingShift.id) {
+    markImportHandled(target, target._existingShift.id);
+    try { saveImportHandled(); } catch(e){}
+  }
   if (target._alreadyImported) {
     toast(`Mapped "${rawName}" → "${val}" — this booking is already in the ops panel, moved to the section below.`, 'info');
   } else {
@@ -13862,6 +13999,20 @@ async function onImportOutletSelect(idx, val) {
   // below cleanly — instead of just disappearing with nothing happening.
   await autoStampSyncRows(r => r.outlet === val);
 
+  // Durably record any row that mapping just resolved to an already-in-panel
+  // booking, so the mapping decision survives refresh and the booking doesn't
+  // reappear unmapped on the next paste. Covers all rows touched by this map
+  // (bulk-applied unmapped rows sharing the same raw outlet name), not just the
+  // clicked one.
+  let recordedAny = false;
+  importRows.forEach(r => {
+    if (r.outlet === val && r._alreadyImported && r._existingShift && r._existingShift.id) {
+      markImportHandled(r, r._existingShift.id);
+      recordedAny = true;
+    }
+  });
+  if (recordedAny) { try { saveImportHandled(); } catch(e){} }
+
   if (target._alreadyImported) {
     const reallySynced = importPanelShiftIsSynced(target._existingShift) || target._importedThisSession === 'merged';
     toast(reallySynced
@@ -13891,10 +14042,12 @@ async function autoStampSyncRows(filterFn) {
       r._importedThisSession = 'merged';
       r._alreadyImported = true;
       r._syncStampOnly = false;
+      markImportHandled(r, r._existingShift.id);
       ok++;
     } catch (e) { /* non-fatal */ }
   }
   if (ok) {
+    try { saveImportHandled(); } catch (e) {}
     try { await loadShifts(); } catch (e) {}
     try { await tagExistingShifts(importRows); } catch (e) {}
     renderImportPreview();
@@ -14144,6 +14297,7 @@ async function _confirmImportBookingsInner() {
         r._importedThisSession = 'merged';
         r._existingMatch = 'exact';
         await markShiftSyncSource(r._forceMergeId, 'merged');
+        markImportHandled(r, r._forceMergeId);
         r._forceMergeId = null;
       }
       continue;
@@ -14202,6 +14356,7 @@ async function _confirmImportBookingsInner() {
         r._alreadyImported = true;
         r._syncStampOnly = false;
         r._existingMatch = 'exact';
+        markImportHandled(r, mergeTarget.id);
         continue;
       }
 
@@ -14247,6 +14402,7 @@ async function _confirmImportBookingsInner() {
         // Durable origin tag: an import reconciled into an existing panel shift
         // → counts as synced (🔄). (No-op if column not present.)
         await markShiftSyncSource(mergeTarget.id, 'merged');
+        markImportHandled(r, mergeTarget.id);
       }
       continue;
     }
@@ -14304,11 +14460,18 @@ async function _confirmImportBookingsInner() {
       // Durable origin tag: created from an app booking, no prior panel shift
       // to reconcile against → shows the 📱 icon. (No-op if column not present.)
       if (r._importedShiftId) await markShiftSyncSource(r._importedShiftId, 'import');
+      if (r._importedShiftId) markImportHandled(r, r._importedShiftId);
     }
   }
 
   await loadWorkers();
   await loadOutlets();
+
+  // Persist the durable "import handled" ledger (team-wide, survives reloads) so
+  // everything saved/merged/stamped this pass is recognised next time and never
+  // resurfaces as a new import. Fire-and-forget; localStorage is already updated.
+  const wroteAnything = (saved + merged + stamped) > 0;
+  if (wroteAnything) { try { saveImportHandled(); } catch(e){} }
 
   const wroteCount = saved + merged + stamped;
   let msg = [];
