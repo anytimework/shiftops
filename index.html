@@ -4428,7 +4428,10 @@ function malaysiaSafeDate(dateStr) {
 function payrollSummary(s) {
   const hours = calcShiftHours(s);
   if (!hours) return '—';
-  const country = normaliseCountry(s?.country || outletCountry(s.outlet));
+  // Use the outlet-resolved country (not the possibly-stale stored s.country) so
+  // a Malaysian-outlet shift reads "at RM15/hr", not "at SG15/hr", even when the
+  // import stamped the wrong default country on the shift row.
+  const country = resolvedCountryForShift(s);
   // For special rate members, payroll summary uses the rate worker actually receives
   const effectiveRate = (!s.sr_worker && s.sr_rate && parseFloat(s.sr_rate) > parseFloat(s.rate||0))
     ? parseFloat(s.sr_rate) : parseFloat(s.rate || 0);
@@ -4450,7 +4453,8 @@ function payrollSummary(s) {
 function simplePayrollText(s) {
   const hours = calcShiftHours(s);
   if (!hours) return '—';
-  const country = normaliseCountry(s?.country || outletCountry(s.outlet));
+  // Outlet is the source of truth for currency — see resolvedCountryForShift.
+  const country = resolvedCountryForShift(s);
   const rate = Number(s.rate || 0).toFixed(0);
   if (country === 'Malaysia') return `${cleanHourText(hours)} work on ${malaysiaSafeDate(s.shift_date)} at RM${rate} per hr`;
   if (country === 'Philippines') return `${formatHourValue(hours)}hrs work on ${formatShortDate(s.shift_date)} at ₱${rate}/hr`;
@@ -11669,7 +11673,7 @@ async function generateCancellationReport(from, to, outletList, cancelType, selL
 
 function reportMoney(n, outlet) {
   if (outlet) return moneyForCountry(n, outletCountry(outlet));
-  const countries = [...new Set(currentReportRows.map(s => normaliseCountry(s?.country || outletCountry(s.outlet))))];
+  const countries = [...new Set(currentReportRows.map(s => resolvedCountryForShift(s)))];
   if (countries.length === 1) return moneyForCountry(n, countries[0]);
   return Number(n || 0).toFixed(2);
 }
@@ -16258,8 +16262,10 @@ function _billingFilterShifts(rows) {
       if (!workerName || workerName === 'available') return false;
       if (!s.outlet) return false;
       // Only SG shifts — billing is in SGD; MY (RM) and PH (₱) shifts use other
-      // currencies and would corrupt SGD invoice totals.
-      const country = normaliseCountry(s.country || outletCountry(s.outlet));
+      // currencies and would corrupt SGD invoice totals. Resolve via the outlet
+      // (source of truth) so a Malaysian-outlet shift left with a stale SG
+      // country at import time isn't wrongly pulled into an SGD invoice.
+      const country = resolvedCountryForShift(s);
       if (country !== 'Singapore') return false;
       // A billable compensation amount must reach the invoice even though the
       // shift was never worked (no clock-in/out, e.g. outlet declined late).
