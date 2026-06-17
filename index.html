@@ -14747,6 +14747,12 @@ async function _confirmImportBookingsInner() {
     // Skip rows the user has unticked — they're left for a later import batch.
     if (r._selected === false) { skipped++; continue; }
 
+    // Skip rows the user explicitly ignored. They live in the "Ignored" section,
+    // are never saved or reconciled, and must NOT enter the clash check — otherwise
+    // an ignored booking still runs the live-DB overlap query and pops a "Clash
+    // detected!" confirm even though we're not importing it.
+    if (r._ignored) { skipped++; continue; }
+
     // Fast-skip rows that are already fully in the panel (same booking, same
     // clock times). No DB round-trip needed — avoids the slow per-row queries
     // for the bulk of a large paste where most rows are already synced.
