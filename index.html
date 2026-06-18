@@ -2797,6 +2797,82 @@ async function unignoreImportRow(idx) {
   toast('Booking un-ignored — it can be imported again.');
 }
 
+// ── Cancellation ACKNOWLEDGEMENT ledger ──────────────────────────────────────
+// A portal-cancelled booking that is still active in the ops panel is surfaced
+// in the "✕ Cancelled in the portal" section so the team can action it manually
+// (the app never auto-cancels the panel shift). Once a user has dealt with it
+// (cancelled it in the panel, or decided to leave it), they tap "Acknowledge"
+// and it drops out of the cancelled section AND stops counting toward the nav
+// badge. Keyed by the same stable importBookingKey, stored in the team-synced
+// app_settings store. Survives refresh / new session / teammates, exactly like
+// import_ignored. Self-contained — no schema change.
+let importCancelAck = loadImportCancelAck(); // { [bookingKey]: { when, by, label } }
+let importCancelAckLoaded = false;
+function loadImportCancelAck() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('import_cancel_ack_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch(e) { return {}; }
+}
+async function loadImportCancelAckRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'import_cancel_ack').maybeSingle();
+    if (error) { console.warn('importCancelAck remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      importCancelAck = { ...importCancelAck, ...data.value };
+      localStorage.setItem('import_cancel_ack_v1', JSON.stringify(importCancelAck));
+    } else {
+      const local = loadImportCancelAck();
+      if (Object.keys(local).length) { importCancelAck = local; await saveImportCancelAck(); }
+    }
+    importCancelAckLoaded = true;
+  } catch(e) { console.warn('importCancelAck remote load error:', e); }
+}
+async function saveImportCancelAck() {
+  localStorage.setItem('import_cancel_ack_v1', JSON.stringify(importCancelAck));
+  if (!supabaseClient) return false;
+  try {
+    let merged = importCancelAck;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'import_cancel_ack').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        merged = { ...data.value, ...importCancelAck };
+        importCancelAck = merged;
+        localStorage.setItem('import_cancel_ack_v1', JSON.stringify(importCancelAck));
+      }
+    } catch(e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'import_cancel_ack', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('importCancelAck remote save failed:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('importCancelAck remote save error:', e); return false; }
+}
+function isImportCancelAcked(row) {
+  const key = importBookingKey(row);
+  return !!(key && importCancelAck[key]);
+}
+// Mark a portal-cancellation row acknowledged, persist, and re-render so it drops
+// out of the cancelled section and stops counting toward the nav badge.
+async function acknowledgeCancelRow(idx) {
+  const r = importRows[idx];
+  if (!r) return;
+  const key = importBookingKey(r);
+  if (!key) return;
+  importCancelAck[key] = {
+    when: new Date().toISOString(),
+    by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : '',
+    label: `${r.worker_name || '—'} · ${r.shift_date || ''} · ${(r.scheduled_start||'').slice(0,5)}–${(r.scheduled_end||'').slice(0,5)}`
+  };
+  r._cancelAcked = true;
+  try { await saveImportCancelAck(); } catch(e){}
+  renderImportPreview();
+  try { updateImportNavBadge(); } catch(e){}
+  toast('Cancellation acknowledged.');
+}
+
 // exactly what bans/restrictions are in Supabase vs. this device's local copy.
 // This pinpoints whether a ban failed to save (missing in Supabase) or failed to
 // sync (in Supabase but not applied locally). Safe, read-only.
@@ -3137,6 +3213,9 @@ async function init() {
   // Team-wide durable "import ignored" ledger so deliberately-skipped bookings
   // don't resurface on refresh/session/teammate (no schema change).
   loadImportIgnoredRemote().catch(()=>{});
+  // Team-wide durable "cancellation acknowledged" ledger so acknowledged portal
+  // cancellations stay dismissed across refresh/session/teammate (no schema change).
+  loadImportCancelAckRemote().catch(()=>{});
   // Team-wide Periskope config so every device can send WhatsApp (not just the one
   // where the API key was first entered).
   loadPeriskopeConfigShared().catch(()=>{});
@@ -4416,7 +4495,13 @@ function payrollStartTime(s) {
   // Apply the same 15-min block / 5-min grace quantization used for clock-out.
   // Examples: 4:47 → 4:45 (within 5-min grace of 4:45 block), 4:55 → 5:00 (past grace → next block)
   //           5:03 → 5:00 (on-time grace), 5:08 → 5:15 (late, next block)
-  const qM = quantizeClockOutMins(ciM);
+  let qM = quantizeClockOutMins(ciM);
+  // Clients only pay from the scheduled shift start. An EARLY clock-in (worker
+  // arrives before their shift) must never bill the client before the scheduled
+  // start — including the 15-min rounding, which would otherwise pull e.g. a
+  // 10:19 clock-in for a 10:30 shift down to 10:15. Floor the counted start at
+  // the scheduled start so early arrivals are paid from scheduled time, not earlier.
+  if (qM < schedM) qM = schedM;
   return minsToTime(qM % 1440);
 }
 function calcShiftHours(s) {
@@ -7371,8 +7456,38 @@ async function confirmClockInModal() {
   const id = document.getElementById('ci-modal-shift-id').value;
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
-  const ci = document.getElementById('ci-modal-time').value;
+  let ci = document.getElementById('ci-modal-time').value;
   if (!ci) { toast('Please enter a clock-in time', 'error'); return; }
+
+  // ── Early clock-in guard ────────────────────────────────────────────────
+  // A worker who arrives BEFORE their shift starts should not cause the client
+  // to be billed before the scheduled start. The 15-min rounding can pull an
+  // early clock-in below the scheduled start (e.g. 10:19 → 10:15 for a 10:30
+  // shift). When that happens, prompt: record the actual early time, or snap
+  // the clock-in to the scheduled start. If the worker arrives close enough that
+  // rounding already lands on (or after) the scheduled start — e.g. 10:22 → 10:30
+  // for a 10:30 shift — there's nothing to bill early, so no prompt is shown.
+  const sched = s.scheduled_start?.slice(0,5);
+  if (sched) {
+    let schedM = toMins(sched);
+    let ciM = toMins(ci);
+    if (ciM < schedM - 720) ciM += 1440; // overnight safety
+    const roundedM = quantizeClockOutMins(ciM);
+    if (ciM < schedM && roundedM < schedM) {
+      const useScheduled = confirm(
+        `⏰ Early clock-in\n\n` +
+        `${s.worker_name || 'Worker'} is clocking in at ${ci}, before the scheduled start of ${sched}.\n\n` +
+        `The client is only billed from the scheduled start time (${sched}), so this early time won't be billed earlier.\n\n` +
+        `• OK — record the clock-in as ${sched} (the scheduled start).\n` +
+        `• Cancel — keep the actual time ${ci} (payroll still starts at ${sched}).`
+      );
+      if (useScheduled) {
+        ci = sched;
+        document.getElementById('ci-modal-time').value = sched;
+      }
+    }
+  }
+
   const breakMins = parseInt(document.getElementById('ci-modal-break').value) || 0;
   const role = document.getElementById('ci-modal-role').value;
   const rate = parseFloat(document.getElementById('ci-modal-rate').value) || parseFloat(s.rate) || 0;
@@ -13847,16 +13962,25 @@ async function loadPortalBookings(opts) {
 }
 
 // ── Import nav badge + background auto-importer (v56) ──────────────────────
-// The badge beside "Import Bookings" shows how many portal bookings are loaded
-// into the preview but NOT yet saved into the ops panel — i.e. rows that would
-// be written on Confirm. (Selectable rows: mapped, not cancelled, not already
-// in the panel, not ignored.) Cancelled-in-portal bookings still in the panel
-// are added on top so they're not invisible — they need attention too.
+// The badge beside "Import Bookings" reflects how much still needs the user's
+// attention in the import preview:
+//   (a) actionable rows that aren't done yet — rows that are not already in the
+//       panel, not ignored, not portal-cancelled. This covers both rows ready to
+//       save (mapped + selected) AND rows that still need worker/outlet mapping
+//       (the "1 to reconcile" the user sees), and
+//   (b) portal-cancelled bookings still active in the ops panel that the user has
+//       NOT yet acknowledged. Once acknowledged (via the section's Acknowledge
+//       button) they drop out of both the section and this count.
+// Acknowledged cancellations and rows already in the panel never count.
 function importUnsyncedCount() {
   if (!Array.isArray(importRows) || !importRows.length) return 0;
-  const pending = importRows.filter(importRowIsSelected).length;
-  const cancelledNeedsAction = importRows.filter(r => r._portalCancelled && r._alreadyImported).length;
-  return pending + cancelledNeedsAction;
+  const actionable = importRows.filter(r =>
+    !r._alreadyImported && !r._ignored && !r._portalCancelled
+  ).length;
+  const cancelledNeedsAction = importRows.filter(r =>
+    r._portalCancelled && r._alreadyImported && !isImportCancelAcked(r)
+  ).length;
+  return actionable + cancelledNeedsAction;
 }
 function updateImportNavBadge() {
   const badge = document.getElementById('import-nav-badge');
@@ -14493,15 +14617,23 @@ function renderImportPreview() {
       </div>`;
   }
 
-  // ── "Cancelled in portal" section (v56) ─────────────────────────────────
+  // ── "Cancelled in portal" section (v56; v57 acknowledge) ────────────────
   // Bookings the customer cancelled in the app portal. Flag-only: those already
   // in the ops panel are surfaced here for the user to action manually (the app
   // never auto-cancels the panel shift); those not yet imported are kept out of
   // the actionable list so a cancelled booking is never saved as a new shift.
-  const cancelledRows = importRows.filter(r => r._portalCancelled);
+  // v57: each in-panel cancellation gets an "Acknowledge" button. Acknowledging
+  // it (after the user has cancelled it in the panel, or decided to leave it)
+  // drops it out of this section and stops it counting toward the nav badge.
+  // Acknowledgements are team-synced and survive refresh/session/teammate.
+  // Build [row, originalIndex] pairs so the Acknowledge button can target the
+  // correct importRows index, then drop any rows already acknowledged.
+  const cancelledRows = importRows
+    .map((r, idx) => ({ r, idx }))
+    .filter(({ r }) => r._portalCancelled && !isImportCancelAcked(r));
   let cancelledSection = '';
   if (cancelledRows.length) {
-    const sectionRows = cancelledRows.map(r => {
+    const sectionRows = cancelledRows.map(({ r, idx }) => {
       const worker = escapeHtml(r.worker_name || r._workerRaw || 'Available');
       const outlet = escapeHtml(r.outlet || r._outletRaw || '—');
       const role   = escapeHtml(r.role || '—');
@@ -14512,6 +14644,13 @@ function renderImportPreview() {
            <div class="sub-text" style="color:var(--amber);font-size:10px;margin-top:2px;">This booking IS in the ops panel as active. Cancel it there if appropriate.</div>`
         : `<span class="badge" style="background:rgba(150,156,174,0.18);color:var(--text2);">✕ Cancelled — not imported</span>
            <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Not in the panel; won't be saved.</div>`;
+      // Only in-panel cancellations need acknowledging (they're the ones that
+      // count toward the badge and need manual action). "Not imported" rows are
+      // informational and don't need a dismiss action.
+      const ackCell = inPanel
+        ? `<button class="btn btn-sm" style="font-size:11px;padding:3px 10px;background:rgba(60,200,120,0.14);border:1px solid rgba(60,200,120,0.4);border-radius:5px;color:var(--green);cursor:pointer;white-space:nowrap;"
+             title="I've handled this — remove it from this list and the badge" onclick="acknowledgeCancelRow(${idx})">✓ Acknowledge</button>`
+        : `<span style="font-size:11px;color:var(--text3);">—</span>`;
       return `<tr style="opacity:0.85;">
         <td style="font-family:var(--mono);font-size:12px;">${escapeHtml(r.shift_date || '')}</td>
         <td style="font-size:12px;">${worker}</td>
@@ -14519,10 +14658,11 @@ function renderImportPreview() {
         <td style="font-size:12px;">${role}</td>
         <td style="font-family:var(--mono);font-size:12px;">${times}</td>
         <td>${statusBadge}</td>
+        <td style="text-align:right;">${ackCell}</td>
       </tr>`;
     }).join('');
 
-    const inPanelN = cancelledRows.filter(r => r._alreadyImported).length;
+    const inPanelN = cancelledRows.filter(({ r }) => r._alreadyImported).length;
     const breakdown = [
       inPanelN ? `${inPanelN} still in the ops panel — needs your attention` : '',
       (cancelledRows.length - inPanelN) ? `${cancelledRows.length - inPanelN} not imported` : '',
@@ -14543,7 +14683,7 @@ function renderImportPreview() {
           <table>
             <thead><tr>
               <th>Date</th><th>Worker</th><th>Outlet / Client</th><th>Role</th>
-              <th>Scheduled</th><th>Status</th>
+              <th>Scheduled</th><th>Status</th><th style="text-align:right;">Action</th>
             </tr></thead>
             <tbody>${sectionRows}</tbody>
           </table>
