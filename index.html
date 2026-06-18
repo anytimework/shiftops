@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v56 — Two requests + a safety fix. (1) AUTO-IMPORTER ("cron-like"): a background timer (startAutoImport, every 5 min while the app is open) silently runs the SAME portal load→reconcile pipeline the "Load synced portal bookings" button uses, via a new loadPortalBookings({silent:true}) mode that suppresses toasts + the button's disabled/label churn. It does NOT auto-save — per ops, the user still clicks Confirm; it just keeps the Import Bookings preview and the new nav badge current so new portal bookings (and cancellations) surface on their own. First pass ~8s after boot, then on cadence; skips overlap while a prior run or a Confirm write is in flight. NOTE: this runs only while a browser tab is open — it is not a true 24/7 server cron (no backend to host one); a Supabase scheduled Edge Function would be needed for that. (2) NAV NOTIFICATION BADGE beside Import Bookings (#import-nav-badge): shows the count of portal bookings loaded-but-not-yet-saved (selectable rows = mapped, not cancelled, not already in panel, not ignored) PLUS any cancelled-in-portal bookings that are still active in the ops panel (they need attention). updateImportNavBadge() runs on every renderImportPreview, after each load, and after Confirm. (3) PORTAL CANCELLATION DETECTION (flag-only): loadPortalBookings already FETCHED portal_bookings.status/.working_status and portal_shifts.status but never read them (every row was hardcoded cancelled:false), so a customer cancelling in the app portal was invisible. Now portalStatusLooksCancelled() tests all three against a broad cancel-token regex (cancel/void/rejected/withdrawn/declined/no-show) and stamps r._portalCancelled. Such rows are excluded from importRowIsSelectable (never auto-saved) and the main actionable table, and dropped into a new collapsible "✕ Cancelled in the portal" section that distinguishes "still in the ops panel — needs your attention" (flag only; the app never auto-cancels the panel shift) from "not imported". Because we don't yet know this portal's exact cancel value, every distinct status string seen per load is console-logged once ([portal status values seen this load]) so the real value can be confirmed and the regex tightened later. No schema change. -->
 <!-- Build patch: v55 — Two requests. (1) WHATSAPP GROUP PICKER now has a type-to-filter search box above a multi-row list (size=8), so finding a group among many doesn't require scrolling a tiny native popup. Filters live by name or @g.us id. (2) RESTORED Client Booking Requirements (was absent from this build line): outlets can define requirements (e.g. "Is the worker 18 years old and above?") that must be ticked before booking. Per ops: if a worker already passed ALL current requirements the modal is SKIPPED entirely (silent pass); adding a NEW requirement only needs the new tick (old passes kept); gate applies to ALL paths (Add Shift form, inline/standby assignment via assignWorkerToOpenSlot, AI chatbot). Data: profileMeta.outlets[k].requirements=[{id,label}], profileMeta.workers[k].passed_requirements={[outletKey]:[reqId]}. assignmentRestriction returns a REQ_SENTINEL-prefixed string for unmet requirements; isRequirementGate() lets interactive callers open the checklist modal (ensureRequirementsMet) instead of hard-blocking; suggestion filters and offers don't hide/block on the soft gate; imports never apply it (past records). mergeProfileMeta extended: requirements replaced by primary, passed_requirements deep-unioned per outlet so no device loses verification history. Outlet modal gains a requirements editor; outlet rows show a 📋 count. AI: createShift lists unmet reqs and asks for "confirm requirements" → forceCreateShift records the pass and proceeds; new addOutletRequirement / removeOutletRequirement / listOutletRequirements actions + context block. No schema change. -->
 <!-- Build patch: v54 — Four fixes. (1) IGNORE BOOKINGS: new durable team-synced "import_ignored" ledger (app_settings key='import_ignored', parallel to import_handled, same stable importBookingKey). Every actionable import-preview row gets a "🚫 Ignore" button; ignored bookings drop into a new collapsible "Ignored — won't be imported" section and never resurface on reload/refresh/new session/teammate. Each is un-ignorable from that section. tagExistingShifts flags ignored rows first; importRowIsSelectable excludes them; loaded at boot + before each reconcile. No schema change. (2) AI CLOCK-OUT ALERT: the AI chatbot's clockOut action updated the DB + logged but never called notifyPayrollClockOut, so AI-driven clock-outs sent no WhatsApp group alert (manual + edit-shift paths already did). Now fires buildClockOutMessage→notifyPayrollClockOut on a NEW clock-out only. (3) CLIENT WHATSAPP GROUP DROPDOWN restored on the Add/Edit outlet modal: "🔍 Fetch my WhatsApp groups" button + select reusing the Periskope chats endpoint (same as WhatsApp Alerts), writes the @g.us id into of-chat-link; resets on modal open; manual paste still works. (4) Estimated Payment card was NOT removed — confirmed still rendered in the metrics block; no structure touched. -->
 <!-- Build patch: v53 — DURABLE import-handled ledger fixes the recurring "I already merged/mapped this booking but it keeps coming back after refresh" complaint, WITHOUT the long-blocked schema change (the sync_source column still doesn't exist in the live DB, so markShiftSyncSource still no-ops and feed-matching alone is too fragile across mapped outlets + subset names). New team-synced app_settings row key='import_handled' records, for every booking imported/merged/mapped-to-existing, a stable key → the panel shift id it went into. tagExistingShifts now consults this ledger FIRST (after the same-session _importedShiftId check, before the fragile worker+outlet+time matching): if the row's key is recorded and that shift still exists, it's recognised as already-in-panel and drops into the "Already in the ops panel" section — surviving refresh, new sessions, and other teammates. Self-cleaning: a ledger entry whose shift was deleted is pruned so the booking can be re-imported. Stable key uses _portalBookingId when present, else token-SORTED worker name + date + scheduled start/end, deliberately EXCLUDING the outlet (the outlet is exactly what gets remapped, e.g. "Baggie's" → "Baggies' Butcher & Deli", so keying on it is what made prior recognition miss after a remap). Recorded at all reconcile points: manual merge, auto-merge, no-op/mark-synced, new insert, autoStampSyncRows, and on worker/outlet map-reveal of an already-in-panel booking. Loaded at boot + before each reconcile (loadImportHandledRemote), flushed via saveImportHandled (localStorage instant + Supabase merge-union so concurrent devices don't clobber). Mirrors the outlet_groups storage pattern. Adding the sync_source column later still works and is complementary; this ledger makes it unnecessary for de-dup. -->
@@ -793,6 +794,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 
       <button class="nav-item" onclick="switchPage('import',this)">
         <span class="nav-icon">⬆️</span> Import Bookings
+        <span class="nav-badge" id="import-nav-badge" style="background:var(--amber);color:#1b1304;" title="Portal bookings loaded but not yet saved into the ops panel">0</span>
       </button>
       <button class="nav-item" onclick="switchPage('reports',this)">
         <span class="nav-icon">📊</span> Reports
@@ -3149,6 +3151,10 @@ async function init() {
   startLeavePolling();
   // Team chat: load history, wire dragging, start near-live polling + unread badge.
   initTeamChat().catch(()=>{});
+  // v56: background auto-importer — silently pulls + reconciles portal bookings
+  // on a timer while the app is open, and keeps the Import Bookings nav badge
+  // (unsaved count) current. Does NOT auto-save; user still clicks Confirm.
+  startAutoImport();
   checkReminderAlerts();
   updateTasksNavBadge();
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
@@ -12335,6 +12341,36 @@ let importHideReconciled = true;
 // actionable list stays clean; the user can expand to audit what was skipped.
 let importShowReconciledSection = false;
 let importShowIgnoredSection = false;
+// Cancelled-in-portal rows get their own collapsible section too (v56).
+let importShowCancelledSection = true;
+
+// ── Portal cancellation detection (v56) ───────────────────────────────────
+// A customer can cancel a booking in the app portal. The portal feed carries
+// the booking's status across (portal_bookings.status / .working_status and
+// portal_shifts.status), but the loader historically hardcoded cancelled:false
+// and never read them, so a cancelled portal booking either (a) still showed up
+// as a fresh booking to save, or (b) sat untouched in the ops panel as active.
+//
+// We DON'T know the exact value this portal writes on cancel, so detect broadly
+// against a set of cancel-like tokens AND log every distinct status value seen,
+// so the real value can be confirmed from the console after a live cancellation
+// and the match tightened later. Flag-only: a cancelled booking already in the
+// ops panel is surfaced for the user to action — never auto-cancelled.
+const PORTAL_CANCEL_RE = /\b(cancel+ed|cancel+ation|cancel|void(ed)?|reject(ed)?|withdrawn|declined|no[\s_-]?show)\b/i;
+function portalStatusLooksCancelled(...vals) {
+  return vals.some(v => v != null && v !== '' && PORTAL_CANCEL_RE.test(String(v)));
+}
+// Collects the distinct status strings observed during a load so we can print
+// them once (not per-row) for diagnosis.
+let _portalStatusSeen = null;
+function notePortalStatus(b, shift) {
+  if (!_portalStatusSeen) _portalStatusSeen = new Set();
+  if (b) {
+    if (b.status != null && b.status !== '') _portalStatusSeen.add('booking.status=' + b.status);
+    if (b.working_status != null && b.working_status !== '') _portalStatusSeen.add('booking.working_status=' + b.working_status);
+  }
+  if (shift && shift.status != null && shift.status !== '') _portalStatusSeen.add('shift.status=' + shift.status);
+}
 
 // Classify an already-imported row so the bottom section can label HOW it got
 // into the ops panel: merged into a prior shift, created fresh from an app
@@ -13583,7 +13619,8 @@ function parseImportPaste() {
   toast(`Parsed ${rows.length} row${rows.length !== 1 ? 's' : ''} — review below then click Confirm`);
 }
 
-async function loadPortalBookings() {
+async function loadPortalBookings(opts) {
+  const silent = !!(opts && opts.silent); // v56: background auto-run suppresses toasts/button churn
   // Pulls bookings synced from the portal DB (portal_bookings + portal_shifts +
   // portal_users) and maps them into the SAME row shape the paste/CSV parsers
   // produce, so they flow through the existing reconciliation UI, matching, and
@@ -13598,9 +13635,9 @@ async function loadPortalBookings() {
   // venue name lives in that user's business_name (e.g. "Latitude Restaurant
   // (One 15 Marina)"). full_name on those rows is the contact person, so we use
   // business_name for the outlet, falling back to full_name only if blank.
-  if (!supabaseClient) { toast('Not connected to the database.', 'error'); return; }
+  if (!supabaseClient) { if (!silent) toast('Not connected to the database.', 'error'); return; }
 
-  const btn = document.getElementById('load-portal-btn');
+  const btn = silent ? null : document.getElementById('load-portal-btn');
   const prevLabel = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
 
@@ -13635,7 +13672,7 @@ async function loadPortalBookings() {
     ]);
 
     if (!bookings.length) {
-      toast('No synced portal bookings found. Run the portal sync first.', 'info');
+      if (!silent) toast('No synced portal bookings found. Run the portal sync first.', 'info');
       if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
       return;
     }
@@ -13665,6 +13702,7 @@ async function loadPortalBookings() {
 
     const today = new Date().toISOString().slice(0, 10);
     const rows = [];
+    _portalStatusSeen = new Set(); // reset diagnostic status collector each load
 
     for (const b of bookings) {
       const shift = b.shift_id != null ? shiftById.get(String(b.shift_id)) : null;
@@ -13672,6 +13710,10 @@ async function loadPortalBookings() {
       // Date: prefer the shift's date, else the booking's own date
       const dateStr = (shift?.shift_date || b.booking_date || '').slice(0, 10);
       if (!dateStr) continue; // can't place a booking with no date
+
+      // Record what status strings this portal actually uses + detect cancel.
+      notePortalStatus(b, shift);
+      const portalCancelled = portalStatusLooksCancelled(b.status, b.working_status, shift?.status);
 
       const outletRaw = shift ? outletNameFor(shift.outlet_id) : '';
       const workerRaw = workerNameFor(b.user_id);
@@ -13734,6 +13776,7 @@ async function loadPortalBookings() {
         _suggestedOutlet:   outletInfo.fuzzy?.name || outletInfo.alias || null,
         _deduction:         0,
         _portalBookingId:   b.id,   // provenance, in case we want it later
+        _portalCancelled:   portalCancelled, // v56: customer cancelled in app portal
 
         shift_date:          dateStr,
         worker_name:         isAvailableSlot ? 'Available' : (workerMatch?.name || workerRaw || 'Available'),
@@ -13757,12 +13800,26 @@ async function loadPortalBookings() {
     }
 
     if (!rows.length) {
-      toast('Synced bookings found, but none had a usable date to import.', 'error');
+      if (!silent) toast('Synced bookings found, but none had a usable date to import.', 'error');
       if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
       return;
     }
 
     await applyImportRows(rows);
+
+    // v56: print every distinct status value the portal feed used this load, so
+    // the exact "cancelled" value can be confirmed from the console and the
+    // PORTAL_CANCEL_RE match tightened if needed. Logged once, not per row.
+    if (_portalStatusSeen && _portalStatusSeen.size) {
+      console.log('[portal status values seen this load]', [..._portalStatusSeen].sort());
+    } else {
+      console.log('[portal status] no non-empty status/working_status fields present on any booking/shift this load');
+    }
+    const cancelledCount = rows.filter(r => r._portalCancelled).length;
+    const cancelledInPanel = importRows.filter(r => r._portalCancelled && r._alreadyImported).length;
+    if (cancelledCount) {
+      console.log(`[portal cancellations] detected ${cancelledCount} cancelled booking(s) this load; ${cancelledInPanel} of them are already in the ops panel.`);
+    }
 
     // Portal bookings ARE the app bookings, so any that match a panel shift which
     // isn't linked yet (no sync_source / not in the live feed) get stamped synced
@@ -13773,18 +13830,74 @@ async function loadPortalBookings() {
     const needMap = rows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
     const seenCount = rows.filter(r => r._alreadyImported).length;
     const newCount  = rows.length - seenCount;
-    toast(
+    if (!silent) toast(
       `Loaded ${rows.length} synced booking${rows.length !== 1 ? 's' : ''}` +
       (seenCount ? ` — ${newCount} new, ${seenCount} already in the ops panel (shown in the section below).` : '') +
-      (needMap ? ` ${needMap} need worker/outlet mapping below.` : (seenCount ? '' : ' — all matched, review then Confirm.')),
+      (needMap ? ` ${needMap} need worker/outlet mapping below.` : (seenCount ? '' : ' — all matched, review then Confirm.')) +
+      (cancelledCount ? ` ⚠️ ${cancelledCount} cancelled in the portal${cancelledInPanel ? ` (${cancelledInPanel} already in the panel — review below).` : '.'}` : ''),
       'success'
     );
   } catch (e) {
     console.error('loadPortalBookings failed:', e);
-    toast('Could not load synced bookings: ' + (e.message || e), 'error');
+    if (!silent) toast('Could not load synced bookings: ' + (e.message || e), 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = prevLabel; }
+    try { updateImportNavBadge(); } catch (e) {}
   }
+}
+
+// ── Import nav badge + background auto-importer (v56) ──────────────────────
+// The badge beside "Import Bookings" shows how many portal bookings are loaded
+// into the preview but NOT yet saved into the ops panel — i.e. rows that would
+// be written on Confirm. (Selectable rows: mapped, not cancelled, not already
+// in the panel, not ignored.) Cancelled-in-portal bookings still in the panel
+// are added on top so they're not invisible — they need attention too.
+function importUnsyncedCount() {
+  if (!Array.isArray(importRows) || !importRows.length) return 0;
+  const pending = importRows.filter(importRowIsSelected).length;
+  const cancelledNeedsAction = importRows.filter(r => r._portalCancelled && r._alreadyImported).length;
+  return pending + cancelledNeedsAction;
+}
+function updateImportNavBadge() {
+  const badge = document.getElementById('import-nav-badge');
+  if (!badge) return;
+  const n = importUnsyncedCount();
+  badge.textContent = (typeof badgeText === 'function') ? badgeText(n) : String(n);
+  badge.classList.toggle('show', n > 0);
+}
+
+// Background auto-importer. Runs on a timer while the app is open (this is a
+// browser tab, not a server, so it can't run when the app is closed — for a
+// true 24/7 cron a Supabase scheduled Edge Function would be needed). It calls
+// the SAME load → reconcile pipeline the button uses, silently. It NEVER saves
+// — per ops, the user still clicks Confirm. It just keeps the preview and the
+// nav badge current so new portal bookings (and portal cancellations) surface
+// on their own.
+let _autoImportTimer = null;
+let _autoImportInFlight = false;
+const AUTO_IMPORT_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes while open
+
+async function runAutoImport() {
+  if (_autoImportInFlight) return;          // don't overlap a slow run
+  if (!supabaseClient) return;              // not connected yet
+  if (typeof _importInFlight !== 'undefined' && _importInFlight) return; // a Confirm is mid-write
+  _autoImportInFlight = true;
+  try {
+    await loadPortalBookings({ silent: true });
+  } catch (e) {
+    console.warn('auto-import run failed (will retry next interval):', e?.message || e);
+  } finally {
+    _autoImportInFlight = false;
+    try { updateImportNavBadge(); } catch (e) {}
+  }
+}
+
+function startAutoImport() {
+  if (_autoImportTimer) return;
+  // First pass shortly after boot so the badge populates without waiting a full
+  // interval; then on the regular cadence.
+  setTimeout(() => { runAutoImport(); }, 8000);
+  _autoImportTimer = setInterval(runAutoImport, AUTO_IMPORT_INTERVAL_MS);
 }
 
 async function handleImportFile(event) {
@@ -13876,6 +13989,7 @@ async function applyImportRows(rows) {
 // not cancelled, not already-imported). Only these rows get a checkbox.
 function importRowIsSelectable(r) {
   return !r._cancelled
+    && !r._portalCancelled   // v56: cancelled in the app portal — never auto-saved
     && !r._hasWorkerMismatch
     && !r._hasOutletMismatch
     && !r._alreadyImported
@@ -13949,6 +14063,9 @@ function renderImportPreview() {
     if (r._alreadyImported) return '';
     // Deliberately-ignored rows go into their own "Ignored" section instead.
     if (r._ignored) return '';
+    // v56: cancelled-in-portal rows go into their own "Cancelled in portal"
+    // section (flag-only) and never appear as actionable/saveable here.
+    if (r._portalCancelled) return '';
     // ── Helper: search dropdown for mapping ──
     const searchDropdown = (type, idx, listId) => `
       <div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;">
@@ -14267,7 +14384,7 @@ function renderImportPreview() {
   // Synced / merged / created rows live in their own collapsible block at the
   // bottom, so they don't clutter the actionable list or get re-offered each
   // time synced portal bookings are loaded. Collapsed by default.
-  const reconciledRows = importRows.filter(r => r._alreadyImported);
+  const reconciledRows = importRows.filter(r => r._alreadyImported && !r._portalCancelled);
   let reconciledSection = '';
   if (reconciledRows.length) {
     const sectionRows = reconciledRows.map(r => {
@@ -14376,6 +14493,64 @@ function renderImportPreview() {
       </div>`;
   }
 
+  // ── "Cancelled in portal" section (v56) ─────────────────────────────────
+  // Bookings the customer cancelled in the app portal. Flag-only: those already
+  // in the ops panel are surfaced here for the user to action manually (the app
+  // never auto-cancels the panel shift); those not yet imported are kept out of
+  // the actionable list so a cancelled booking is never saved as a new shift.
+  const cancelledRows = importRows.filter(r => r._portalCancelled);
+  let cancelledSection = '';
+  if (cancelledRows.length) {
+    const sectionRows = cancelledRows.map(r => {
+      const worker = escapeHtml(r.worker_name || r._workerRaw || 'Available');
+      const outlet = escapeHtml(r.outlet || r._outletRaw || '—');
+      const role   = escapeHtml(r.role || '—');
+      const times  = `${escapeHtml(r.scheduled_start || '—')}–${escapeHtml(r.scheduled_end || '—')}`;
+      const inPanel = r._alreadyImported;
+      const statusBadge = inPanel
+        ? `<span class="badge badge-red">✕ Cancelled — still in panel</span>
+           <div class="sub-text" style="color:var(--amber);font-size:10px;margin-top:2px;">This booking IS in the ops panel as active. Cancel it there if appropriate.</div>`
+        : `<span class="badge" style="background:rgba(150,156,174,0.18);color:var(--text2);">✕ Cancelled — not imported</span>
+           <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Not in the panel; won't be saved.</div>`;
+      return `<tr style="opacity:0.85;">
+        <td style="font-family:var(--mono);font-size:12px;">${escapeHtml(r.shift_date || '')}</td>
+        <td style="font-size:12px;">${worker}</td>
+        <td style="font-size:12px;">${outlet}</td>
+        <td style="font-size:12px;">${role}</td>
+        <td style="font-family:var(--mono);font-size:12px;">${times}</td>
+        <td>${statusBadge}</td>
+      </tr>`;
+    }).join('');
+
+    const inPanelN = cancelledRows.filter(r => r._alreadyImported).length;
+    const breakdown = [
+      inPanelN ? `${inPanelN} still in the ops panel — needs your attention` : '',
+      (cancelledRows.length - inPanelN) ? `${cancelledRows.length - inPanelN} not imported` : '',
+    ].filter(Boolean).join(' · ');
+
+    cancelledSection = `
+      <div style="border-top:1px solid var(--border);margin-top:0;">
+        <div style="padding:12px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;"
+             onclick="importShowCancelledSection=!importShowCancelledSection;renderImportPreview()">
+          <span style="font-size:13px;font-weight:600;color:var(--red);">
+            ${importShowCancelledSection ? '▼' : '▶'} ✕ Cancelled in the portal
+          </span>
+          <span class="badge badge-red">${cancelledRows.length}</span>
+          <span style="font-size:12px;color:var(--text2);">${breakdown}.</span>
+        </div>
+        ${importShowCancelledSection ? `
+        <div style="overflow-x:auto;padding:0 0 8px;">
+          <table>
+            <thead><tr>
+              <th>Date</th><th>Worker</th><th>Outlet / Client</th><th>Role</th>
+              <th>Scheduled</th><th>Status</th>
+            </tr></thead>
+            <tbody>${sectionRows}</tbody>
+          </table>
+        </div>` : ''}
+      </div>`;
+  }
+
   const saveLabel = activeCount === 0
     ? '✓ Confirm &amp; Save'
     : (mergeCount > 0
@@ -14403,7 +14578,10 @@ function renderImportPreview() {
       <span style="font-size:12px;color:var(--text3);">Worker, client, role, rate and penalty fields are editable. Nothing is saved until you click Confirm.</span>
     </div>
     ${reconciledSection}
+    ${cancelledSection}
     ${ignoredSection}`;
+
+  try { updateImportNavBadge(); } catch (e) {}
 }
 
 // Search filter helpers for import mapping dropdowns
