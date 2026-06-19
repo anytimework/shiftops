@@ -6211,6 +6211,38 @@ function availableSplitMetric() {
   </div>`;
 }
 
+// ── Bookings Via App metric (Import Bookings link) ───────────────────────────
+// Mirrors the portal-import preview counts on the Attendance dashboard:
+//   • New in app      = actionable rows loaded from the portal that aren't yet
+//                       in the ops panel (not already-imported, not ignored,
+//                       not portal-cancelled) — i.e. fresh app bookings to save.
+//   • Cancelled in app = portal bookings the customer cancelled in the app
+//                       (r._portalCancelled), surfaced so ops can action them.
+// Clicking the card opens the Import Bookings page.
+function appBookingsNewCount() {
+  if (!Array.isArray(importRows) || !importRows.length) return 0;
+  return importRows.filter(r =>
+    !r._alreadyImported && !r._ignored && !r._portalCancelled
+  ).length;
+}
+function appBookingsCancelledCount() {
+  if (!Array.isArray(importRows) || !importRows.length) return 0;
+  return importRows.filter(r => r._portalCancelled).length;
+}
+function appBookingsSplitMetric() {
+  const fresh = appBookingsNewCount();
+  const cancelled = appBookingsCancelledCount();
+  return `<div class="metric-split">
+    <div class="metric-split-row"><span class="metric-split-country">🆕 New in app</span><span class="metric-split-amount ${fresh>0?'amber':'green'}">${fresh}</span></div>
+    <div class="metric-split-row"><span class="metric-split-country">✕ Cancelled in app</span><span class="metric-split-amount ${cancelled>0?'red':'green'}">${cancelled}</span></div>
+  </div>`;
+}
+function openImportBookingsFromMetric() {
+  const btn = (typeof navButtonForPage === 'function') ? navButtonForPage('import') : null;
+  if (btn) { switchPage('import', btn); }
+  else { try { switchPage('import', { classList: { add(){}, remove(){} } }); } catch(e){} }
+}
+
 async function openAvailablePanel() {
   const overlay = document.getElementById('available-modal');
   if (overlay) overlay.classList.add('open');
@@ -9955,6 +9987,7 @@ function renderMetrics() {
     ${card('penalties','Penalties', countrySplitMetric(penaltyByCountry, totalPenalties>0?'red':'green'), '')}
     ${`<div class="metric-card clickable metric-card-cancellations" onclick="openCancellationsPanel()"><div class="metric-label">🚫 Cancellations</div><div class="metric-val ${cancellationsTodayCount()>0?'red':'green'}">${cancellationsTodayCount()}</div><div class="metric-sub">Today · tap for history</div></div>`}
     ${card('sr_absorbed','SR absorbed', countrySplitMetric(srAbsorbedByCountry, srAbsorbedTotal>0?'amber':'green'), '')}
+    ${`<div class="metric-card clickable metric-card-app-bookings" onclick="openImportBookingsFromMetric()" title="Bookings coming from the app portal — tap to open Import Bookings"><div class="metric-label">📲 Bookings Via App</div>${appBookingsSplitMetric()}<div class="metric-sub">Tap to import / review</div></div>`}
   `;
 }
 
@@ -13805,9 +13838,22 @@ async function syncPortalClockTimes(rows) {
   let updated = 0, notified = 0;
   for (const r of rows) {
     try {
-      // Only reconciled rows carry a live panel shift to update.
+      // Reconciled rows carry a live panel shift to update. A portal booking IS
+      // the app booking, so a portal clock-in/out is auto-reflected onto the
+      // already-synced panel shift here — it must NOT resurface as a manual
+      // "Merge into existing" prompt in the import list. Earlier this gate also
+      // required r._alreadyImported, but tagExistingShifts deliberately sets that
+      // to FALSE on exactly the rows that carry NEW clock data (so they'd show as
+      // a merge) — which meant the auto-reflection skipped the very rows it was
+      // built for. We now act on any 'exact' reconciliation to a genuinely-synced
+      // panel shift, whether tagged already-imported or surfaced as a merge.
       const ex = r._existingShift;
-      if (!r._alreadyImported || !ex || !ex.id) continue;
+      if (!ex || !ex.id) continue;
+      if (r._existingMatch !== 'exact') continue;          // only true same-booking matches
+      if (r._forceMergeId) continue;                       // a deliberate manual merge target — leave to Confirm
+      const eligible = r._alreadyImported || r._syncStampOnly ||
+        (typeof importPanelShiftIsSynced === 'function' && importPanelShiftIsSynced(ex));
+      if (!eligible) continue;                             // unlinked panel shift → keep as a visible Mark-as-synced/merge
       // Never touch a panel shift that's been cancelled or is an Available slot.
       if (ex.cancelled) continue;
       if (!ex.worker_name || String(ex.worker_name).toLowerCase() === 'available') continue;
@@ -13836,6 +13882,14 @@ async function syncPortalClockTimes(rows) {
       if (patch.clock_in)  ex.clock_in  = patch.clock_in;
       if (patch.clock_out) ex.clock_out = patch.clock_out;
       updated++;
+
+      // The portal clock data has now been reflected onto the panel shift, so
+      // there is nothing left to merge — reclassify the row as already-in-panel
+      // so it drops out of the actionable import list (and the "Bookings Via App"
+      // / nav-badge "new" count) and into the "Already in the ops panel" section,
+      // instead of nagging the user to merge a clock-in/out we already applied.
+      r._alreadyImported = true;
+      r._syncStampOnly   = false;
 
       // Activity log mirrors the manual clock paths.
       try {
