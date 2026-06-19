@@ -10470,7 +10470,10 @@ async function openAuditModal(shiftId) {
       created_at: s.created_at
     });
   }
-  const all = [...syntheticEntries, ...entries];
+  // Show newest first: synthetic "created" sits at the start by time, so build
+  // the list then sort the whole thing descending by timestamp.
+  const all = [...syntheticEntries, ...entries]
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
   if (!all.length) {
     body.innerHTML = `<div class="empty-state" style="padding:24px 0;"><div class="empty-icon">📋</div><p>No history found for this shift.</p></div>`;
@@ -13871,6 +13874,18 @@ async function syncPortalClockTimes(rows) {
       if (portalOut && portalOut !== panelOut) patch.clock_out = portalOut;
       if (!Object.keys(patch).length) continue;
 
+      // When a clock-in is being (re)applied from the portal, drop any stale
+      // late_penalty override of exactly 0 that an earlier import stamped on the
+      // row — a hard 0 suppresses the auto-computed late penalty, so a 45-min-late
+      // portal clock-in would otherwise show no penalty. Setting it to null hands
+      // control back to effectiveLatePenalty()'s clock-in calculation. We only
+      // clear a 0 (or empty) override, never a real manual override amount.
+      if (patch.clock_in) {
+        const lp = ex.late_penalty;
+        const lpIsZeroOverride = lp !== null && lp !== undefined && lp !== '' && (parseFloat(lp) || 0) === 0;
+        if (lpIsZeroOverride) patch.late_penalty = null;
+      }
+
       const isNewClockOut = !!patch.clock_out && !panelOut;
 
       patch.updated_at = new Date().toISOString();
@@ -13881,6 +13896,7 @@ async function syncPortalClockTimes(rows) {
       // reconciled-section display, reflect the just-written values.
       if (patch.clock_in)  ex.clock_in  = patch.clock_in;
       if (patch.clock_out) ex.clock_out = patch.clock_out;
+      if ('late_penalty' in patch) ex.late_penalty = patch.late_penalty;
       updated++;
 
       // The portal clock data has now been reflected onto the panel shift, so
@@ -14204,7 +14220,7 @@ async function loadPortalBookings(opts) {
         clock_out:           finalClockOut,
         country:             country,
         cancelled:           false,
-        late_penalty:        0,
+        late_penalty:        null,   // null = no override → auto-computed from clock-in vs scheduled (0 would suppress the late penalty)
         cancellation_penalty: 0,
         sr_worker:           null,
         sr_rate:             null,
@@ -15451,10 +15467,19 @@ async function _confirmImportBookingsInner() {
         clock_in:        r.clock_in  || tgt.clock_in  || null,
         clock_out:       r.clock_out || tgt.clock_out || null,
         country:         r.country,
-        late_penalty:    parseFloat(r.late_penalty || 0),
-        cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
         updated_at:      new Date().toISOString(),
       };
+      // PENALTY RULE: late_penalty / cancellation_penalty live ONLY in the panel
+      // (computed from clock-in, or parked there as a prior-cancellation deduction).
+      // The import source never carries them — its values are always 0. Overwriting
+      // would wipe a real $15 prior-cancellation deduction and suppress the
+      // auto-computed late penalty. So the panel's existing values are authoritative;
+      // only fall back to the import value when the panel has none.
+      if (r.late_penalty != null && r.late_penalty !== '')
+        mergePayload.late_penalty = parseFloat(r.late_penalty) || 0;
+      else if (tgt.late_penalty != null)
+        mergePayload.late_penalty = tgt.late_penalty;
+      mergePayload.cancellation_penalty = (parseFloat(tgt.cancellation_penalty || 0) || parseFloat(r.cancellation_penalty || 0)) || 0;
       if (tgt.sr_rate     != null) mergePayload.sr_rate     = tgt.sr_rate;
       if (tgt.sr_worker   != null) mergePayload.sr_worker   = tgt.sr_worker;
       if (tgt.sr_absorbed != null) mergePayload.sr_absorbed = tgt.sr_absorbed;
@@ -15555,10 +15580,17 @@ async function _confirmImportBookingsInner() {
         clock_in:        r.clock_in  || mergeTarget.clock_in  || null,
         clock_out:       r.clock_out || mergeTarget.clock_out || null,
         country:         r.country,
-        late_penalty:    parseFloat(r.late_penalty || 0),
-        cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
         updated_at:      new Date().toISOString(),
       };
+      // PENALTY RULE (see force-merge above): penalties live only in the panel.
+      // Keep the panel's late_penalty (or leave it null so it auto-computes from
+      // the freshly-merged clock-in) and NEVER let the import's 0 overwrite a real
+      // prior-cancellation deduction parked on this shift.
+      if (r.late_penalty != null && r.late_penalty !== '')
+        mergePayload.late_penalty = parseFloat(r.late_penalty) || 0;
+      else if (mergeTarget.late_penalty != null)
+        mergePayload.late_penalty = mergeTarget.late_penalty;
+      mergePayload.cancellation_penalty = (parseFloat(mergeTarget.cancellation_penalty || 0) || parseFloat(r.cancellation_penalty || 0)) || 0;
       // Preserve special-rate fields that exist only in the panel.
       if (mergeTarget.sr_rate     != null) mergePayload.sr_rate     = mergeTarget.sr_rate;
       if (mergeTarget.sr_worker   != null) mergePayload.sr_worker   = mergeTarget.sr_worker;
@@ -15609,7 +15641,7 @@ async function _confirmImportBookingsInner() {
       clock_out:        r.clock_out || null,
       country:          r.country,
       cancelled:        false,
-      late_penalty:     parseFloat(r.late_penalty || 0),
+      late_penalty:     (r.late_penalty != null && r.late_penalty !== '') ? parseFloat(r.late_penalty) || 0 : null,
       cancellation_penalty: parseFloat(r.cancellation_penalty || 0),
       mc_url:           null,
       sr_worker:        r.sr_worker   || null,
