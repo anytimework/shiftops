@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v57 — Three requests, all on the Import Bookings ↔ ops-panel link, no schema change. (1) CLOCK-IN/OUT AUTO-REFLECTION for synced bookings: a portal booking IS the app booking, so when a worker clocks in/out via the app portal (portal_bookings.clock_in_time / clock_out_time get populated), the new syncPortalClockTimes() — run inside loadPortalBookings right after autoStampSyncRows(), so it also fires on the v56 5-min auto-importer — pushes those times onto the already-synced panel shift (matched via the reconciled row's _existingShift / _importedShiftId). It only ADDS or CHANGES from a real portal value and NEVER blanks an existing panel clock time with a null portal value; it skips cancelled panel shifts, Available slots, and portal-cancelled rows. Each applied change is activity-logged ("Clocked in/out (portal)"). (2) CLOCK-OUT WHATSAPP ALERT as per usual: on a GENUINELY NEW clock-out applied this way (panel had no clock_out, portal now reports one) it fires the exact same buildClockOutMessage → notifyPayrollClockOut path every other clock-out uses, so the outlet group gets the standard payroll alert. A per-shift in-memory guard (_portalClockOutNotified) stops the auto-importer re-sending on its cadence within a session; a new clock-IN alone never triggers the alert. (3) CANCELLATION REFLECTED IN THE PANEL: the v56 "✕ Cancelled in the portal" section was flag-only. In-panel cancelled rows now get an "✕ Apply cancellation" button (beside Acknowledge) that opens the STANDARD cancellation modal (openCancelModal) targeting the real panel shift, so the established rules run unchanged (worker $15 penalty / MC waiver / good-will / outlet-delete, suspension counting, slot→Available, needs_replacement). On success, confirmCancel acknowledges the originating import row via a captured key (_pendingCancelImportRowKey → ackImportRowByPendingKey), so it drops out of the section and the nav badge; the key is cleared if the modal is closed without confirming. node --check passes; isolated logic harness covers new/repeat clock-out, null-never-blanks, cancelled/available/portal-cancelled/not-in-panel skips. -->
 <!-- Build patch: v56 — Two requests + a safety fix. (1) AUTO-IMPORTER ("cron-like"): a background timer (startAutoImport, every 5 min while the app is open) silently runs the SAME portal load→reconcile pipeline the "Load synced portal bookings" button uses, via a new loadPortalBookings({silent:true}) mode that suppresses toasts + the button's disabled/label churn. It does NOT auto-save — per ops, the user still clicks Confirm; it just keeps the Import Bookings preview and the new nav badge current so new portal bookings (and cancellations) surface on their own. First pass ~8s after boot, then on cadence; skips overlap while a prior run or a Confirm write is in flight. NOTE: this runs only while a browser tab is open — it is not a true 24/7 server cron (no backend to host one); a Supabase scheduled Edge Function would be needed for that. (2) NAV NOTIFICATION BADGE beside Import Bookings (#import-nav-badge): shows the count of portal bookings loaded-but-not-yet-saved (selectable rows = mapped, not cancelled, not already in panel, not ignored) PLUS any cancelled-in-portal bookings that are still active in the ops panel (they need attention). updateImportNavBadge() runs on every renderImportPreview, after each load, and after Confirm. (3) PORTAL CANCELLATION DETECTION (flag-only): loadPortalBookings already FETCHED portal_bookings.status/.working_status and portal_shifts.status but never read them (every row was hardcoded cancelled:false), so a customer cancelling in the app portal was invisible. Now portalStatusLooksCancelled() tests all three against a broad cancel-token regex (cancel/void/rejected/withdrawn/declined/no-show) and stamps r._portalCancelled. Such rows are excluded from importRowIsSelectable (never auto-saved) and the main actionable table, and dropped into a new collapsible "✕ Cancelled in the portal" section that distinguishes "still in the ops panel — needs your attention" (flag only; the app never auto-cancels the panel shift) from "not imported". Because we don't yet know this portal's exact cancel value, every distinct status string seen per load is console-logged once ([portal status values seen this load]) so the real value can be confirmed and the regex tightened later. No schema change. -->
 <!-- Build patch: v55 — Two requests. (1) WHATSAPP GROUP PICKER now has a type-to-filter search box above a multi-row list (size=8), so finding a group among many doesn't require scrolling a tiny native popup. Filters live by name or @g.us id. (2) RESTORED Client Booking Requirements (was absent from this build line): outlets can define requirements (e.g. "Is the worker 18 years old and above?") that must be ticked before booking. Per ops: if a worker already passed ALL current requirements the modal is SKIPPED entirely (silent pass); adding a NEW requirement only needs the new tick (old passes kept); gate applies to ALL paths (Add Shift form, inline/standby assignment via assignWorkerToOpenSlot, AI chatbot). Data: profileMeta.outlets[k].requirements=[{id,label}], profileMeta.workers[k].passed_requirements={[outletKey]:[reqId]}. assignmentRestriction returns a REQ_SENTINEL-prefixed string for unmet requirements; isRequirementGate() lets interactive callers open the checklist modal (ensureRequirementsMet) instead of hard-blocking; suggestion filters and offers don't hide/block on the soft gate; imports never apply it (past records). mergeProfileMeta extended: requirements replaced by primary, passed_requirements deep-unioned per outlet so no device loses verification history. Outlet modal gains a requirements editor; outlet rows show a 📋 count. AI: createShift lists unmet reqs and asks for "confirm requirements" → forceCreateShift records the pass and proceeds; new addOutletRequirement / removeOutletRequirement / listOutletRequirements actions + context block. No schema change. -->
 <!-- Build patch: v54 — Four fixes. (1) IGNORE BOOKINGS: new durable team-synced "import_ignored" ledger (app_settings key='import_ignored', parallel to import_handled, same stable importBookingKey). Every actionable import-preview row gets a "🚫 Ignore" button; ignored bookings drop into a new collapsible "Ignored — won't be imported" section and never resurface on reload/refresh/new session/teammate. Each is un-ignorable from that section. tagExistingShifts flags ignored rows first; importRowIsSelectable excludes them; loaded at boot + before each reconcile. No schema change. (2) AI CLOCK-OUT ALERT: the AI chatbot's clockOut action updated the DB + logged but never called notifyPayrollClockOut, so AI-driven clock-outs sent no WhatsApp group alert (manual + edit-shift paths already did). Now fires buildClockOutMessage→notifyPayrollClockOut on a NEW clock-out only. (3) CLIENT WHATSAPP GROUP DROPDOWN restored on the Add/Edit outlet modal: "🔍 Fetch my WhatsApp groups" button + select reusing the Periskope chats endpoint (same as WhatsApp Alerts), writes the @g.us id into of-chat-link; resets on modal open; manual paste still works. (4) Estimated Payment card was NOT removed — confirmed still rendered in the metrics block; no structure touched. -->
@@ -2362,6 +2363,10 @@ let allIncidents = [], allIncidentUpdates = [], allMessages = [], allActivityLog
 let currentInternalUser = localStorage.getItem('current_internal_user') || null;
 let pendingClockInCount = 0, pendingClockOutCount = 0, unreadAnnouncementCount = 0;
 let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
+// v57: when a cancellation modal was opened from the Import Bookings "Cancelled
+// in the portal" section, this holds the importRows key so confirmCancel can
+// acknowledge that row on success (drops it out of the section + nav badge).
+let _pendingCancelImportRowKey = null;
 let editingWorkerId = null, editingOutletId = null;
 let profileMeta = loadProfileMeta();
 let outletGroups = loadOutletGroups(); // [{ id, name, outlets:[outletName,...] }]
@@ -10484,7 +10489,7 @@ function openCancelModal(id, workerName, outlet, sched) {
   updateCancelTypeUI();
   document.getElementById('cancel-modal').classList.add('open');
 }
-function closeCancelModal() { document.getElementById('cancel-modal').classList.remove('open'); pendingCancelId = null; mcDataUrl = null; }
+function closeCancelModal() { document.getElementById('cancel-modal').classList.remove('open'); pendingCancelId = null; mcDataUrl = null; _pendingCancelImportRowKey = null; }
 // Open the cancellation modal directly from a dispute banner using only the shift id
 function openCancelFromDispute(shiftId) {
   const s = allShifts.find(x => String(x.id) === String(shiftId));
@@ -10526,6 +10531,9 @@ async function confirmCancel() {
   if (!pendingCancelId) return;
   const s = allShifts.find(x => x.id === pendingCancelId);
   if (!s) { toast('Shift not found', 'error'); return; }
+  // v57: capture before closeCancelModal() nulls it, so the import-row ack still
+  // fires after the modal closes.
+  const _ackImportKey = _pendingCancelImportRowKey;
 
   const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
   const isOutletBypass = type === 'outlet_bypass';
@@ -10554,6 +10562,7 @@ async function confirmCancel() {
     closeCancelModal();
     await loadShifts();
     toast('Outlet-cancelled shift removed from schedule');
+    try { await ackImportRowByPendingKey(_ackImportKey); } catch (e) {}
     return;
   }
 
@@ -10664,6 +10673,44 @@ Click Cancel to skip (you can add it manually later via the penalty column).`
       if (apply) await applyPenaltyToNextShift(originalWorker, penaltyAmount);
     }, 600);
   }
+  try { await ackImportRowByPendingKey(_ackImportKey); } catch (e) {}
+}
+
+// v57: Open the standard cancellation modal for a portal-cancelled booking that
+// is still active in the ops panel, so the cancellation is actually reflected
+// (penalty/suspension/slot→Available or outlet-delete) instead of flag-only.
+// Resolves the real panel shift from the reconciled import row, remembers the
+// row so confirmCancel can acknowledge it on success.
+function applyPortalCancellation(idx) {
+  const r = importRows[idx];
+  if (!r) return;
+  const shiftId = r._importedShiftId || (r._existingShift && r._existingShift.id) || null;
+  let s = shiftId ? allShifts.find(x => String(x.id) === String(shiftId)) : null;
+  if (!s && r._existingShift) s = r._existingShift;
+  if (!s || !s.id) {
+    toast('Could not locate this booking in the ops panel — try reloading shifts.', 'error');
+    return;
+  }
+  _pendingCancelImportRowKey = importBookingKey(r);
+  openCancelModal(s.id, s.worker_name, s.outlet, s.scheduled_start);
+}
+
+// Acknowledge the import row whose cancellation modal was just confirmed, so it
+// leaves the "Cancelled in the portal" section and stops counting on the badge.
+async function ackImportRowByPendingKey(explicitKey) {
+  const key = explicitKey || _pendingCancelImportRowKey;
+  _pendingCancelImportRowKey = null;
+  if (!key) return;
+  importCancelAck[key] = {
+    when: new Date().toISOString(),
+    by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : '',
+    label: 'cancelled in panel'
+  };
+  const row = importRows.find(r => importBookingKey(r) === key);
+  if (row) row._cancelAcked = true;
+  try { await saveImportCancelAck(); } catch (e) {}
+  try { renderImportPreview(); } catch (e) {}
+  try { updateImportNavBadge(); } catch (e) {}
 }
 
 // ── Service recovery ──────────────────────────────────────────
@@ -13734,6 +13781,95 @@ function parseImportPaste() {
   toast(`Parsed ${rows.length} row${rows.length !== 1 ? 's' : ''} — review below then click Confirm`);
 }
 
+// ── v57: Portal clock-in / clock-out auto-reflection ───────────────────────
+// A portal booking IS the app booking. When a worker clocks in or out via the
+// app portal, portal_bookings.clock_in_time / clock_out_time get populated. For
+// any reconciled import row (already in the ops panel, so we hold its panel
+// shift id in _existingShift), this pushes those portal clock times onto the
+// panel shift so attendance + payroll reflect them with no manual step — the
+// same way a manual clock-out would. On a NEW clock-out applied this way (the
+// panel shift had no clock_out, the portal now reports one) it fires the exact
+// same buildClockOutMessage → notifyPayrollClockOut WhatsApp alert every other
+// clock-out path uses, so outlet groups get the usual payroll notification.
+//
+// Guards against disturbing existing data:
+//   • only writes a field that is genuinely NEW or CHANGED vs the panel shift
+//     (never blanks an existing clock time with a null portal value),
+//   • skips cancelled panel shifts and Available slots,
+//   • the WhatsApp alert fires ONCE per genuine new clock-out (a per-shift
+//     in-memory guard set stops the auto-importer re-sending on its 5-min
+//     cadence within the same session).
+let _portalClockOutNotified = new Set();
+async function syncPortalClockTimes(rows) {
+  if (!supabaseClient || !Array.isArray(rows) || !rows.length) return 0;
+  let updated = 0, notified = 0;
+  for (const r of rows) {
+    try {
+      // Only reconciled rows carry a live panel shift to update.
+      const ex = r._existingShift;
+      if (!r._alreadyImported || !ex || !ex.id) continue;
+      // Never touch a panel shift that's been cancelled or is an Available slot.
+      if (ex.cancelled) continue;
+      if (!ex.worker_name || String(ex.worker_name).toLowerCase() === 'available') continue;
+      // Don't push clock times onto a portal-cancelled booking.
+      if (r._portalCancelled) continue;
+
+      const portalIn  = r.clock_in  || null; // already importParseTime'd → 'HH:MM'
+      const portalOut = r.clock_out || null;
+      const panelIn   = ex.clock_in  ? String(ex.clock_in).slice(0,5)  : null;
+      const panelOut  = ex.clock_out ? String(ex.clock_out).slice(0,5) : null;
+
+      const patch = {};
+      // Only ADD/CHANGE from a real portal value; never blank an existing time.
+      if (portalIn  && portalIn  !== panelIn)  patch.clock_in  = portalIn;
+      if (portalOut && portalOut !== panelOut) patch.clock_out = portalOut;
+      if (!Object.keys(patch).length) continue;
+
+      const isNewClockOut = !!patch.clock_out && !panelOut;
+
+      patch.updated_at = new Date().toISOString();
+      const { error } = await supabaseClient.from('shifts').update(patch).eq('id', ex.id);
+      if (error) { console.warn('[portal clock sync] update failed:', error.message); continue; }
+
+      // Keep the in-memory copy current so a notification built below, and the
+      // reconciled-section display, reflect the just-written values.
+      if (patch.clock_in)  ex.clock_in  = patch.clock_in;
+      if (patch.clock_out) ex.clock_out = patch.clock_out;
+      updated++;
+
+      // Activity log mirrors the manual clock paths.
+      try {
+        if (patch.clock_in && !panelIn) {
+          await logActivity('Clocked in (portal)',
+            `${ex.worker_name} clocked in at ${patch.clock_in} via portal — shift at ${ex.outlet} (${(ex.scheduled_start||'').slice(0,5)||'?'}–${(ex.scheduled_end||'').slice(0,5)||'?'})`,
+            'shift', ex.id, { shift_date: ex.shift_date, worker_name: ex.worker_name, outlet: ex.outlet });
+        }
+        if (isNewClockOut) {
+          await logActivity('Clocked out (portal)',
+            `${ex.worker_name} clocked out at ${patch.clock_out} via portal — shift at ${ex.outlet} (${(ex.scheduled_start||'').slice(0,5)||'?'}–${(ex.scheduled_end||'').slice(0,5)||'?'})`,
+            'shift', ex.id, { shift_date: ex.shift_date, worker_name: ex.worker_name, outlet: ex.outlet });
+        }
+      } catch (e) { /* logging is best-effort */ }
+
+      // Fire the usual WhatsApp clock-out alert on a genuinely new clock-out,
+      // once per shift per session.
+      if (isNewClockOut && !_portalClockOutNotified.has(ex.id)) {
+        try {
+          notifyPayrollClockOut(buildClockOutMessage({ ...ex }, patch.clock_out));
+          _portalClockOutNotified.add(ex.id);
+          notified++;
+        } catch (e) { console.warn('[portal clock sync] clock-out alert failed:', e); }
+      }
+    } catch (e) { console.warn('[portal clock sync] row error:', e); }
+  }
+  if (updated) {
+    try { await loadShifts(); } catch (e) {}
+    if (notified) console.log(`[portal clock sync] applied ${updated} clock update(s); sent ${notified} clock-out alert(s).`);
+    else console.log(`[portal clock sync] applied ${updated} clock update(s).`);
+  }
+  return updated;
+}
+
 async function loadPortalBookings(opts) {
   const silent = !!(opts && opts.silent); // v56: background auto-run suppresses toasts/button churn
   // Pulls bookings synced from the portal DB (portal_bookings + portal_shifts +
@@ -13941,6 +14077,17 @@ async function loadPortalBookings(opts) {
     // automatically — no manual step needed. They drop into the bottom section and
     // their attendance-row icon flips ⚠️→🔄.
     await autoStampSyncRows();
+
+    // v57: push portal clock-in/out onto already-synced panel shifts (and fire
+    // the usual clock-out WhatsApp alert on a new clock-out). Re-tag afterward so
+    // the reconciled section shows the freshly-synced clock times.
+    try {
+      const clockUpdated = await syncPortalClockTimes(importRows);
+      if (clockUpdated) {
+        try { await tagExistingShifts(importRows); } catch (e) {}
+        renderImportPreview();
+      }
+    } catch (e) { console.warn('syncPortalClockTimes failed:', e); }
 
     const needMap = rows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
     const seenCount = rows.filter(r => r._alreadyImported).length;
@@ -14646,10 +14793,17 @@ function renderImportPreview() {
            <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Not in the panel; won't be saved.</div>`;
       // Only in-panel cancellations need acknowledging (they're the ones that
       // count toward the badge and need manual action). "Not imported" rows are
-      // informational and don't need a dismiss action.
+      // informational and don't need a dismiss action. v57: in-panel rows also
+      // get an "Apply cancellation" button that opens the standard cancellation
+      // modal targeting the real panel shift, so the cancellation is actually
+      // reflected (penalty / suspension / slot→Available) rather than flag-only.
       const ackCell = inPanel
-        ? `<button class="btn btn-sm" style="font-size:11px;padding:3px 10px;background:rgba(60,200,120,0.14);border:1px solid rgba(60,200,120,0.4);border-radius:5px;color:var(--green);cursor:pointer;white-space:nowrap;"
-             title="I've handled this — remove it from this list and the badge" onclick="acknowledgeCancelRow(${idx})">✓ Acknowledge</button>`
+        ? `<div style="display:flex;flex-direction:column;gap:5px;align-items:flex-end;">
+             <button class="btn btn-sm" style="font-size:11px;padding:3px 10px;background:rgba(232,64,64,0.14);border:1px solid rgba(232,64,64,0.45);border-radius:5px;color:var(--red);cursor:pointer;white-space:nowrap;"
+               title="Cancel this shift in the ops panel now (opens the cancellation modal)" onclick="applyPortalCancellation(${idx})">✕ Apply cancellation</button>
+             <button class="btn btn-sm" style="font-size:11px;padding:3px 10px;background:rgba(60,200,120,0.14);border:1px solid rgba(60,200,120,0.4);border-radius:5px;color:var(--green);cursor:pointer;white-space:nowrap;"
+               title="I've handled this — remove it from this list and the badge" onclick="acknowledgeCancelRow(${idx})">✓ Acknowledge</button>
+           </div>`
         : `<span style="font-size:11px;color:var(--text3);">—</span>`;
       return `<tr style="opacity:0.85;">
         <td style="font-family:var(--mono);font-size:12px;">${escapeHtml(r.shift_date || '')}</td>
