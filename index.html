@@ -13870,6 +13870,115 @@ async function syncPortalClockTimes(rows) {
   return updated;
 }
 
+// ── v58: DELETED-IN-PORTAL detection (cancellation-by-absence) ───────────────
+// The portal hard-deletes a booking row when a shift is cancelled/deleted in the
+// app (confirmed: deletion is permanent, no status flag, no archive row). So a
+// status-based check can never catch it. Instead we infer cancellation from the
+// import_handled ledger: that ledger records, for every booking we imported,
+// a stable key → the panel shift id it went into. When the stable key is a real
+// portal booking id (pb|<id>), its continued presence in the live portal feed is
+// authoritative. If such an id is no longer in the feed but its panel shift still
+// exists and is active, the booking was deleted in the app.
+//
+// Each detected deletion is turned into a synthetic _portalCancelled import row
+// (already-in-panel, _existingShift attached so applyPortalCancellation can find
+// the shift) and appended to importRows, so it renders in the SAME "Cancelled in
+// the portal" section with the existing "Apply cancellation" / "Acknowledge"
+// buttons and counts on the nav badge until handled. Flag-only — never
+// auto-cancels the panel shift.
+//
+// Safety guards (avoid false positives that could wrongly flag a live booking):
+//   • Only runs when the portal load returned a healthy, NON-EMPTY booking set —
+//     a failed/empty fetch must never mass-flag everything as deleted.
+//   • Only trusts pb|<id> ledger keys (real portal ids). Fuzzy k|… keys are
+//     skipped: absence of a name/time-derived key is not reliable proof.
+//   • Skips if a synthetic row for the same shift already exists in importRows
+//     (e.g. a status-based _portalCancelled row, or a prior pass this load).
+//   • Skips shifts already cancelled in the panel, and (conservatively) shifts
+//     whose date is in the past — a deletion of a long-finished booking isn't
+//     actionable and shouldn't nag.
+async function detectDeletedPortalBookings(bookings) {
+  if (!Array.isArray(bookings) || !bookings.length) return; // guard: never act on an empty/failed load
+  // Make sure the ledger is loaded team-wide before we read it.
+  try { if (!importHandledLoaded) await loadImportHandledRemote(); } catch (e) {}
+  if (!importHandled || typeof importHandled !== 'object') return;
+
+  // Real portal booking ids present in THIS load.
+  const presentPortalIds = new Set(
+    bookings.map(b => (b && b.id != null) ? String(b.id) : null).filter(Boolean)
+  );
+
+  // Panel-shift ids that already have a cancelled row in the current preview, so
+  // we don't double-add (status-based detection or a previous pass this load).
+  const alreadyFlaggedShiftIds = new Set(
+    (Array.isArray(importRows) ? importRows : [])
+      .filter(r => r && r._portalCancelled)
+      .map(r => String(
+        r._importedShiftId || (r._existingShift && r._existingShift.id) || ''
+      ))
+      .filter(Boolean)
+  );
+
+  const today = new Date().toISOString().slice(0, 10);
+  const synthRows = [];
+
+  for (const [key, rec] of Object.entries(importHandled)) {
+    // Only trust real portal booking ids.
+    if (!key.startsWith('pb|')) continue;
+    const portalId = key.slice(3);
+    if (!portalId) continue;
+    // Still present in the feed → not deleted.
+    if (presentPortalIds.has(portalId)) continue;
+
+    const shiftId = rec && rec.shiftId ? String(rec.shiftId) : '';
+    if (!shiftId) continue;
+
+    // The panel shift must still exist. If it was deleted from the panel too,
+    // there's nothing to action — the existing ledger pruning handles cleanup.
+    const s = (Array.isArray(allShifts) ? allShifts : [])
+      .find(x => String(x.id) === shiftId);
+    if (!s) continue;
+
+    // Skip if it's already cancelled in the panel.
+    if (s.cancelled === true) continue;
+    // Skip if a cancelled row for this shift is already on screen.
+    if (alreadyFlaggedShiftIds.has(shiftId)) continue;
+
+    // Conservative: only nag for today-or-future shifts. A deletion of a shift
+    // that's already in the past isn't actionable (it either happened or didn't).
+    const sDate = String(s.shift_date || '').slice(0, 10);
+    if (sDate && sDate < today) continue;
+
+    // Synthesise a _portalCancelled, already-in-panel row that reuses the whole
+    // existing cancelled-section UI + apply/ack flow. _existingShift is attached
+    // so applyPortalCancellation() can resolve the panel shift (the portal source
+    // is gone, so _importedShiftId from a fresh feed row isn't available).
+    synthRows.push({
+      worker_name:      s.worker_name || '',
+      outlet:           s.outlet || '',
+      role:             s.role || '',
+      shift_date:       s.shift_date || '',
+      scheduled_start:  s.scheduled_start || '',
+      scheduled_end:    s.scheduled_end || '',
+      country:          s.country || null,
+      _portalBookingId: portalId,
+      _portalCancelled: true,     // routes into the "Cancelled in the portal" section
+      _deletedFromPortal: true,   // provenance: detected by absence, not by status
+      _alreadyImported: true,     // it IS in the panel — needs attention
+      _existingShift:   s,        // lets applyPortalCancellation find the shift
+      _importedShiftId: s.id,
+      _selected:        false,    // never auto-saved
+    });
+    alreadyFlaggedShiftIds.add(shiftId);
+  }
+
+  if (synthRows.length) {
+    importRows = (Array.isArray(importRows) ? importRows : []).concat(synthRows);
+    console.log(`[portal deletions] detected ${synthRows.length} booking(s) deleted in the app (absent from the portal feed but still active in the panel).`);
+    try { renderImportPreview(); } catch (e) {}
+  }
+}
+
 async function loadPortalBookings(opts) {
   const silent = !!(opts && opts.silent); // v56: background auto-run suppresses toasts/button churn
   // Pulls bookings synced from the portal DB (portal_bookings + portal_shifts +
@@ -14057,6 +14166,22 @@ async function loadPortalBookings(opts) {
     }
 
     await applyImportRows(rows);
+
+    // v58: DELETED-IN-PORTAL detection (cancellation-by-absence). The portal
+    // permanently DELETES a booking row when the customer cancels/deletes a shift
+    // in the app — it does NOT flip a status, so the regex/status path above can
+    // never see it (the row simply isn't in `bookings` anymore). Instead we detect
+    // it by absence: any booking we previously imported (recorded in the
+    // import_handled ledger as pb|<id> → panel shift) whose portal id is no longer
+    // present in this load, but whose panel shift still exists and is active, was
+    // deleted in the app → treat as a portal cancellation. Synthesised rows are
+    // appended to importRows so they surface in the existing "Cancelled in the
+    // portal" section with the same Apply-cancellation / Acknowledge actions.
+    // Guarded: only runs on a healthy non-empty load; only trusts real pb| ids
+    // (never fuzzy keys); flag-only (never auto-cancels the panel shift).
+    try {
+      await detectDeletedPortalBookings(bookings);
+    } catch (e) { console.warn('detectDeletedPortalBookings failed:', e); }
 
     // v56: print every distinct status value the portal feed used this load, so
     // the exact "cancelled" value can be confirmed from the console and the
@@ -14786,9 +14911,12 @@ function renderImportPreview() {
       const role   = escapeHtml(r.role || '—');
       const times  = `${escapeHtml(r.scheduled_start || '—')}–${escapeHtml(r.scheduled_end || '—')}`;
       const inPanel = r._alreadyImported;
+      // v58: distinguish a hard-deleted-in-app booking (detected by absence) from
+      // a status-flagged portal cancellation, so the user knows which it is.
+      const deletedInApp = !!r._deletedFromPortal;
       const statusBadge = inPanel
-        ? `<span class="badge badge-red">✕ Cancelled — still in panel</span>
-           <div class="sub-text" style="color:var(--amber);font-size:10px;margin-top:2px;">This booking IS in the ops panel as active. Cancel it there if appropriate.</div>`
+        ? `<span class="badge badge-red">${deletedInApp ? '🗑 Deleted in app — still in panel' : '✕ Cancelled — still in panel'}</span>
+           <div class="sub-text" style="color:var(--amber);font-size:10px;margin-top:2px;">${deletedInApp ? 'This booking was deleted in the app (removed from the portal) but is still active in the ops panel. Cancel it here if appropriate.' : 'This booking IS in the ops panel as active. Cancel it there if appropriate.'}</div>`
         : `<span class="badge" style="background:rgba(150,156,174,0.18);color:var(--text2);">✕ Cancelled — not imported</span>
            <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;">Not in the panel; won't be saved.</div>`;
       // Only in-panel cancellations need acknowledging (they're the ones that
@@ -14827,7 +14955,7 @@ function renderImportPreview() {
         <div style="padding:12px 18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;"
              onclick="importShowCancelledSection=!importShowCancelledSection;renderImportPreview()">
           <span style="font-size:13px;font-weight:600;color:var(--red);">
-            ${importShowCancelledSection ? '▼' : '▶'} ✕ Cancelled in the portal
+            ${importShowCancelledSection ? '▼' : '▶'} ✕ Cancelled / deleted in the portal
           </span>
           <span class="badge badge-red">${cancelledRows.length}</span>
           <span style="font-size:12px;color:var(--text2);">${breakdown}.</span>
