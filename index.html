@@ -16746,6 +16746,31 @@ async function _confirmImportBookingsInner() {
       // to reconcile against → shows the 📱 icon. (No-op if column not present.)
       if (r._importedShiftId) await markShiftSyncSource(r._importedShiftId, 'import');
       if (r._importedShiftId) markImportHandled(r, r._importedShiftId);
+      // v66: a saved OPEN/Available slot (no worker assigned — a bookingless
+      // portal_shift the v64 sweep surfaced) would otherwise reappear every load
+      // in "Already in the ops panel" because the portal keeps re-sending the
+      // Pending shift. Per ops: once saved, it should be GONE from the import
+      // list. So we also record it in the durable ignore ledger (keyed by its
+      // os|<portalShiftId>, set up in v65). It's now in the panel as an open
+      // slot AND suppressed from every future import preview. It can still be
+      // brought back via "Un-ignore" if ever needed. Named bookings are never
+      // auto-ignored — they keep the normal "Already in the ops panel" behaviour.
+      const _isOpenSlotRow = (!r.worker_name || r.worker_name === 'Available')
+        && r._portalShiftId != null && r._portalShiftId !== '';
+      if (_isOpenSlotRow) {
+        try {
+          const _ik = importBookingKey(r); // os|<portalShiftId>
+          if (_ik) {
+            importIgnored[_ik] = {
+              when: new Date().toISOString(),
+              by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : '',
+              label: `${r.worker_name || 'Available'} · ${r.outlet || '—'} · ${r.shift_date || ''} · ${(r.scheduled_start||'').slice(0,5)}–${(r.scheduled_end||'').slice(0,5)} (saved open slot)`
+            };
+            r._ignored = true;          // drop it out of every section on re-render
+            r._alreadyImported = false; // not shown in "Already in the ops panel" either
+          }
+        } catch(e) { console.warn('open-slot auto-ignore failed:', e); }
+      }
     }
   }
 
@@ -16757,6 +16782,10 @@ async function _confirmImportBookingsInner() {
   // resurfaces as a new import. Fire-and-forget; localStorage is already updated.
   const wroteAnything = (saved + merged + stamped) > 0;
   if (wroteAnything) { try { saveImportHandled(); } catch(e){} }
+  // v66: persist the ignore ledger too — saved open/Available slots were just
+  // auto-ignored above so they don't resurface in the import list. saveImportIgnored
+  // merges with the shared row, so it won't clobber teammates' ignores.
+  if (wroteAnything) { try { saveImportIgnored(); } catch(e){} }
 
   const wroteCount = saved + merged + stamped;
   let msg = [];
