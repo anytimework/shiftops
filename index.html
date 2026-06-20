@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
-<!-- Build patch: v67 — OPS-CORRECTED CLOCK LOCK (manual clock-out fixes kept being re-overridden by portal sync, breaking billing). Scenario: a worker forgets to clock out and clocks out e.g. 5 min after shift end; the portal records that late clock-out and the app treats it as overtime, inflating billed hours. Ops corrects the clock-out in the edit row, but because the booking is portal-synced, syncPortalClockTimes() re-applied the portal's (wrong) value on the next 5-min sync, reverting the fix every time. FIX: a durable per-shift lock. (1) When saveRow() detects that an edit actually CHANGES a clock time (HH:MM compare vs stored, so 23:05:00 vs 23:05 isn't a false positive), it sets clock_locked=true on the shift — per ops, editing EITHER clock locks BOTH. (2) syncPortalClockTimes() now skips ALL clock writes for any shift with clock_locked===true, so the corrected times survive every subsequent sync (approval-sync and portal-cancellation detection are unaffected). (3) A 🔒 indicator shows on the clock-out cell of a locked shift; clicking it calls unlockShiftClock() to re-open the times to portal sync (with confirm + activity log) if ops ever wants the portal authoritative again. (4) Graceful degradation: clock_locked is an OPTIONAL column — checkClockLockedColumn() probes it on load; if absent, saveRow still saves the corrected time but toasts that it won't STAY locked until the column is added, and the core-only retry path preserves the flag when present. Durable + team-wide (real DB column, flows through loadShifts select *). REQUIRES ONE-LINE SQL for the lock to persist:  alter table shifts add column clock_locked boolean default false;  — the code runs fine without it (corrections just aren't protected against the next sync until it's added). Additive-only: 1 line modified (renderTimeCell return, to append the 🔒), everything else new. node --check passes (5/5 script blocks); 9/9 lock-decision + sync-skip unit cases pass. -->
+<!-- Build patch: v68 — OVERTIME CAP + APPROVE-OT (replaces the v67 clock-lock approach). Problem: a worker who clocks out a few minutes after their shift ends (e.g. 23:10 on a 23:00 shift — often just forgetting to tap out) was billed & paid for those extra minutes, inflating client invoices. Locking the clock-out fought portal sync and was clumsy. NEW MODEL: workers may still clock out late (the real clock_out is stored/displayed untouched and portal sync is left free), but the PAYROLL/BILLING clock-out is CAPPED at the scheduled end by default. (1) payrollEndTime(s, countedStart) is the mirror of payrollStartTime()'s early-clock-in floor: if the (overnight-aware) clock-out runs past scheduled end and OT is NOT approved, the counted end is capped at scheduled end; an on-time/early clock-out is untouched. calcShiftHours() now runs through it, so both worker payout and client billing (payoutForShift = hours × rate) cap automatically. (2) APPROVE OT — when overtime is genuine, ops ticks it and the real clock-out is counted for pay AND client bill. Two entry points: an inline badge on the clock-out cell (amber "⏱ +Nm → capped" → click to approve; green "✅ +Nm OT" when approved → click to remove; toggleShiftOT) and an "Approve overtime" checkbox in the edit row (only shown when a late clock-out exists; saved via saveRow). (3) payrollStartNote() now shows "end capped at HH:MM (late clock-out …, OT not approved)" or "OT approved" so the treatment is visible. (4) Optional column ot_approved (boolean) — checkOtColumn() probes on load; saveRow + toggleShiftOT degrade gracefully if absent (cap still applies; approval just can't persist). The v67 clock_locked mechanism (lock guard in syncPortalClockTimes, saveRow lock-set + retries, unlockShiftClock, checkClockLockedColumn, 🔒 badge) is fully removed. REQUIRES ONE-LINE SQL to persist approvals:  alter table shifts add column ot_approved boolean default false;  — runs fine without it (capping works immediately; approving needs the column). node --check passes (5/5 script blocks); cap/OT unit cases pass. -->
 <!-- Build patch: v66 — OVERNIGHT CLOCK-OUT PARSE FIX (no clock-out notifications + 3am-after-7pm clock-out not captured). Root cause: importParseTime() only matched 'HH:MM[:SS]' and am/pm; it returned null for a FULL date/datetime timestamp. The portal stores portal_bookings.clock_in_time / clock_out_time as full timestamps, and for an overnight shift (e.g. 7pm→3am) the clock-out carries the NEXT calendar day (e.g. 2026-06-20T03:00:00). That whole value parsed to null → the row's clock_out became null → syncPortalClockTimes() found nothing to write → the panel shift never got the clock-out, isNewClockOut never became true, and the buildClockOutMessage→notifyPayrollClockOut WhatsApp alert never fired. If the portal recently switched these fields from bare 'HH:MM:SS' to full ISO datetimes, this silently broke ALL clock-out notifications, not just overnight ones. FIX: importParseTime() now first strips a leading 'YYYY-MM-DD' date from any 'YYYY-MM-DDThh:mm…' / 'YYYY-MM-DD hh:mm…' / ISO-with-millis-or-Z value and returns the bare HH:MM time-of-day. The panel shift's own scheduled date stays authoritative; existing overnight handling (clock_out <= clock_in ⇒ +1440 min) already covers the wrap-around in calcShiftHours / payout / sort, so hours and pay are correct for the 7pm→3am case. Additive-only: exactly ONE new block inside importParseTime, zero deletions or other edits. node --check passes (5/5 script blocks); 10/10 parser unit cases pass (full ISO, space datetime, .000Z, overnight in/out, datetime-no-seconds, legacy HH:MM:SS, am/pm, empty/null). NOTE: if clock-outs still don't notify for SAME-DAY shifts after this, run WhatsApp Alerts → "🩺 Why aren't clock-out alerts sending?" — the most common remaining cause is the payroll toggle OFF or the team-synced Periskope config missing on whichever device runs the 5-min auto-importer. -->
 <!-- Build patch: v63 — LIVE SHIFT MAP + geocoded outlet pins. (1) New "🗺️ Live Map" page (nav after Outlets, also whitelisted for ph_partner): plots the day's shifts on a Leaflet/OpenStreetMap map by their outlet's stored coordinates, scoped to the user's country via scopeShiftsToCountry. Four toggles — Live/ongoing (green, pulsing: clock_in set, no clock_out), Pending approval (amber: shiftIsPendingApproval), Scheduled/upcoming (blue: not yet clocked in), Completed (grey, off by default: clock_in+clock_out). Cancelled shifts and unfilled open slots (isOpenSlot) are excluded. Multiple workers at one outlet collapse into a single numbered pin (marker colour = highest-priority class present); click shows the roster popup. Date picker views any day independent of the attendance day/week view; a side list mirrors the pins (click to zoom); an amber banner flags any outlet with shifts that has no pin. Read-only — no shift writes. (2) Outlet modal "Location / address" field is now a typed autocomplete backed by OpenStreetMap Nominatim (free, no API key), country-filtered (SG/MY/PH). Picking a suggestion stores exact lat/lng — NO schema change: coordinates live in profileMeta.outlets[key].lat/.lng alongside commission/notes/requirements, so they sync team-wide through saveProfileMeta and survive mergeProfileMeta ({...se,...pe} keeps local scalars). Falls back to o.latitude/o.longitude on the row if present. node --check passes (both inline script blocks). Additive-only: exactly 3 original lines changed (address input row, profileMeta write block, PH_PARTNER_PAGES). -->
 <!-- Build patch: v62 — DIAGNOSE + FIX "pending shows 0 / no orange". Root cause when a pending booking doesn't show: the optional approval_status column isn't in the DB, so the flag silently saved as confirmed. (1) checkApprovalColumn() probes the column on every loadShifts (select approval_status limit 1); if it's missing it sets _approvalColumnMissing and shows a PERSISTENT amber banner above the metrics with the exact SQL (alter table shifts add column approval_status text;) instead of a one-off toast. Also console-logs the live pending count each load for quick confirmation. (2) EDIT ROW now has a "Booking status" dropdown (Confirmed / Pending client approval) so an existing confirmed shift can be flagged pending (or set back), wired into saveRow with the same column-missing graceful retry. Setting pending never notifies the worker (notification only fires on approval, unchanged). All guarded so projects without the column still save everything else. node --check passes; banner + edit control preview-rendered. No behavioural change for any shift that isn't approval_status='pending'. -->
@@ -4719,6 +4719,76 @@ function payrollStartTime(s) {
   if (qM < schedM) qM = schedM;
   return minsToTime(qM % 1440);
 }
+// v68: OVERTIME CAP. A worker may clock out a few minutes after their shift
+// ends (e.g. 23:10 on a 23:00 shift) — often just forgetting to tap out, not
+// genuine overtime. Billing the client (and paying) for those extra minutes
+// inflates invoices. So the COUNTED clock-out is capped at the scheduled end by
+// default — the mirror of payrollStartTime() flooring an early clock-in at the
+// scheduled start. The actual clock_out is still stored/displayed untouched;
+// only the PAYROLL/BILLING figure is capped. When ops confirms the overtime is
+// real, they tick "Approve OT" (ot_approved=true) on that shift and the counted
+// clock-out reverts to the real (quantized) clock-out, so both pay and client
+// bill include the OT. Returns the time string to USE for payroll, given the
+// counted start (for the overnight day-rollover comparison).
+function shiftOtApproved(s) {
+  return !!s && s.ot_approved === true;
+}
+// Minutes a shift's clock-out runs past its scheduled end (0 if on-time/early).
+// Uses the same overnight-aware axis as the billing cap.
+function shiftOtMinutes(s) {
+  const co = s?.clock_out?.slice(0,5);
+  const se = s?.scheduled_end?.slice(0,5);
+  if (!co || !se) return 0;
+  const startM = toMins(payrollStartTime(s) || s?.scheduled_start?.slice(0,5) || se);
+  let endM = toMins(se), coM = toMins(co);
+  if (endM <= startM) endM += 1440;
+  if (coM  <  startM) coM  += 1440;
+  return Math.max(0, coM - endM);
+}
+// Edit-row OT approval control — only shown when there's a late clock-out to
+// decide on, so normal shifts stay uncluttered.
+function otEditControlHtml(s) {
+  const extra = shiftOtMinutes(s);
+  if (extra <= 0) return '';
+  const id = s.id;
+  const se = s.scheduled_end?.slice(0,5);
+  const co = s.clock_out?.slice(0,5);
+  const checked = shiftOtApproved(s) ? 'checked' : '';
+  const note = _otColumnMissing
+    ? `<div style="font-size:10px;color:var(--amber,#f59e0b);margin-top:3px;">⚠ Add the ot_approved column to save this: alter table shifts add column ot_approved boolean default false;</div>`
+    : '';
+  return `<div style="margin-top:8px;padding:7px 9px;border:1px solid var(--border2);border-radius:6px;background:var(--bg3);">
+       <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:11px;color:var(--text);margin:0;">
+         <input type="checkbox" id="edit-ot-${id}" ${checked} style="width:14px;height:14px;cursor:pointer;">
+         <span>⏱ <strong>Approve overtime</strong> — bill &amp; pay to actual clock-out ${co} (+${extra} min past ${se})</span>
+       </label>
+       <div style="font-size:10px;color:var(--text3);margin-top:3px;">Unticked: billing/pay is capped at the scheduled end ${se}.</div>
+       ${note}
+     </div>`;
+}
+function payrollEndTime(s, countedStart) {
+  const co = s?.clock_out?.slice(0,5);
+  if (!co) return co || null;
+  const schedEnd = s?.scheduled_end?.slice(0,5);
+  // No scheduled end, or OT explicitly approved → use the real clock-out as-is
+  // (calcHours still applies its own 15-min/5-min quantization + overnight roll).
+  if (!schedEnd || shiftOtApproved(s)) return co;
+  // Compare counted clock-out vs scheduled end on the same overnight axis the
+  // duration math uses: roll end and clock-out past midnight relative to the
+  // counted start so a 19:00→23:00 shift with a 23:10 clock-out, and a
+  // 19:00→03:00 shift with a 03:12 clock-out, both compare correctly.
+  const startM = countedStart ? toMins(countedStart) : null;
+  let endM = toMins(schedEnd);
+  let coM  = toMins(co);
+  if (startM !== null) {
+    if (endM <= startM) endM += 1440;      // scheduled end is next day
+    if (coM  <  startM) coM  += 1440;      // clock-out crossed midnight
+  }
+  // Late clock-out → cap the counted end at the scheduled end. An on-time or
+  // early clock-out is left untouched (worker who leaves early isn't over-paid).
+  if (coM > endM) return minsToTime(endM % 1440);
+  return co;
+}
 function calcShiftHours(s) {
   if (!s) return null;
   const breakMins = breakMinsForShift(s);
@@ -4734,7 +4804,8 @@ function calcShiftHours(s) {
     if (isFinite(n) && n > 0) hourCandidates.push(n);
   };
   const countedStart = payrollStartTime(s);
-  const actualHours = calcHours(countedStart, co, breakMins);
+  const countedEnd = payrollEndTime(s, countedStart);
+  const actualHours = calcHours(countedStart, countedEnd, breakMins);
   addHourCandidate(actualHours);
 
   // Scheduled-hours fallback: only used when actual clock-out is missing
@@ -4765,10 +4836,25 @@ function payrollStartNote(s) {
   const actual = s?.clock_in?.slice(0,5);
   const counted = payrollStartTime(s);
   const actualOut = s?.clock_out?.slice(0,5);
-  const countedOut = counted && actualOut ? quantizeClockOutTime(counted, actualOut) : null;
+  // v68: the counted clock-out now respects the OT cap (capped at scheduled end
+  // unless OT is approved), so reflect that exact figure in the note rather than
+  // the raw quantized clock-out.
+  const countedEndRaw = payrollEndTime(s, counted);
+  const countedOut = counted && countedEndRaw ? quantizeClockOutTime(counted, countedEndRaw) : null;
+  const schedEnd = s?.scheduled_end?.slice(0,5);
   const notes = [];
   if (actual && counted && actual !== counted) notes.push(`start counted ${counted}`);
-  if (actualOut && countedOut && actualOut !== countedOut) notes.push(`end counted ${countedOut}`);
+  if (actualOut && countedOut && actualOut !== countedOut) {
+    // Distinguish "capped at shift end" from ordinary rounding so ops sees why.
+    if (!shiftOtApproved(s) && schedEnd && countedOut === schedEnd && actualOut > schedEnd) {
+      notes.push(`end capped at ${schedEnd} (late clock-out ${actualOut}, OT not approved)`);
+    } else {
+      notes.push(`end counted ${countedOut}`);
+    }
+  }
+  if (shiftOtApproved(s) && actualOut && schedEnd && actualOut > schedEnd) {
+    notes.push('OT approved');
+  }
   return notes.length ? `Payroll ${notes.join(', ')}` : '';
 }
 function breakLabel(mins) {
@@ -6286,7 +6372,7 @@ async function loadShifts() {
   await loadAvailableSlots();
   await buildPortalSyncIndex();
   try { await checkApprovalColumn(); } catch (e) {}
-  try { await checkClockLockedColumn(); } catch (e) {}
+  try { await checkOtColumn(); } catch (e) {}
   try { await loadPendingApprovalAll(); } catch (e) {}
   renderTable();
   renderMetrics();
@@ -7803,13 +7889,32 @@ function openAddModalForDate(dateStr) {
 function renderTimeCell(s, field) {
   const val = s[field]?.slice(0,5) || '';
   if (s.cancelled) return `<span style="font-family:var(--mono);font-size:12px;color:var(--text3);">—</span>`;
-  // v67: when a shift's clock times are ops-locked (manually corrected, so the
-  // portal can't override them), show a 🔒 on the clock-out cell. Clicking it
-  // re-opens the times to portal sync. Title explains the state on hover.
-  const lock = (field === 'clock_out' && s.clock_locked === true)
-    ? ` <span onclick="unlockShiftClock('${s.id}')" title="Clock times corrected by ops — locked against portal sync. Click to re-open to the portal." style="cursor:pointer;font-size:11px;" role="button">🔒</span>`
-    : '';
-  return `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${val || '—'}</span>${lock}`;
+  // v68: OT indicator on the clock-out cell. If the worker clocked out after the
+  // scheduled end, show whether those extra minutes are being billed:
+  //   • amber "⏱ +Nm → capped" when OT is NOT approved (billed only to shift end)
+  //   • green "✅ +Nm OT" when ops has approved the overtime
+  // Click toggles approval (toggleShiftOT). The actual clock-out value shown is
+  // always the real one; only the badge reflects the billing treatment.
+  let otBadge = '';
+  if (field === 'clock_out') {
+    const co = s.clock_out?.slice(0,5);
+    const se = s.scheduled_end?.slice(0,5);
+    if (co && se) {
+      const startM = toMins(payrollStartTime(s) || s.scheduled_start?.slice(0,5) || se);
+      let endM = toMins(se), coM = toMins(co);
+      if (endM <= startM) endM += 1440;
+      if (coM  <  startM) coM  += 1440;
+      const extra = coM - endM;
+      if (extra > 0) {
+        if (shiftOtApproved(s)) {
+          otBadge = ` <span onclick="toggleShiftOT('${s.id}', false)" title="Overtime approved — ${extra} min past ${se} is billed & paid. Click to remove OT (revert to ${se})." style="cursor:pointer;font-size:10px;color:var(--green);white-space:nowrap;" role="button">✅ +${extra}m OT</span>`;
+        } else {
+          otBadge = ` <span onclick="toggleShiftOT('${s.id}', true)" title="Late clock-out: ${extra} min past scheduled end ${se}. Billing capped at ${se}. Click to APPROVE overtime so it's billed & paid to ${co}." style="cursor:pointer;font-size:10px;color:var(--amber,#f59e0b);white-space:nowrap;" role="button">⏱ +${extra}m → capped</span>`;
+        }
+      }
+    }
+  }
+  return `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${val || '—'}</span>${otBadge}`;
 }
 
 function quickClockIn(id) {
@@ -9796,6 +9901,7 @@ function openEditRow(id) {
          <option value="pending"${shiftIsPendingApproval(s)?' selected':''}>Pending client approval</option>
        </select>
      </div>` +
+    otEditControlHtml(s) +
     `<div style="display:flex;gap:6px;margin-top:6px;">
        <button class="btn btn-primary btn-sm" onclick="saveRow('${id}')">Save</button>
        <button class="btn btn-ghost btn-sm" onclick="cancelEditRow('${id}')">Cancel</button>
@@ -10205,6 +10311,10 @@ async function saveRow(id) {
   const approvalInput = document.getElementById('edit-approval-' + id);
   const wasPending = shiftIsPendingApproval(s);
   const wantPending = approvalInput ? approvalInput.value === 'pending' : wasPending;
+  // v68: overtime approval checkbox (only rendered when there's a late clock-out).
+  const otInput = document.getElementById('edit-ot-' + id);
+  const wasOt = shiftOtApproved(s);
+  const wantOt = otInput ? otInput.checked : wasOt;
   // Resolve worker name — if the edit-wn input was shown, use its value
   const typedWorker = wnInput ? wnInput.value.trim() : '';
   const resolvedWorker = typedWorker && typedWorker.toLowerCase() !== 'available'
@@ -10222,22 +10332,15 @@ async function saveRow(id) {
     scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
     updated_at: new Date().toISOString()
   };
-  // v67: OPS-CORRECTED CLOCK LOCK. If this edit actually CHANGES a clock time
-  // (vs what's stored), flag the shift clock_locked so portal sync stops
-  // overriding the corrected value (per ops: editing either clock locks both).
-  // Compared at HH:MM so a stored "23:05:00" vs typed "23:05" isn't a false
-  // change. Only ever SETS the lock here — clearing is done via unlockShiftClock().
-  if (!_clockLockedColumnMissing) {
-    const storedCi = s.clock_in  ? String(s.clock_in).slice(0,5)  : null;
-    const storedCo = s.clock_out ? String(s.clock_out).slice(0,5) : null;
-    const clockChanged = (ci !== storedCi) || (co !== storedCo);
-    if (clockChanged && !s.clock_locked) updatePayload.clock_locked = true;
-  }
   if (resolvedWorker) updatePayload.worker_name = resolvedWorker;
   // Only touch approval_status when the column is known-present and the value
   // actually changed, so we never break the update on projects without the column.
   if (!_approvalColumnMissing && approvalInput && wantPending !== wasPending) {
     updatePayload.approval_status = wantPending ? 'pending' : 'approved';
+  }
+  // v68: persist OT approval when the column is present and the value changed.
+  if (!_otColumnMissing && otInput && wantOt !== wasOt) {
+    updatePayload.ot_approved = wantOt;
   }
   let { error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id);
   // If the approval_status column is what's missing, strip it and retry so the
@@ -10249,14 +10352,13 @@ async function saveRow(id) {
     ({ error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id));
     if (!error) toast('Saved — but "Pending approval" needs the approval_status column. Run the SQL shown in the banner.', 'info');
   }
-  // v67: graceful fallback if the optional clock_locked column isn't present.
-  // Strip it and retry so the corrected clock time still saves; flag the column
-  // missing + warn once so ops knows to run the one-line SQL for durable locking.
-  if (error && /clock_locked/i.test(error.message || '')) {
-    _clockLockedColumnMissing = true;
-    delete updatePayload.clock_locked;
+  // v68: graceful fallback if ot_approved column is missing — strip + retry so
+  // the rest saves; the billing cap still applies, the approval just can't persist.
+  if (error && /ot_approved/i.test(error.message || '')) {
+    _otColumnMissing = true;
+    delete updatePayload.ot_approved;
     ({ error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id));
-    if (!error) toast('Clock-out saved, but it WON\'T stay locked against portal sync until you add the clock_locked column — run: alter table shifts add column clock_locked boolean default false;', 'error');
+    if (!error) toast('Saved — but OT approval needs the ot_approved column: alter table shifts add column ot_approved boolean default false;', 'error');
   }
   // Graceful fallback: if Supabase rejects the update because an OPTIONAL column
   // (compensation/transport) doesn't exist in this project's schema, retry with a
@@ -10274,7 +10376,6 @@ async function saveRow(id) {
         updated_at: new Date().toISOString()
       };
       if (resolvedWorker) corePayload.worker_name = resolvedWorker;
-      if (!_clockLockedColumnMissing && 'clock_locked' in updatePayload) corePayload.clock_locked = updatePayload.clock_locked;
       const retry = await supabaseClient.from('shifts').update(corePayload).eq('id', id);
       error = retry.error;
       if (!error) {
@@ -13256,30 +13357,42 @@ function portalStatusLooksCancelled(...vals) {
 // degrades gracefully (pending state just can't persist team-wide). Add it with:
 //   alter table shifts add column approval_status text;
 let _approvalColumnMissing = false;
-// v67: ops-corrected clock lock. When ops edits a clock time, the shift is
-// flagged clock_locked=true so portal sync stops overriding the corrected
-// value. Optional column — add it with:
-//   alter table shifts add column clock_locked boolean default false;
-// Code degrades gracefully if absent (the correction still saves, but can't
-// stay locked against the next portal sync until the column exists).
-let _clockLockedColumnMissing = false;
-// Re-open a shift's clock times to portal sync (clears the ops lock). Used by
-// the 🔒 indicator's unlock action on a shift row.
-async function unlockShiftClock(id) {
+// v68: overtime approval. By default the payroll/billing clock-out is capped at
+// the scheduled end (see payrollEndTime), so a worker tapping out a few minutes
+// late doesn't inflate the worker's pay or the client's invoice. When ops
+// confirms the overtime is genuine, they tick "Approve OT" on the shift
+// (ot_approved=true) and the real clock-out is counted for both pay and billing.
+// Optional column — add with:
+//   alter table shifts add column ot_approved boolean default false;
+// Degrades gracefully if absent: the cap still applies for display/billing math,
+// but the approval can't persist/sync until the column exists.
+let _otColumnMissing = false;
+async function toggleShiftOT(id, approve) {
   const s = allShifts.find(x => String(x.id) === String(id));
   if (!s) return;
-  if (_clockLockedColumnMissing) { toast('Nothing to unlock — the clock_locked column isn\'t in the DB yet.', 'info'); return; }
-  if (!confirm('Re-open this shift\'s clock times to portal sync? The portal\'s clock-in/out will be allowed to overwrite your corrected times again on the next sync.')) return;
+  if (_otColumnMissing) {
+    toast('Add the ot_approved column first: alter table shifts add column ot_approved boolean default false;', 'error');
+    return;
+  }
+  const want = (approve === undefined) ? !shiftOtApproved(s) : !!approve;
   const { error } = await supabaseClient.from('shifts')
-    .update({ clock_locked: false, updated_at: new Date().toISOString() }).eq('id', id);
-  if (error && /clock_locked/i.test(error.message || '')) { _clockLockedColumnMissing = true; toast('clock_locked column missing — nothing to unlock.', 'info'); return; }
-  if (error) { toast('Failed to unlock: ' + error.message, 'error'); return; }
+    .update({ ot_approved: want, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error && /ot_approved/i.test(error.message || '')) {
+    _otColumnMissing = true;
+    toast('ot_approved column missing — run: alter table shifts add column ot_approved boolean default false;', 'error');
+    return;
+  }
+  if (error) { toast('Failed to update OT: ' + error.message, 'error'); return; }
+  // Reflect immediately so the figure updates without waiting for reload.
+  s.ot_approved = want;
+  const co = s.clock_out?.slice(0,5) || '—';
+  const se = s.scheduled_end?.slice(0,5) || '—';
   try {
-    await logActivity('Clock lock removed',
-      `${s.worker_name || '—'} at ${s.outlet || '—'} — clock times re-opened to portal sync`,
+    await logActivity(want ? 'Overtime approved' : 'Overtime un-approved',
+      `${s.worker_name || '—'} at ${s.outlet || '—'} — ${want ? `OT billed/paid to actual clock-out ${co} (sched end ${se})` : `reverted to scheduled end ${se} (clock-out ${co})`}`,
       'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
   } catch(e) {}
-  toast('Clock times unlocked — portal sync can update them again.');
+  toast(want ? 'Overtime approved — counted to actual clock-out.' : 'Overtime removed — counted to scheduled end.');
   await loadShifts();
 }
 function approvalColumnMissing(error) {
@@ -13318,25 +13431,24 @@ async function checkApprovalColumn() {
 function shiftIsPendingApproval(s) {
   return !!s && String(s.approval_status || '').toLowerCase() === 'pending';
 }
-// v67: probe the optional clock_locked column once so saveRow can decide
-// whether to even attempt writing the lock flag (avoids a failed-then-retry
-// round trip on projects that haven't added the column). Mirrors
-// checkApprovalColumn(). Degrades silently — a missing column just means
-// corrections can't stay locked against portal sync until the SQL is run.
-let _clockLockedColumnChecked = false;
-async function checkClockLockedColumn() {
-  if (_clockLockedColumnChecked || !supabaseClient) return;
-  _clockLockedColumnChecked = true;
+// v68: probe the optional ot_approved column once so toggleShiftOT / the OT
+// control can decide whether the approval can persist. Mirrors
+// checkApprovalColumn(). Degrades silently — a missing column means the OT cap
+// still applies but approvals can't be saved until the SQL is run.
+let _otColumnChecked = false;
+async function checkOtColumn() {
+  if (_otColumnChecked || !supabaseClient) return;
+  _otColumnChecked = true;
   try {
-    const { error } = await supabaseClient.from('shifts').select('clock_locked').limit(1);
-    if (error && /clock_locked/i.test(error.message || '')) {
-      _clockLockedColumnMissing = true;
-      console.warn('[clock-lock] The clock_locked column is MISSING. Manual clock-out corrections will be re-overridden by portal sync until you run:  alter table shifts add column clock_locked boolean default false;');
+    const { error } = await supabaseClient.from('shifts').select('ot_approved').limit(1);
+    if (error && /ot_approved/i.test(error.message || '')) {
+      _otColumnMissing = true;
+      console.warn('[overtime] The ot_approved column is MISSING. Late clock-outs are capped at scheduled end for billing, but "Approve OT" can\'t persist until you run:  alter table shifts add column ot_approved boolean default false;');
     } else if (!error) {
-      _clockLockedColumnMissing = false;
+      _otColumnMissing = false;
     }
   } catch (e) {
-    if (/clock_locked/i.test(String(e?.message || e || ''))) _clockLockedColumnMissing = true;
+    if (/ot_approved/i.test(String(e?.message || e || ''))) _otColumnMissing = true;
   }
 }
 // Small inline tag used in worker-name cells/cards so a pending-approval booking
@@ -14812,15 +14924,6 @@ async function syncPortalClockTimes(rows) {
       if (!ex.worker_name || String(ex.worker_name).toLowerCase() === 'available') continue;
       // Don't push clock times onto a portal-cancelled booking.
       if (r._portalCancelled) continue;
-      // v67: OPS-CORRECTED CLOCK LOCK. Once ops manually edits a clock time
-      // (e.g. a worker forgot to clock out and the portal recorded a late
-      // clock-out that inflated billed hours, so ops corrected it), the shift
-      // is flagged clock_locked=true. The portal must then NEVER override the
-      // corrected times again — otherwise each 5-min sync re-applies the wrong
-      // portal value and re-breaks billing. Skip BOTH clock_in and clock_out
-      // for a locked shift (per ops: editing either locks both). All other
-      // sync (approvals, cancellation detection) is unaffected.
-      if (ex.clock_locked === true) continue;
 
       const portalIn  = r.clock_in  || null; // already importParseTime'd → 'HH:MM'
       const portalOut = r.clock_out || null;
