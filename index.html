@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v67 — OPS-CORRECTED CLOCK LOCK (manual clock-out fixes kept being re-overridden by portal sync, breaking billing). Scenario: a worker forgets to clock out and clocks out e.g. 5 min after shift end; the portal records that late clock-out and the app treats it as overtime, inflating billed hours. Ops corrects the clock-out in the edit row, but because the booking is portal-synced, syncPortalClockTimes() re-applied the portal's (wrong) value on the next 5-min sync, reverting the fix every time. FIX: a durable per-shift lock. (1) When saveRow() detects that an edit actually CHANGES a clock time (HH:MM compare vs stored, so 23:05:00 vs 23:05 isn't a false positive), it sets clock_locked=true on the shift — per ops, editing EITHER clock locks BOTH. (2) syncPortalClockTimes() now skips ALL clock writes for any shift with clock_locked===true, so the corrected times survive every subsequent sync (approval-sync and portal-cancellation detection are unaffected). (3) A 🔒 indicator shows on the clock-out cell of a locked shift; clicking it calls unlockShiftClock() to re-open the times to portal sync (with confirm + activity log) if ops ever wants the portal authoritative again. (4) Graceful degradation: clock_locked is an OPTIONAL column — checkClockLockedColumn() probes it on load; if absent, saveRow still saves the corrected time but toasts that it won't STAY locked until the column is added, and the core-only retry path preserves the flag when present. Durable + team-wide (real DB column, flows through loadShifts select *). REQUIRES ONE-LINE SQL for the lock to persist:  alter table shifts add column clock_locked boolean default false;  — the code runs fine without it (corrections just aren't protected against the next sync until it's added). Additive-only: 1 line modified (renderTimeCell return, to append the 🔒), everything else new. node --check passes (5/5 script blocks); 9/9 lock-decision + sync-skip unit cases pass. -->
 <!-- Build patch: v66 — OVERNIGHT CLOCK-OUT PARSE FIX (no clock-out notifications + 3am-after-7pm clock-out not captured). Root cause: importParseTime() only matched 'HH:MM[:SS]' and am/pm; it returned null for a FULL date/datetime timestamp. The portal stores portal_bookings.clock_in_time / clock_out_time as full timestamps, and for an overnight shift (e.g. 7pm→3am) the clock-out carries the NEXT calendar day (e.g. 2026-06-20T03:00:00). That whole value parsed to null → the row's clock_out became null → syncPortalClockTimes() found nothing to write → the panel shift never got the clock-out, isNewClockOut never became true, and the buildClockOutMessage→notifyPayrollClockOut WhatsApp alert never fired. If the portal recently switched these fields from bare 'HH:MM:SS' to full ISO datetimes, this silently broke ALL clock-out notifications, not just overnight ones. FIX: importParseTime() now first strips a leading 'YYYY-MM-DD' date from any 'YYYY-MM-DDThh:mm…' / 'YYYY-MM-DD hh:mm…' / ISO-with-millis-or-Z value and returns the bare HH:MM time-of-day. The panel shift's own scheduled date stays authoritative; existing overnight handling (clock_out <= clock_in ⇒ +1440 min) already covers the wrap-around in calcShiftHours / payout / sort, so hours and pay are correct for the 7pm→3am case. Additive-only: exactly ONE new block inside importParseTime, zero deletions or other edits. node --check passes (5/5 script blocks); 10/10 parser unit cases pass (full ISO, space datetime, .000Z, overnight in/out, datetime-no-seconds, legacy HH:MM:SS, am/pm, empty/null). NOTE: if clock-outs still don't notify for SAME-DAY shifts after this, run WhatsApp Alerts → "🩺 Why aren't clock-out alerts sending?" — the most common remaining cause is the payroll toggle OFF or the team-synced Periskope config missing on whichever device runs the 5-min auto-importer. -->
 <!-- Build patch: v63 — LIVE SHIFT MAP + geocoded outlet pins. (1) New "🗺️ Live Map" page (nav after Outlets, also whitelisted for ph_partner): plots the day's shifts on a Leaflet/OpenStreetMap map by their outlet's stored coordinates, scoped to the user's country via scopeShiftsToCountry. Four toggles — Live/ongoing (green, pulsing: clock_in set, no clock_out), Pending approval (amber: shiftIsPendingApproval), Scheduled/upcoming (blue: not yet clocked in), Completed (grey, off by default: clock_in+clock_out). Cancelled shifts and unfilled open slots (isOpenSlot) are excluded. Multiple workers at one outlet collapse into a single numbered pin (marker colour = highest-priority class present); click shows the roster popup. Date picker views any day independent of the attendance day/week view; a side list mirrors the pins (click to zoom); an amber banner flags any outlet with shifts that has no pin. Read-only — no shift writes. (2) Outlet modal "Location / address" field is now a typed autocomplete backed by OpenStreetMap Nominatim (free, no API key), country-filtered (SG/MY/PH). Picking a suggestion stores exact lat/lng — NO schema change: coordinates live in profileMeta.outlets[key].lat/.lng alongside commission/notes/requirements, so they sync team-wide through saveProfileMeta and survive mergeProfileMeta ({...se,...pe} keeps local scalars). Falls back to o.latitude/o.longitude on the row if present. node --check passes (both inline script blocks). Additive-only: exactly 3 original lines changed (address input row, profileMeta write block, PH_PARTNER_PAGES). -->
 <!-- Build patch: v62 — DIAGNOSE + FIX "pending shows 0 / no orange". Root cause when a pending booking doesn't show: the optional approval_status column isn't in the DB, so the flag silently saved as confirmed. (1) checkApprovalColumn() probes the column on every loadShifts (select approval_status limit 1); if it's missing it sets _approvalColumnMissing and shows a PERSISTENT amber banner above the metrics with the exact SQL (alter table shifts add column approval_status text;) instead of a one-off toast. Also console-logs the live pending count each load for quick confirmation. (2) EDIT ROW now has a "Booking status" dropdown (Confirmed / Pending client approval) so an existing confirmed shift can be flagged pending (or set back), wired into saveRow with the same column-missing graceful retry. Setting pending never notifies the worker (notification only fires on approval, unchanged). All guarded so projects without the column still save everything else. node --check passes; banner + edit control preview-rendered. No behavioural change for any shift that isn't approval_status='pending'. -->
@@ -6285,6 +6286,7 @@ async function loadShifts() {
   await loadAvailableSlots();
   await buildPortalSyncIndex();
   try { await checkApprovalColumn(); } catch (e) {}
+  try { await checkClockLockedColumn(); } catch (e) {}
   try { await loadPendingApprovalAll(); } catch (e) {}
   renderTable();
   renderMetrics();
@@ -7801,7 +7803,13 @@ function openAddModalForDate(dateStr) {
 function renderTimeCell(s, field) {
   const val = s[field]?.slice(0,5) || '';
   if (s.cancelled) return `<span style="font-family:var(--mono);font-size:12px;color:var(--text3);">—</span>`;
-  return `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${val || '—'}</span>`;
+  // v67: when a shift's clock times are ops-locked (manually corrected, so the
+  // portal can't override them), show a 🔒 on the clock-out cell. Clicking it
+  // re-opens the times to portal sync. Title explains the state on hover.
+  const lock = (field === 'clock_out' && s.clock_locked === true)
+    ? ` <span onclick="unlockShiftClock('${s.id}')" title="Clock times corrected by ops — locked against portal sync. Click to re-open to the portal." style="cursor:pointer;font-size:11px;" role="button">🔒</span>`
+    : '';
+  return `<span style="font-family:var(--mono);font-size:12px;color:var(--text2);">${val || '—'}</span>${lock}`;
 }
 
 function quickClockIn(id) {
@@ -10214,6 +10222,17 @@ async function saveRow(id) {
     scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
     updated_at: new Date().toISOString()
   };
+  // v67: OPS-CORRECTED CLOCK LOCK. If this edit actually CHANGES a clock time
+  // (vs what's stored), flag the shift clock_locked so portal sync stops
+  // overriding the corrected value (per ops: editing either clock locks both).
+  // Compared at HH:MM so a stored "23:05:00" vs typed "23:05" isn't a false
+  // change. Only ever SETS the lock here — clearing is done via unlockShiftClock().
+  if (!_clockLockedColumnMissing) {
+    const storedCi = s.clock_in  ? String(s.clock_in).slice(0,5)  : null;
+    const storedCo = s.clock_out ? String(s.clock_out).slice(0,5) : null;
+    const clockChanged = (ci !== storedCi) || (co !== storedCo);
+    if (clockChanged && !s.clock_locked) updatePayload.clock_locked = true;
+  }
   if (resolvedWorker) updatePayload.worker_name = resolvedWorker;
   // Only touch approval_status when the column is known-present and the value
   // actually changed, so we never break the update on projects without the column.
@@ -10229,6 +10248,15 @@ async function saveRow(id) {
     delete updatePayload.approval_status;
     ({ error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id));
     if (!error) toast('Saved — but "Pending approval" needs the approval_status column. Run the SQL shown in the banner.', 'info');
+  }
+  // v67: graceful fallback if the optional clock_locked column isn't present.
+  // Strip it and retry so the corrected clock time still saves; flag the column
+  // missing + warn once so ops knows to run the one-line SQL for durable locking.
+  if (error && /clock_locked/i.test(error.message || '')) {
+    _clockLockedColumnMissing = true;
+    delete updatePayload.clock_locked;
+    ({ error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id));
+    if (!error) toast('Clock-out saved, but it WON\'T stay locked against portal sync until you add the clock_locked column — run: alter table shifts add column clock_locked boolean default false;', 'error');
   }
   // Graceful fallback: if Supabase rejects the update because an OPTIONAL column
   // (compensation/transport) doesn't exist in this project's schema, retry with a
@@ -10246,6 +10274,7 @@ async function saveRow(id) {
         updated_at: new Date().toISOString()
       };
       if (resolvedWorker) corePayload.worker_name = resolvedWorker;
+      if (!_clockLockedColumnMissing && 'clock_locked' in updatePayload) corePayload.clock_locked = updatePayload.clock_locked;
       const retry = await supabaseClient.from('shifts').update(corePayload).eq('id', id);
       error = retry.error;
       if (!error) {
@@ -13227,6 +13256,32 @@ function portalStatusLooksCancelled(...vals) {
 // degrades gracefully (pending state just can't persist team-wide). Add it with:
 //   alter table shifts add column approval_status text;
 let _approvalColumnMissing = false;
+// v67: ops-corrected clock lock. When ops edits a clock time, the shift is
+// flagged clock_locked=true so portal sync stops overriding the corrected
+// value. Optional column — add it with:
+//   alter table shifts add column clock_locked boolean default false;
+// Code degrades gracefully if absent (the correction still saves, but can't
+// stay locked against the next portal sync until the column exists).
+let _clockLockedColumnMissing = false;
+// Re-open a shift's clock times to portal sync (clears the ops lock). Used by
+// the 🔒 indicator's unlock action on a shift row.
+async function unlockShiftClock(id) {
+  const s = allShifts.find(x => String(x.id) === String(id));
+  if (!s) return;
+  if (_clockLockedColumnMissing) { toast('Nothing to unlock — the clock_locked column isn\'t in the DB yet.', 'info'); return; }
+  if (!confirm('Re-open this shift\'s clock times to portal sync? The portal\'s clock-in/out will be allowed to overwrite your corrected times again on the next sync.')) return;
+  const { error } = await supabaseClient.from('shifts')
+    .update({ clock_locked: false, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error && /clock_locked/i.test(error.message || '')) { _clockLockedColumnMissing = true; toast('clock_locked column missing — nothing to unlock.', 'info'); return; }
+  if (error) { toast('Failed to unlock: ' + error.message, 'error'); return; }
+  try {
+    await logActivity('Clock lock removed',
+      `${s.worker_name || '—'} at ${s.outlet || '—'} — clock times re-opened to portal sync`,
+      'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  } catch(e) {}
+  toast('Clock times unlocked — portal sync can update them again.');
+  await loadShifts();
+}
 function approvalColumnMissing(error) {
   const msg = String(error?.message || error || '').toLowerCase();
   return /approval_status/.test(msg) && /(column|schema cache|does not exist|could not find)/.test(msg);
@@ -13262,6 +13317,27 @@ async function checkApprovalColumn() {
 }
 function shiftIsPendingApproval(s) {
   return !!s && String(s.approval_status || '').toLowerCase() === 'pending';
+}
+// v67: probe the optional clock_locked column once so saveRow can decide
+// whether to even attempt writing the lock flag (avoids a failed-then-retry
+// round trip on projects that haven't added the column). Mirrors
+// checkApprovalColumn(). Degrades silently — a missing column just means
+// corrections can't stay locked against portal sync until the SQL is run.
+let _clockLockedColumnChecked = false;
+async function checkClockLockedColumn() {
+  if (_clockLockedColumnChecked || !supabaseClient) return;
+  _clockLockedColumnChecked = true;
+  try {
+    const { error } = await supabaseClient.from('shifts').select('clock_locked').limit(1);
+    if (error && /clock_locked/i.test(error.message || '')) {
+      _clockLockedColumnMissing = true;
+      console.warn('[clock-lock] The clock_locked column is MISSING. Manual clock-out corrections will be re-overridden by portal sync until you run:  alter table shifts add column clock_locked boolean default false;');
+    } else if (!error) {
+      _clockLockedColumnMissing = false;
+    }
+  } catch (e) {
+    if (/clock_locked/i.test(String(e?.message || e || ''))) _clockLockedColumnMissing = true;
+  }
 }
 // Small inline tag used in worker-name cells/cards so a pending-approval booking
 // is unmistakable in EVERY view, not just the Status column. Includes the
@@ -14736,6 +14812,15 @@ async function syncPortalClockTimes(rows) {
       if (!ex.worker_name || String(ex.worker_name).toLowerCase() === 'available') continue;
       // Don't push clock times onto a portal-cancelled booking.
       if (r._portalCancelled) continue;
+      // v67: OPS-CORRECTED CLOCK LOCK. Once ops manually edits a clock time
+      // (e.g. a worker forgot to clock out and the portal recorded a late
+      // clock-out that inflated billed hours, so ops corrected it), the shift
+      // is flagged clock_locked=true. The portal must then NEVER override the
+      // corrected times again — otherwise each 5-min sync re-applies the wrong
+      // portal value and re-breaks billing. Skip BOTH clock_in and clock_out
+      // for a locked shift (per ops: editing either locks both). All other
+      // sync (approvals, cancellation detection) is unaffected.
+      if (ex.clock_locked === true) continue;
 
       const portalIn  = r.clock_in  || null; // already importParseTime'd → 'HH:MM'
       const portalOut = r.clock_out || null;
