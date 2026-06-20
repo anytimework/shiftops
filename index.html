@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v60 — Simpler, ledger-independent portal-cancellation detection per ops request: "once a booking is synced into the ops panel, if its matching booking is missing from the portal feed, treat it as cancelled." The v58/v59 detector (detectDeletedPortalBookings) only fired when the vanished booking still had an import_handled entry, so cancellations slipped through whenever the ledger was incomplete (shift synced before the ledger existed / on another device / via a non-stamping path). New detectMissingPortalBookings(bookings, rows) runs right after the ledger detector in loadPortalBookings: it builds a "present in the portal right now" index straight from THIS load's resolved feed rows (portal id + fuzzy worker|date|start|end key + worker|date + token-subset-by-date, reusing importBookingKey/importNormName/importNameTokens), then walks every active, today-or-future panel shift. A shift that genuinely came from the portal (sync_source 'import'/'merged' OR any import_handled entry pointing at its id) but has NO match in the current feed is flagged cancelled-in-portal — appended as a synthetic _portalCancelled/_alreadyImported row (_existingShift attached) that surfaces in the SAME "✕ Cancelled in the portal" section with the existing Apply-cancellation / Acknowledge actions and nav badge. Flag-only: never auto-cancels, never auto-saved. Guards: skips on empty/failed load, past-dated shifts, panel-already-cancelled, already-flagged-this-load, and "Available" (unbooked) slots; loose name matching avoids flagging on outlet remap or subset/superset names. node --check passes (both inline script blocks); strictly additive — no existing function, feature, or structure changed. No schema change. -->
 <!-- Build patch: v59 — Deleted-in-portal detection now also catches NON-portal-feed bookings. The v58 cancellation-by-absence detector (detectDeletedPortalBookings) only trusted real pb|<id> ledger keys, so a booking that entered the panel via manual entry / paste / CSV (recorded under a fuzzy k|worker|date|start|end key) was never noticed when its app booking was hard-deleted — it kept resurfacing/sitting in the panel with no portal counterpart. Now loadPortalBookings passes the resolved import rows into the detector, which builds a presentFuzzyKeys set via the SAME importBookingKey() the ledger uses; any k| ledger entry whose key is absent from this load AND whose panel shift is still active is treated as a portal deletion and dropped into the existing "✕ Cancelled / deleted in the portal" section (flag-only, never auto-cancels, never auto-saved — same Apply-cancellation / Acknowledge flow). Fuzzy branch carries two EXTRA guards a real id doesn't need: (a) the matched panel shift must be portal-linked (sync_source set or isShiftPortalSynced) so ops-only shifts that were never in the app aren't flagged; (b) it's skipped if more than one live panel shift produces the same fuzzy key (ambiguous "which one was deleted?"). pb| path unchanged; today-or-future-only and panel-not-already-cancelled guards unchanged. node --check passes; isolated 8-case harness covers fuzzy-delete/present/ops-only/collision/past/panel-cancelled and pb present/absent. No schema change. -->
 <!-- Build patch: v58 — Deleted-in-portal detection (cancellation-by-absence): the portal HARD-DELETES a booking row when a shift is cancelled/deleted in the app (no status flip), so the v56 status-regex path can never see it. detectDeletedPortalBookings() runs after each load: any previously-imported booking (import_handled pb|<id> → panel shift) whose portal id is absent from the current feed but whose panel shift is still active and today-or-future is surfaced in the "✕ Cancelled / deleted in the portal" section. Flag-only; never auto-cancels; guarded against empty/failed loads. No schema change. -->
 <!-- Build patch: v57 — Three requests, all on the Import Bookings ↔ ops-panel link, no schema change. (1) CLOCK-IN/OUT AUTO-REFLECTION for synced bookings: a portal booking IS the app booking, so when a worker clocks in/out via the app portal (portal_bookings.clock_in_time / clock_out_time get populated), the new syncPortalClockTimes() — run inside loadPortalBookings right after autoStampSyncRows(), so it also fires on the v56 5-min auto-importer — pushes those times onto the already-synced panel shift (matched via the reconciled row's _existingShift / _importedShiftId). It only ADDS or CHANGES from a real portal value and NEVER blanks an existing panel clock time with a null portal value; it skips cancelled panel shifts, Available slots, and portal-cancelled rows. Each applied change is activity-logged ("Clocked in/out (portal)"). (2) CLOCK-OUT WHATSAPP ALERT as per usual: on a GENUINELY NEW clock-out applied this way (panel had no clock_out, portal now reports one) it fires the exact same buildClockOutMessage → notifyPayrollClockOut path every other clock-out uses, so the outlet group gets the standard payroll alert. A per-shift in-memory guard (_portalClockOutNotified) stops the auto-importer re-sending on its cadence within a session; a new clock-IN alone never triggers the alert. (3) CANCELLATION REFLECTED IN THE PANEL: the v56 "✕ Cancelled in the portal" section was flag-only. In-panel cancelled rows now get an "✕ Apply cancellation" button (beside Acknowledge) that opens the STANDARD cancellation modal (openCancelModal) targeting the real panel shift, so the established rules run unchanged (worker $15 penalty / MC waiver / good-will / outlet-delete, suspension counting, slot→Available, needs_replacement). On success, confirmCancel acknowledges the originating import row via a captured key (_pendingCancelImportRowKey → ackImportRowByPendingKey), so it drops out of the section and the nav badge; the key is cleared if the modal is closed without confirming. node --check passes; isolated logic harness covers new/repeat clock-out, null-never-blanks, cancelled/available/portal-cancelled/not-in-panel skips. -->
@@ -14103,6 +14104,173 @@ async function detectDeletedPortalBookings(bookings, resolvedRows) {
   }
 }
 
+// ── v60: SIMPLE PRESENCE-BASED cancellation detection ───────────────────────
+// The ledger-based detector above (v58/v59) only catches a deletion when the
+// vanished booking still has an import_handled entry pointing at the panel
+// shift. In practice that ledger can be incomplete — a shift may have been
+// synced before the ledger existed, on another device, or via a path that
+// didn't stamp it — so a real portal cancellation slips through unnoticed.
+//
+// Per ops' request, this is the simpler, more robust rule that does NOT depend
+// on the ledger at all:
+//
+//   "Once a booking is imported and saved into the ops panel (i.e. it is
+//    'synced' — it came from the portal), if the system later detects that its
+//    matching booking is MISSING from the portal feed, treat it as a cancelled
+//    shift and surface it in the 'Cancelled in the portal' section."
+//
+// Implementation: build a presence set straight from THIS load's resolved feed
+// rows (every booking currently in the portal), then walk every active panel
+// shift. A shift that (a) genuinely came from the portal — proven by a
+// sync_source stamp OR an import_handled ledger entry — but (b) has NO matching
+// booking in the current feed, was cancelled/deleted in the portal.
+//
+// Presence matching reuses the SAME loose keys the rest of the import pipeline
+// uses (portal id, fuzzy worker+date+start/end key, worker+date, and
+// token-subset by date) so a synced shift is only flagged "missing" when it
+// truly has no counterpart in the feed — not merely because of an outlet remap
+// or a subset/superset name.
+//
+// Safety guards (mirror the ledger detector so we never mass-flag live work):
+//   • Never runs on an empty/failed load.
+//   • today-or-future shifts only (a past shift's cancellation isn't actionable).
+//   • Skips shifts already cancelled in the panel.
+//   • Skips shifts already surfaced as a cancelled row this load (no doubles).
+//   • Skips "Available" slots (no worker booked → no portal booking to vanish).
+//   • Flag-only — never auto-cancels; same Apply-cancellation / Acknowledge flow.
+function detectMissingPortalBookings(rows, resolvedRows) {
+  // resolvedRows is the array of feed rows this load (each = one current portal
+  // booking, mapped to panel-comparable fields with _portalBookingId). Without a
+  // non-empty feed we must not flag anything (a failed fetch isn't a cancellation).
+  const feed = Array.isArray(resolvedRows) ? resolvedRows : [];
+  if (!feed.length) return;
+
+  // ── Build the "present in the portal right now" index from the live feed ──
+  const presentPortalIds  = new Set();          // pb|<id>
+  const presentFuzzyKeys  = new Set();          // k|worker|date|start|end
+  const presentWorkerDate = new Set();          // wd|workerNorm|date (time-independent)
+  const presentTokensByDate = new Map();        // date → [Set(tokens), …] for subset match
+  for (const r of feed) {
+    if (!r) continue;
+    if (r._portalBookingId != null && r._portalBookingId !== '') {
+      presentPortalIds.add(String(r._portalBookingId));
+    }
+    let fk = '';
+    try { fk = importBookingKey(r); } catch (e) { fk = ''; }
+    if (fk) presentFuzzyKeys.add(fk);
+    const wNorm = importNormName(r.worker_name || r._workerRaw || '');
+    const d = String(r.shift_date || '').slice(0, 10);
+    if (wNorm && wNorm !== 'available' && d) {
+      presentWorkerDate.add(`wd|${wNorm}|${d}`);
+      const toks = importNameTokens(r.worker_name || r._workerRaw || '');
+      if (toks.length) {
+        if (!presentTokensByDate.has(d)) presentTokensByDate.set(d, []);
+        presentTokensByDate.get(d).push(new Set(toks));
+      }
+    }
+  }
+
+  // A panel shift is "present in the feed" if any of its keys hit the index.
+  const shiftPresentInFeed = (s) => {
+    // Portal id, if we ever recorded one on the shift (rare; most don't carry it).
+    if (s._portalBookingId != null && s._portalBookingId !== ''
+        && presentPortalIds.has(String(s._portalBookingId))) return true;
+    let fk = '';
+    try { fk = importBookingKey(s); } catch (e) { fk = ''; }
+    if (fk && presentFuzzyKeys.has(fk)) return true;
+    const wNorm = importNormName(s.worker_name || '');
+    const d = String(s.shift_date || '').slice(0, 10);
+    if (wNorm && d && presentWorkerDate.has(`wd|${wNorm}|${d}`)) return true;
+    // Token-subset by date: panel "Hui Ling" ⊆ portal "Hui Ling Chong" and vice versa.
+    const panelToks = importNameTokens(s.worker_name || '');
+    if (panelToks.length) {
+      const dayList = presentTokensByDate.get(d);
+      if (dayList && dayList.some(portalSet =>
+        tokensSubset(panelToks, portalSet) || tokensSubset([...portalSet], new Set(panelToks))
+      )) return true;
+    }
+    return false;
+  };
+
+  // Proof the shift CAME FROM the portal (so its absence means a cancellation,
+  // not just an ops-only shift that was never in the app). Any one suffices:
+  //   • sync_source stamped ('import' / 'merged'), the durable origin tag; or
+  //   • an import_handled ledger entry pointing at this shift id.
+  // (isShiftPortalSynced reads the CURRENT feed, so a freshly-cancelled shift
+  //  already reads false there — it can't serve as origin proof; we rely on the
+  //  durable stamp/ledger instead.)
+  const ledgerHasShift = (s) => {
+    if (!importHandled || typeof importHandled !== 'object') return false;
+    let fk = '';
+    try { fk = importBookingKey(s); } catch (e) { fk = ''; }
+    if (fk && importHandled[fk] && String(importHandled[fk].shiftId) === String(s.id)) return true;
+    // Also accept any ledger entry that points at this shift id.
+    for (const rec of Object.values(importHandled)) {
+      if (rec && String(rec.shiftId) === String(s.id)) return true;
+    }
+    return false;
+  };
+  const shiftCameFromPortal = (s) => {
+    const src = s && s.sync_source ? String(s.sync_source) : '';
+    if (src === 'import' || src === 'merged') return true;
+    if (ledgerHasShift(s)) return true;
+    return false;
+  };
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Don't double-add shifts already flagged this load (status path, ledger
+  // detector, or a previous pass) — keyed by the panel shift id.
+  const alreadyFlaggedShiftIds = new Set(
+    (Array.isArray(importRows) ? importRows : [])
+      .filter(r => r && r._portalCancelled)
+      .map(r => String(r._importedShiftId || (r._existingShift && r._existingShift.id) || ''))
+      .filter(Boolean)
+  );
+
+  const synthRows = [];
+  for (const s of (Array.isArray(allShifts) ? allShifts : [])) {
+    if (!s || s.id == null) continue;
+    if (s.cancelled === true) continue;                       // already cancelled in panel
+    if (alreadyFlaggedShiftIds.has(String(s.id))) continue;   // already on screen this load
+    const sDate = String(s.shift_date || '').slice(0, 10);
+    if (!sDate || sDate < today) continue;                    // today-or-future only
+    // "Available" slots have no worker booked — there's no portal booking to
+    // go missing, so skip them (avoids flagging unfilled standby slots).
+    const wNorm = importNormName(s.worker_name || '');
+    if (!wNorm || wNorm === 'available') continue;
+    if (!shiftCameFromPortal(s)) continue;                    // never was a portal booking → ignore
+    if (shiftPresentInFeed(s)) continue;                      // still in the portal → not cancelled
+
+    // Missing from the feed but it WAS a portal booking and is still active in
+    // the panel → cancelled/deleted in the portal. Synthesise a flag-only row
+    // that reuses the existing "Cancelled in the portal" UI + apply/ack flow.
+    synthRows.push({
+      worker_name:        s.worker_name || '',
+      outlet:             s.outlet || '',
+      role:               s.role || '',
+      shift_date:         s.shift_date || '',
+      scheduled_start:    s.scheduled_start || '',
+      scheduled_end:      s.scheduled_end || '',
+      country:            s.country || null,
+      _portalBookingId:   s._portalBookingId || null,
+      _portalCancelled:   true,    // routes into the "Cancelled in the portal" section
+      _deletedFromPortal: true,    // provenance: detected by absence from the feed
+      _alreadyImported:   true,    // it IS in the panel — needs attention
+      _existingShift:     s,       // lets applyPortalCancellation find the shift
+      _importedShiftId:   s.id,
+      _selected:          false,   // never auto-saved
+    });
+    alreadyFlaggedShiftIds.add(String(s.id));
+  }
+
+  if (synthRows.length) {
+    importRows = (Array.isArray(importRows) ? importRows : []).concat(synthRows);
+    console.log(`[portal cancellations] v60 presence check: ${synthRows.length} synced panel shift(s) have no matching booking in the current portal feed → flagged cancelled-in-portal.`);
+    try { renderImportPreview(); } catch (e) {}
+  }
+}
+
 async function loadPortalBookings(opts) {
   const silent = !!(opts && opts.silent); // v56: background auto-run suppresses toasts/button churn
   // Pulls bookings synced from the portal DB (portal_bookings + portal_shifts +
@@ -14309,6 +14477,18 @@ async function loadPortalBookings(opts) {
     try {
       await detectDeletedPortalBookings(bookings, rows);
     } catch (e) { console.warn('detectDeletedPortalBookings failed:', e); }
+
+    // v60: SIMPLE presence-based cancellation detection. Independent of the
+    // import_handled ledger — it walks every active, today-or-future panel shift
+    // that genuinely came from the portal (sync_source stamp OR a ledger entry)
+    // and flags any whose matching booking is no longer in the current feed as
+    // cancelled-in-portal. This is the catch-all the ops team asked for so a
+    // portal cancellation can't slip through just because the ledger was missing
+    // an entry. Flag-only; same Apply-cancellation / Acknowledge flow; guarded
+    // against empty/failed loads inside the function.
+    try {
+      detectMissingPortalBookings(bookings, rows);
+    } catch (e) { console.warn('detectMissingPortalBookings failed:', e); }
 
     // v56: print every distinct status value the portal feed used this load, so
     // the exact "cancelled" value can be confirmed from the console and the
