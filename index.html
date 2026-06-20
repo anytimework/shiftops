@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v62 — DIAGNOSE + FIX "pending shows 0 / no orange". Root cause when a pending booking doesn't show: the optional approval_status column isn't in the DB, so the flag silently saved as confirmed. (1) checkApprovalColumn() probes the column on every loadShifts (select approval_status limit 1); if it's missing it sets _approvalColumnMissing and shows a PERSISTENT amber banner above the metrics with the exact SQL (alter table shifts add column approval_status text;) instead of a one-off toast. Also console-logs the live pending count each load for quick confirmation. (2) EDIT ROW now has a "Booking status" dropdown (Confirmed / Pending client approval) so an existing confirmed shift can be flagged pending (or set back), wired into saveRow with the same column-missing graceful retry. Setting pending never notifies the worker (notification only fires on approval, unchanged). All guarded so projects without the column still save everything else. node --check passes; banner + edit control preview-rendered. No behavioural change for any shift that isn't approval_status='pending'. -->
+<!-- Build patch: v61 — Pending-approval VISIBILITY + metric-card reshuffle (UI only, no schema change). (1) Pending-approval bookings are now unmistakable in every attendance view: orange worker name (.pending-approval-name), an "⏳ Pending approval" pill under the name (pendingApprovalTag, with an inline ✓ Approve button), an orange left-bar + tint on week cards (.week-shift.pending-approval) and table rows (tr.row-pending-approval), and a distinct orange status badge (.badge-pending-approval) instead of the overloaded amber. (2) For a pending-approval shift, the night/clock-in REMINDER PANEL is replaced by a "Booking pending client approval" notice (reminderPanelHtml early-returns it) — there's nothing to remind the worker about until the client confirms; an ✓ Approve now button sits in it. (3) METRIC CARDS: the standalone "Late" and "Cancellations" cards are merged into ONE "⚠️ Late & Cancellations" card (two tap-targets: Late filters the table, the Cancelled number opens the cancellations panel). (4) NEW "⏳ Pending Approval" metric card (orange) showing the count of pending-approval bookings; tapping it filters the attendance table to those bookings (new matchesMetricFilter 'pending_approval'). NOTE: the orange treatment only shows for shifts whose approval_status='pending' — created via Add Shift → "Pending client approval", or imported from a portal booking the portal marks pending. Requires the v60 optional column to persist team-wide:  alter table shifts add column approval_status text;  node --check passes; preview-rendered. -->
 <!-- Build patch: v60 — PENDING CLIENT APPROVAL for bookings, end-to-end. A booking can now be "pending client approval": the client still has to approve it in the portal. (A) ADD SHIFT FORM gains a "Booking status" selector (Confirmed / Pending client approval); a pending pick writes approval_status='pending' on the shift (Confirmed leaves it null, so existing rows + a missing column read as confirmed). (B) STATUS BADGE shows "⏳ Pending approval" everywhere statusBadge() renders, with an inline "✓ Approve now" button (approveBookingManually) for ops to confirm without waiting on the portal. (C) PORTAL IMPORT reads portal status tokens: a booking the portal marks pending imports as pending approval (shown with a chip in the preview), one it marks approved imports as a normal confirmed shift. Carried through confirmImportBookings inserts. (D) AUTO-REFLECTION — syncPortalApprovals() runs inside loadPortalBookings (button + 5-min auto-importer), right after syncPortalClockTimes: for any reconciled row whose panel shift is still 'pending' but whose portal status now reads approved, it (1) flips the panel shift to approved/confirmed, (2) WhatsApps the WORKER that the shift is confirmed (buildApprovalWorkerMessage → sendPeriskopeMessage, once per shift), and (3) raises an acknowledgement task for ops. (E) ACK TASK — a new 'approval_ack' Tasks card ("✅ Booking approved") with an Acknowledge button; backed by a team-synced app_settings ledger key='approval_acks' (mirrors import_handled / import_ignored — survives refresh/session/teammates, notify-once guard) so NO shift_reminders schema change is needed. Approval state guards: never touches cancelled / Available / portal-cancelled / already-confirmed shifts. Status regexes handle snake_case tokens (pending_approval, shift_approved) and pending wins over approved on overlap. node --check passes; 22-case status-classification harness passes. ONE OPTIONAL SCHEMA ADD for durable team-wide pending state: run once in Supabase SQL —  alter table shifts add column approval_status text;  — the code degrades gracefully if it's absent (add-shift + approve still work locally, but the pending flag can't persist/sync until the column exists). loadShifts already selects * so the column flows through with no other change. -->
 <!-- Build patch: v59 — Deleted-in-portal detection now also catches NON-portal-feed bookings. The v58 cancellation-by-absence detector (detectDeletedPortalBookings) only trusted real pb|<id> ledger keys, so a booking that entered the panel via manual entry / paste / CSV (recorded under a fuzzy k|worker|date|start|end key) was never noticed when its app booking was hard-deleted — it kept resurfacing/sitting in the panel with no portal counterpart. Now loadPortalBookings passes the resolved import rows into the detector, which builds a presentFuzzyKeys set via the SAME importBookingKey() the ledger uses; any k| ledger entry whose key is absent from this load AND whose panel shift is still active is treated as a portal deletion and dropped into the existing "✕ Cancelled / deleted in the portal" section (flag-only, never auto-cancels, never auto-saved — same Apply-cancellation / Acknowledge flow). Fuzzy branch carries two EXTRA guards a real id doesn't need: (a) the matched panel shift must be portal-linked (sync_source set or isShiftPortalSynced) so ops-only shifts that were never in the app aren't flagged; (b) it's skipped if more than one live panel shift produces the same fuzzy key (ambiguous "which one was deleted?"). pb| path unchanged; today-or-future-only and panel-not-already-cancelled guards unchanged. node --check passes; isolated 8-case harness covers fuzzy-delete/present/ops-only/collision/past/panel-cancelled and pb present/absent. No schema change. -->
 
@@ -226,6 +228,12 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .metric-card-replacement { border-color: rgba(43,179,163,0.3); }
 .metric-card-available { border-color: rgba(247,171,46,0.28); }
 .metric-card-cancellations { border-color: rgba(232,64,64,0.28); }
+.metric-card-late-cancel { border-color: rgba(232,64,64,0.28); }
+.metric-card-pending-approval { border-color: rgba(255,138,0,0.4); }
+.lc-split { padding:2px 4px; border-radius:6px; transition:background 0.15s; }
+.lc-split.clickable { cursor:pointer; }
+.lc-split.clickable:hover { background:rgba(255,255,255,0.05); }
+.lc-split.lc-active { background:rgba(79,142,247,0.12); box-shadow:0 0 0 1px rgba(79,142,247,0.3) inset; }
 .metric-card-replacement.tasks-hot { border-color: var(--red); background: rgba(232,64,64,0.08); box-shadow: 0 0 0 1px rgba(232,64,64,0.2) inset; }
 .modal-wide { max-width: 640px; width: 92%; }
 .modal-available { max-width: 1080px; width: 94%; }
@@ -908,6 +916,7 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div id="accepted-offers-banner"></div>
 
       <div class="content">
+        <div id="approval-column-banner" class="config-banner hidden"><span class="config-banner-icon">⏳</span><div><h3>Pending-approval needs one database column</h3><p>The <strong>approval_status</strong> column isn't in your Supabase <strong>shifts</strong> table yet, so bookings can't be saved as "Pending client approval" (they save as confirmed instead). Run this once in Supabase → SQL editor, then reload:<br><code style="display:inline-block;margin-top:6px;font-family:var(--mono);background:var(--bg3);padding:4px 8px;border-radius:5px;color:var(--amber);">alter table shifts add column approval_status text;</code></p></div></div>
         <div class="metrics" id="metrics"></div>
         <div id="standby-day-panel"></div>
         <div id="reminder-alerts"></div>
@@ -3994,6 +4003,20 @@ function updateReminderPanelInPlace(shiftId) {
 function reminderPanelHtml(s) {
   const workerName = String(s.worker_name || '').trim();
   if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) return '';
+  // ── Pending client approval ──────────────────────────────────────────────
+  // While a booking is awaiting client approval there's nothing to remind the
+  // worker about yet (the shift isn't confirmed), so the night/clock-in reminder
+  // UI is replaced by a clear pending-approval notice + an Approve-now action.
+  if (shiftIsPendingApproval(s)) {
+    const sidP = escapeAttr(String(s.id));
+    return `<div class="dispute-banner" style="background:rgba(255,138,0,0.12);border-color:rgba(255,138,0,0.5);border-left:3px solid #ff8a00;">
+      <div class="dispute-head" style="color:#ff8a00;">⏳ <strong>Booking pending client approval</strong></div>
+      <div style="font-size:11px;margin-top:4px;color:var(--text2);line-height:1.5;">Waiting for the client to approve this booking in the portal. It will confirm automatically once they approve — the worker is then notified on WhatsApp and a task is raised. Reminders resume after it's confirmed.</div>
+      <div class="dispute-actions">
+        <button class="btn-dispute-act" style="background:var(--green);color:#04140b;border:none;font-weight:700;" onclick="approveBookingManually('${sidP}')" title="Confirm this booking now — notifies the worker on WhatsApp and logs an acknowledgement task">✓ Approve now</button>
+      </div>
+    </div>`;
+  }
   // Once the worker is onsite (clocked in or already clocked out), reminders are irrelevant — hide the panel
   if (s.clock_in) return '';
   const today = new Date(); today.setHours(0,0,0,0);
@@ -6148,6 +6171,7 @@ async function loadShifts() {
   await loadStandbyList();
   await loadAvailableSlots();
   await buildPortalSyncIndex();
+  try { await checkApprovalColumn(); } catch (e) {}
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
@@ -6832,6 +6856,7 @@ function metricFilterLabel() {
     estimated_payout: 'estimated payout shifts',
     late: 'late shifts',
     cancelled: 'cancelled shifts',
+    pending_approval: 'pending client approval bookings',
     penalties: 'shifts with penalties',
     sr_absorbed: 'SR absorbed shifts'
   };
@@ -6848,6 +6873,7 @@ function matchesMetricFilter(s) {
   if (activeMetricFilter === 'estimated_payout') return isPayableShift(s) && !s.clock_out && estimatedPaymentForShift(s) > 0;
   if (activeMetricFilter === 'late') return isPayableShift(s) && calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late';
   if (activeMetricFilter === 'cancelled') return !!s.cancelled;
+  if (activeMetricFilter === 'pending_approval') return shiftIsPendingApproval(s) && !s.cancelled;
   if (activeMetricFilter === 'replacement_needed') return needsReplacement(s);
   if (activeMetricFilter === 'penalties') return shiftPenaltyAmount(s) > 0;
   if (activeMetricFilter === 'sr_absorbed') return srAbsorbedForShift(s) > 0 || !!s.sr_worker;
@@ -9581,6 +9607,13 @@ function openEditRow(id) {
            style="width:100%;min-width:220px;font-size:12px;padding:6px 8px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;font-family:var(--font);resize:vertical;">${escapeHtml(existingComment)}</textarea>
        </div>
      </div>` +
+    `<div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+       <span style="font-size:11px;color:var(--text2);">⏳ Booking status</span>
+       <select id="edit-approval-${id}" style="font-size:11px;padding:3px 6px;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:4px;">
+         <option value="confirmed"${!shiftIsPendingApproval(s)?' selected':''}>Confirmed</option>
+         <option value="pending"${shiftIsPendingApproval(s)?' selected':''}>Pending client approval</option>
+       </select>
+     </div>` +
     `<div style="display:flex;gap:6px;margin-top:6px;">
        <button class="btn btn-primary btn-sm" onclick="saveRow('${id}')">Save</button>
        <button class="btn btn-ghost btn-sm" onclick="cancelEditRow('${id}')">Cancel</button>
@@ -9985,6 +10018,11 @@ async function saveRow(id) {
   const newSchedStart = ssInput?.value || s.scheduled_start?.slice(0,5) || null;
   const newSchedEnd = seInput?.value || s.scheduled_end?.slice(0,5) || null;
   const lp = ci ? calcLatePenalty(newSchedStart, ci).penalty : 0;
+  // Booking status (Confirmed / Pending client approval). null = confirmed so it
+  // matches the historical default and a missing column reads as confirmed.
+  const approvalInput = document.getElementById('edit-approval-' + id);
+  const wasPending = shiftIsPendingApproval(s);
+  const wantPending = approvalInput ? approvalInput.value === 'pending' : wasPending;
   // Resolve worker name — if the edit-wn input was shown, use its value
   const typedWorker = wnInput ? wnInput.value.trim() : '';
   const resolvedWorker = typedWorker && typedWorker.toLowerCase() !== 'available'
@@ -10003,7 +10041,21 @@ async function saveRow(id) {
     updated_at: new Date().toISOString()
   };
   if (resolvedWorker) updatePayload.worker_name = resolvedWorker;
+  // Only touch approval_status when the column is known-present and the value
+  // actually changed, so we never break the update on projects without the column.
+  if (!_approvalColumnMissing && approvalInput && wantPending !== wasPending) {
+    updatePayload.approval_status = wantPending ? 'pending' : 'approved';
+  }
   let { error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id);
+  // If the approval_status column is what's missing, strip it and retry so the
+  // rest of the edit still saves; flag the column missing + warn (and show banner).
+  if (error && approvalColumnMissing(error)) {
+    _approvalColumnMissing = true;
+    try { const b = document.getElementById('approval-column-banner'); if (b) b.classList.remove('hidden'); } catch(e){}
+    delete updatePayload.approval_status;
+    ({ error } = await supabaseClient.from('shifts').update(updatePayload).eq('id', id));
+    if (!error) toast('Saved — but "Pending approval" needs the approval_status column. Run the SQL shown in the banner.', 'info');
+  }
   // Graceful fallback: if Supabase rejects the update because an OPTIONAL column
   // (compensation/transport) doesn't exist in this project's schema, retry with a
   // core-only payload so break time, clock times and notes still save. The user is
@@ -10109,6 +10161,7 @@ function renderMetrics() {
   const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = cancellationCountForLoadedShifts();
+  const pendingApprovalCount = allShifts.filter(s => shiftIsPendingApproval(s) && !s.cancelled).length;
   const replacementNeeded = replacementNeededCountForLoadedShifts();
   const openTasks = openTaskCount();
   const latePenalties = allShifts.reduce((a,s) => a + effectiveLatePenalty(s), 0);
@@ -10143,9 +10196,21 @@ function renderMetrics() {
     ${`<div class="metric-card clickable metric-card-available" onclick="openAvailablePanel()"><div class="metric-label">🪑 Available slots</div>${availableSplitMetric()}<div class="metric-sub">Open slots to fill</div></div>`}
     ${card('paid_out','Total payment', countrySplitMetric(totalPaidOutByCountry, 'green'), '', '', unpaidPaidOut)}
     ${card('estimated_payout','Estimated payment', countrySplitMetric(estimatedPayoutByCountry, estimatedPayoutTotal>0?'amber':'green'), '')}
-    ${card('late','Late', late, late>0?'red':'green')}
+    ${`<div class="metric-card metric-card-late-cancel"><div class="metric-label">⚠️ Late & Cancellations</div>
+        <div style="display:flex;gap:18px;align-items:flex-end;margin-top:2px;">
+          <div class="lc-split clickable ${activeMetricFilter==='late'?'lc-active':''}" onclick="setMetricFilter('late')" title="Show late shifts">
+            <div class="metric-val ${late>0?'red':'green'}" style="font-size:22px;">${late}</div>
+            <div class="metric-sub" style="margin-top:0;">Late</div>
+          </div>
+          <div style="width:1px;align-self:stretch;background:var(--border);"></div>
+          <div class="lc-split clickable" onclick="openCancellationsPanel()" title="Today's cancellations · tap for history">
+            <div class="metric-val ${cancellationsTodayCount()>0?'red':'green'}" style="font-size:22px;">${cancellationsTodayCount()}</div>
+            <div class="metric-sub" style="margin-top:0;">Cancelled</div>
+          </div>
+        </div>
+        <div class="metric-sub" style="margin-top:6px;">Today · tap a number</div></div>`}
     ${card('penalties','Penalties', countrySplitMetric(penaltyByCountry, totalPenalties>0?'red':'green'), '')}
-    ${`<div class="metric-card clickable metric-card-cancellations" onclick="openCancellationsPanel()"><div class="metric-label">🚫 Cancellations</div><div class="metric-val ${cancellationsTodayCount()>0?'red':'green'}">${cancellationsTodayCount()}</div><div class="metric-sub">Today · tap for history</div></div>`}
+    ${`<div class="metric-card clickable metric-card-pending-approval ${activeMetricFilter==='pending_approval'?'active-filter':''}" onclick="setMetricFilter('pending_approval')" title="Bookings awaiting client approval in the portal">${notificationBubble(pendingApprovalCount)}<div class="metric-label">⏳ Pending Approval</div><div class="metric-val" style="color:#ff8a00;">${pendingApprovalCount}</div><div class="metric-sub">${pendingApprovalCount>0?'Awaiting client sign-off':'None pending'}</div></div>`}
     ${card('sr_absorbed','SR absorbed', countrySplitMetric(srAbsorbedByCountry, srAbsorbedTotal>0?'amber':'green'), '')}
     ${`<div class="metric-card clickable metric-card-app-bookings" onclick="openImportBookingsFromMetric()" title="Bookings coming from the app portal — tap to open Import Bookings"><div class="metric-label">📲 Bookings Via App</div>${appBookingsSplitMetric()}<div class="metric-sub">Tap to import / review</div></div>`}
   `;
@@ -12752,6 +12817,35 @@ let _approvalColumnMissing = false;
 function approvalColumnMissing(error) {
   const msg = String(error?.message || error || '').toLowerCase();
   return /approval_status/.test(msg) && /(column|schema cache|does not exist|could not find)/.test(msg);
+}
+// Proactively check whether the optional approval_status column exists, so we can
+// surface a clear, persistent banner (with the exact SQL) instead of relying on a
+// fleeting toast at add-time. A direct select of just that column errors loudly if
+// it's absent; if it succeeds the column is present. Result cached after first run.
+let _approvalColumnChecked = false;
+async function checkApprovalColumn() {
+  if (_approvalColumnChecked || !supabaseClient) return;
+  _approvalColumnChecked = true;
+  try {
+    const { error } = await supabaseClient.from('shifts').select('approval_status').limit(1);
+    if (error && approvalColumnMissing(error)) {
+      _approvalColumnMissing = true;
+    } else if (!error) {
+      _approvalColumnMissing = false;
+    }
+  } catch (e) {
+    if (approvalColumnMissing(e)) _approvalColumnMissing = true;
+  }
+  try {
+    const banner = document.getElementById('approval-column-banner');
+    if (banner) banner.classList.toggle('hidden', !_approvalColumnMissing);
+  } catch (e) {}
+  if (_approvalColumnMissing) {
+    console.warn('[approval] The approval_status column is MISSING from the shifts table. Pending-approval bookings will save as confirmed until you run:  alter table shifts add column approval_status text;');
+  } else {
+    console.log('[approval] approval_status column present. Pending count this load:',
+      (allShifts || []).filter(s => shiftIsPendingApproval(s)).length);
+  }
 }
 function shiftIsPendingApproval(s) {
   return !!s && String(s.approval_status || '').toLowerCase() === 'pending';
