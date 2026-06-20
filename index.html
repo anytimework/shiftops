@@ -2365,6 +2365,11 @@ const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov
 let currentDate = new Date(); currentDate.setHours(0,0,0,0);
 let allShifts = [], allWorkers = [], allOutlets = [], rateRules = [], allStandby = [], allCancellations = [], allKnowledge = [];
 let overpaymentCache = {}; // workerName.toLowerCase() → { totalOverpaid, totalDeducted }
+// v67: cross-date cache of WORKER-ASSIGNED pending-approval bookings (every date,
+// not just the viewed day), so the "Pending Approval" card can show ALL bookings
+// awaiting client sign-off for monitoring/chasing — even future ones. Available
+// (unassigned) slots are deliberately excluded; those live in the open-slots card.
+let pendingApprovalAll = [];
 // Cross-date cache of shifts that have any open task (dispute/late) OR need replacement,
 // independent of the date currently being viewed. Keyed by String(shift_id) → shift row.
 // This is what powers the Tasks panel and the Replacement-needed list so they show
@@ -4861,6 +4866,19 @@ function scheduledRange(s) {
   const end = s.scheduled_end?.slice(0,5) || '';
   return end ? `${start}-${end}` : start;
 }
+// v67: a small orange date chip shown in the Scheduled cell ONLY when a row's
+// shift_date differs from the currently-viewed day. In normal day view every row
+// is the viewed date, so this returns '' and changes nothing. It only appears for
+// the cross-date Pending-Approval list (which can include future dates), so ops
+// can tell which day each pending booking is for.
+function offDayDateChip(s) {
+  try {
+    const d = String(s && s.shift_date || '').slice(0, 10);
+    if (!d) return '';
+    if (d === formatDate(currentDate)) return '';
+    return `<span style="display:inline-block;font-family:var(--font);font-size:10px;font-weight:700;color:#ff8a00;background:rgba(255,138,0,0.12);border:1px solid rgba(255,138,0,0.35);border-radius:4px;padding:0 5px;margin-right:6px;vertical-align:1px;" title="This booking is on ${formatDisplayDate(d)}">${formatShortDate(d)}</span>`;
+  } catch (e) { return ''; }
+}
 function formatDisplayDate(dateStr) {
   const d = new Date(dateStr + 'T00:00:00');
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
@@ -6212,11 +6230,45 @@ async function loadShifts() {
   await loadAvailableSlots();
   await buildPortalSyncIndex();
   try { await checkApprovalColumn(); } catch (e) {}
+  try { await loadPendingApprovalAll(); } catch (e) {}
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
   try { renderAcceptedOffersBanner(); } catch(e){}
   checkReminderAlerts();
+}
+
+// v67: Load every WORKER-ASSIGNED, non-cancelled, pending-approval booking across
+// ALL dates (not just the viewed day) into pendingApprovalAll, so the "Pending
+// Approval" card can show and count bookings awaiting client sign-off regardless
+// of date — letting ops monitor/chase upcoming approvals. Available/unassigned
+// slots are excluded by design (they belong in the open-slots card). Degrades
+// gracefully if the optional approval_status column is absent (cache stays empty,
+// same as before — no error surfaced). Mirrors loadOverpaymentCache's cross-date
+// pattern. Country-scoped so a PH partner only sees their own pending bookings.
+async function loadPendingApprovalAll() {
+  pendingApprovalAll = [];
+  if (!supabaseClient) return;
+  if (_approvalColumnMissing) return; // column absent → nothing to load, no error
+  try {
+    const { data, error } = await supabaseClient
+      .from('shifts').select('*')
+      .eq('approval_status', 'pending')
+      .order('shift_date').order('scheduled_start');
+    if (error) {
+      if (approvalColumnMissing(error)) _approvalColumnMissing = true;
+      return;
+    }
+    const rows = scopeShiftsToCountry(data || []);
+    pendingApprovalAll = rows.filter(s =>
+      shiftIsPendingApproval(s) &&
+      !s.cancelled &&
+      // worker-assigned only — exclude Available/unassigned open slots
+      !!(s.worker_name && String(s.worker_name).trim() && String(s.worker_name).trim().toLowerCase() !== 'available')
+    );
+  } catch (e) {
+    if (approvalColumnMissing(e)) _approvalColumnMissing = true;
+  }
 }
 
 async function loadOverpaymentCache() {
@@ -7109,7 +7161,32 @@ function renderTable() {
   renderStandbyDayPanel();
   if (attendanceView === 'week') { renderWeeklyGrid(); return; }
   const search = (document.getElementById('attendance-search')?.value || '').toLowerCase().trim();
-  let rows = allShifts.filter(s => matchesMetricFilter(s) && (!search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role].some(v => String(v || '').toLowerCase().includes(search))));
+  // v67: helper — an unassigned/Available slot (no worker yet).
+  const _isUnassignedSlot = s => !(s && s.worker_name && String(s.worker_name).trim()
+    && String(s.worker_name).trim().toLowerCase() !== 'available');
+  const _matchSearch = s => !search || [s.worker_name, workerPhone(s.worker_name), s.outlet, s.role]
+    .some(v => String(v || '').toLowerCase().includes(search));
+  let rows;
+  if (activeMetricFilter === 'pending_approval') {
+    // v67: the Pending-Approval card shows ALL worker-assigned pending bookings
+    // across EVERY date (from the cross-date cache) so ops can monitor/chase
+    // upcoming client sign-off — not just the viewed day. Cache is already
+    // worker-assigned + non-cancelled. Fall back to the date-scoped list only if
+    // the cache is empty because the approval_status column is absent.
+    const src = (Array.isArray(pendingApprovalAll) && (pendingApprovalAll.length || !_approvalColumnMissing))
+      ? pendingApprovalAll
+      : allShifts.filter(s => shiftIsPendingApproval(s) && !s.cancelled && !_isUnassignedSlot(s));
+    rows = src.filter(_matchSearch);
+  } else {
+    // v67: in the normal attendance log, hide unassigned "Available" slots that
+    // are merely pending approval — that's open-slot info shown in the Available
+    // Slots card, not something to track per-worker here. (A genuinely assigned
+    // pending booking still shows, as do plain Available slots that AREN'T pending.)
+    rows = allShifts.filter(s =>
+      matchesMetricFilter(s) && _matchSearch(s) &&
+      !(shiftIsPendingApproval(s) && _isUnassignedSlot(s))
+    );
+  }
   // When viewing Clocked-In tab, sort by earliest scheduled clock-out time (ascending)
   // so ops team can see who is clocking out first at the top
   if (activeMetricFilter === 'clocked_in') {
@@ -7203,7 +7280,7 @@ function renderTable() {
       return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}">
         <td><div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
         <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
-        <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+        <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${offDayDateChip(s)}${scheduledRange(s)}</td>
         <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
         <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
         <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
@@ -7294,7 +7371,7 @@ function renderTable() {
         return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}">
           <td><div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
-          <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+          <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${offDayDateChip(s)}${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
@@ -7400,7 +7477,7 @@ function renderTable() {
               <td style="padding:8px 14px;vertical-align:middle;">
                 <span class="badge badge-gray" style="font-size:9px;">${s.role}</span>
               </td>
-              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);" id="sched-disp-${s.id}">${scheduledRange(s)}</td>
+              <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);" id="sched-disp-${s.id}">${offDayDateChip(s)}${scheduledRange(s)}</td>
               <td style="padding:8px 14px;vertical-align:middle;" id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
               <td style="padding:8px 14px;vertical-align:middle;" id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
               <td style="padding:8px 14px;vertical-align:middle;font-family:var(--mono);font-size:12px;color:var(--text2);" id="break-disp-${s.id}">${breakLabel(breakMinsForShift(s))}</td>
@@ -7502,7 +7579,7 @@ function renderTable() {
         return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}">
           <td><div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
-          <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
+          <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${offDayDateChip(s)}${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
           <td id="co-disp-${s.id}">${renderTimeCell(s, 'clock_out')}</td>
           <td id="break-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${breakLabel(breakMinsForShift(s))}</td>
@@ -10201,7 +10278,13 @@ function renderMetrics() {
   const pendingClockOutLabel = pendingClockOutTimeLabel(pendingClockOutRows, payableShifts);
   const late = payableShifts.filter(s => calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).status === 'late').length;
   const cancelled = cancellationCountForLoadedShifts();
-  const pendingApprovalCount = allShifts.filter(s => shiftIsPendingApproval(s) && !s.cancelled).length;
+  // v67: count ALL worker-assigned pending-approval bookings across every date
+  // (from the cross-date cache), not just the viewed day, so ops can monitor
+  // upcoming approvals. Falls back to the date-scoped count if the cache is empty
+  // because the approval_status column is absent.
+  const pendingApprovalCount = (Array.isArray(pendingApprovalAll) && (pendingApprovalAll.length || !_approvalColumnMissing))
+    ? pendingApprovalAll.length
+    : allShifts.filter(s => shiftIsPendingApproval(s) && !s.cancelled).length;
   const replacementNeeded = replacementNeededCountForLoadedShifts();
   const openTasks = openTaskCount();
   const latePenalties = allShifts.reduce((a,s) => a + effectiveLatePenalty(s), 0);
