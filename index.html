@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v63 — LIVE SHIFT MAP + geocoded outlet pins. (1) New "🗺️ Live Map" page (nav after Outlets, also whitelisted for ph_partner): plots the day's shifts on a Leaflet/OpenStreetMap map by their outlet's stored coordinates, scoped to the user's country via scopeShiftsToCountry. Four toggles — Live/ongoing (green, pulsing: clock_in set, no clock_out), Pending approval (amber: shiftIsPendingApproval), Scheduled/upcoming (blue: not yet clocked in), Completed (grey, off by default: clock_in+clock_out). Cancelled shifts and unfilled open slots (isOpenSlot) are excluded. Multiple workers at one outlet collapse into a single numbered pin (marker colour = highest-priority class present); click shows the roster popup. Date picker views any day independent of the attendance day/week view; a side list mirrors the pins (click to zoom); an amber banner flags any outlet with shifts that has no pin. Read-only — no shift writes. (2) Outlet modal "Location / address" field is now a typed autocomplete backed by OpenStreetMap Nominatim (free, no API key), country-filtered (SG/MY/PH). Picking a suggestion stores exact lat/lng — NO schema change: coordinates live in profileMeta.outlets[key].lat/.lng alongside commission/notes/requirements, so they sync team-wide through saveProfileMeta and survive mergeProfileMeta ({...se,...pe} keeps local scalars). Falls back to o.latitude/o.longitude on the row if present. node --check passes (both inline script blocks). Additive-only: exactly 3 original lines changed (address input row, profileMeta write block, PH_PARTNER_PAGES). -->
 <!-- Build patch: v62 — DIAGNOSE + FIX "pending shows 0 / no orange". Root cause when a pending booking doesn't show: the optional approval_status column isn't in the DB, so the flag silently saved as confirmed. (1) checkApprovalColumn() probes the column on every loadShifts (select approval_status limit 1); if it's missing it sets _approvalColumnMissing and shows a PERSISTENT amber banner above the metrics with the exact SQL (alter table shifts add column approval_status text;) instead of a one-off toast. Also console-logs the live pending count each load for quick confirmation. (2) EDIT ROW now has a "Booking status" dropdown (Confirmed / Pending client approval) so an existing confirmed shift can be flagged pending (or set back), wired into saveRow with the same column-missing graceful retry. Setting pending never notifies the worker (notification only fires on approval, unchanged). All guarded so projects without the column still save everything else. node --check passes; banner + edit control preview-rendered. No behavioural change for any shift that isn't approval_status='pending'. -->
 <!-- Build patch: v62 — OPEN-SLOT FILL: a portal booking that takes an existing open "Available" slot now MERGES into that slot instead of creating a duplicate, so the open slot and the actual booking stay as ONE synced record (fixes the "available bookings desync / confusing duplicate" concern). An Available slot has no worker name, so the name-keyed reconciler in tagExistingShifts could never recognise the named booking as the same shift. NEW: inside the no-time-overlap branch (which is where a named booking lands when only an unfilled slot exists), a booking now CLAIMS a matching open slot — same outlet (importOutletKey) + same date + overlapping time, slot worker_name empty/"Available" (isOpenSlot), not cancelled — tagged r._existingMatch='fill' / r._fillsOpenSlot=true. Slots are claimed ONE-BY-ONE per reconcile pass via a _claimedOpenSlotIds set (matched in stored order), so two bookings fill two distinct slots and a third overflows to a genuine new insert. REVIEWABLE, never silent: the row shows a green "🪑 Fills open slot" status with an "Add as new instead" toggle (_skipFill) and is included in the action-bar count + a teal fill note; you still click Confirm. On Confirm, _confirmImportBookingsInner re-fetches the slot, re-verifies it's STILL open and not already claimed in this pass (_filledSlotIdsThisPass — guards two-browser / two-row races), then UPDATEs it in place: sets worker_name + role + times + clock in/out + break + country, KEEPS the slot's panel rate & special-rate fields authoritative (same rule as a merge), preserves/keeps penalties (import never carries real ones), stamps sync_source='merged', records markImportHandled, ensures the worker exists in the roster, and logs "Open slot filled". If the slot was taken out from under us (or _skipFill) it falls through to the normal reconcile→insert path. Post-confirm it labels in the "Already in the ops panel" section as "Filled open slot" (_importedThisSession='filled'). Existing clock-sync / approval-sync untouched (both gate on _existingMatch==='exact', so 'fill' rows are excluded until confirmed). node --check passes; 5-case fill harness passes (distinct-slot fill, overflow→insert, wrong outlet, no overlap, cancelled slot). No schema change. -->
 <!-- Build patch: v61 — Pending-approval VISIBILITY + metric-card reshuffle (UI only, no schema change). (1) Pending-approval bookings are now unmistakable in every attendance view: orange worker name (.pending-approval-name), an "⏳ Pending approval" pill under the name (pendingApprovalTag, with an inline ✓ Approve button), an orange left-bar + tint on week cards (.week-shift.pending-approval) and table rows (tr.row-pending-approval), and a distinct orange status badge (.badge-pending-approval) instead of the overloaded amber. (2) For a pending-approval shift, the night/clock-in REMINDER PANEL is replaced by a "Booking pending client approval" notice (reminderPanelHtml early-returns it) — there's nothing to remind the worker about until the client confirms; an ✓ Approve now button sits in it. (3) METRIC CARDS: the standalone "Late" and "Cancellations" cards are merged into ONE "⚠️ Late & Cancellations" card (two tap-targets: Late filters the table, the Cancelled number opens the cancellations panel). (4) NEW "⏳ Pending Approval" metric card (orange) showing the count of pending-approval bookings; tapping it filters the attendance table to those bookings (new matchesMetricFilter 'pending_approval'). NOTE: the orange treatment only shows for shifts whose approval_status='pending' — created via Add Shift → "Pending client approval", or imported from a portal booking the portal marks pending. Requires the v60 optional column to persist team-wide:  alter table shifts add column approval_status text;  node --check passes; preview-rendered. -->
@@ -44,6 +45,8 @@
 <!-- Build patch: v27 — local expandable attendance comments without DB schema changes -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -752,6 +755,9 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
   .chat-hist-row { grid-template-columns: 1fr; gap: 2px; }
   .chat-hist-time { grid-row: 1; justify-self: end; }
 }
+@keyframes mapPulse { 0% { transform: scale(0.9); opacity: 0.5; } 70% { transform: scale(2.2); opacity: 0; } 100% { opacity: 0; } }
+.leaflet-popup-content-wrapper { border-radius: 8px; }
+#shiftmap-canvas .leaflet-container { background: var(--bg2); }
 </style>
 </head>
 <body>
@@ -806,6 +812,9 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       </button>
       <button class="nav-item" onclick="switchPage('outlets',this)">
         <span class="nav-icon">🏪</span> Outlets
+      </button>
+      <button class="nav-item" onclick="switchPage('shiftmap',this)">
+        <span class="nav-icon">🗺️</span><span class="nav-label">Live Map</span><span class="nav-pill-new">NEW</span>
       </button>
       <button class="nav-item" onclick="switchPage('rates',this)">
         <span class="nav-icon">💵</span> Rates
@@ -955,6 +964,42 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
         <div class="table-wrap">
           <div class="table-header"><span class="table-title">Outlets</span></div>
           <div id="outlets-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- LIVE MAP PAGE -->
+    <div id="page-shiftmap" style="display:none;">
+      <div class="topbar" style="flex-wrap:wrap;gap:10px;">
+        <div class="topbar-left"><h2>Live Shift Map</h2><p style="font-size:12px;color:var(--text2);margin-top:3px;">See where ongoing and scheduled shifts are happening</p></div>
+        <div class="topbar-right" style="flex-wrap:wrap;gap:8px;">
+          <input id="shiftmap-date" type="date" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);cursor:pointer;" onchange="renderShiftMap()">
+          <button class="btn btn-ghost btn-sm" onclick="renderShiftMap()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="content">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+          <label class="map-toggle" style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);cursor:pointer;font-size:13px;">
+            <input type="checkbox" id="map-show-live" checked onchange="renderShiftMap()" style="accent-color:var(--green);width:16px;height:16px;cursor:pointer;">
+            <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:11px;height:11px;border-radius:50%;background:var(--green);display:inline-block;box-shadow:0 0 0 3px var(--green-dim);"></span>Live / ongoing</span>
+          </label>
+          <label class="map-toggle" style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);cursor:pointer;font-size:13px;">
+            <input type="checkbox" id="map-show-scheduled" checked onchange="renderShiftMap()" style="accent-color:var(--accent);width:16px;height:16px;cursor:pointer;">
+            <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:11px;height:11px;border-radius:50%;background:var(--accent);display:inline-block;box-shadow:0 0 0 3px var(--accent-dim);"></span>Scheduled (upcoming)</span>
+          </label>
+          <label class="map-toggle" style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);cursor:pointer;font-size:13px;">
+            <input type="checkbox" id="map-show-pending" checked onchange="renderShiftMap()" style="accent-color:var(--amber);width:16px;height:16px;cursor:pointer;">
+            <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:11px;height:11px;border-radius:50%;background:var(--amber);display:inline-block;box-shadow:0 0 0 3px var(--amber-dim);"></span>Pending approval</span>
+          </label>
+          <label class="map-toggle" style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);cursor:pointer;font-size:13px;">
+            <input type="checkbox" id="map-show-done" onchange="renderShiftMap()" style="accent-color:var(--text3);width:16px;height:16px;cursor:pointer;">
+            <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:11px;height:11px;border-radius:50%;background:var(--text3);display:inline-block;box-shadow:0 0 0 3px rgba(255,255,255,0.08);"></span>Completed</span>
+          </label>
+        </div>
+        <div id="shiftmap-warning"></div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
+          <div id="shiftmap-canvas" style="flex:1;min-width:320px;height:560px;border-radius:var(--radius-lg);border:1px solid var(--border);overflow:hidden;background:var(--bg2);"></div>
+          <div id="shiftmap-list" style="width:320px;max-height:560px;overflow-y:auto;"></div>
         </div>
       </div>
     </div>
@@ -2092,7 +2137,12 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
     <h3 id="outlet-modal-title">Add outlet</h3>
     <div class="form-row"><label>Outlet name</label><input type="text" id="of-name" placeholder="e.g. Kopitiam Sengkang"></div>
     <div class="form-row"><label>Country</label><select id="of-country"><option value="Singapore">Singapore</option><option value="Malaysia">Malaysia</option><option value="Philippines">Philippines</option></select></div>
-    <div class="form-row"><label>Location / address</label><input type="text" id="of-location" placeholder="e.g. #01-01, 123 Example Road"></div>
+    <div class="form-row" style="position:relative;">
+      <label>Location / address <span style="font-weight:400;color:var(--text3);">— start typing to search &amp; pin on map</span></label>
+      <input type="text" id="of-location" placeholder="e.g. 123 Example Road, Singapore" autocomplete="off" oninput="onOutletAddressInput()" onfocus="onOutletAddressInput()">
+      <div id="of-addr-suggestions" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:50;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;margin-top:2px;max-height:220px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
+      <div id="of-geo-status" style="font-size:11px;color:var(--text3);margin-top:5px;font-family:var(--mono);">No coordinates set — pick an address from the list to pin it on the map.</div>
+    </div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
     <div class="form-row"><label>WhatsApp group / chat link</label><input type="text" id="of-chat-link" placeholder="e.g. https://chat.whatsapp.com/… or wa.me/65… or pick a group below">
       <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -2403,6 +2453,9 @@ let pendingCancelId = null, pendingSRId = null, mcDataUrl = null;
 // acknowledge that row on success (drops it out of the section + nav badge).
 let _pendingCancelImportRowKey = null;
 let editingWorkerId = null, editingOutletId = null;
+let outletGeo = { lat: null, lng: null };
+let outletAddrTimer = null;
+let shiftMapInstance = null, shiftMapMarkers = [];
 let profileMeta = loadProfileMeta();
 let outletGroups = loadOutletGroups(); // [{ id, name, outlets:[outletName,...] }]
 let shiftComments = loadShiftComments();
@@ -4336,6 +4389,7 @@ function switchPage(name, btn) {
   if (name === 'attendance') { loadShifts().then(() => renderAttendanceActivityBanner()); }
   if (name === 'workers') loadWorkerCards();
   if (name === 'outlets') loadOutletsList();
+  if (name === 'shiftmap') initShiftMapPage();
   if (name === 'rates') loadRatesList();
   if (name === 'standby') renderStandbyPage();
   if (name === 'import') renderImportPreview();
@@ -9654,7 +9708,9 @@ function cancelClockOutInput(id) {
 }
 
 function openEditRow(id) {
-  const s = allShifts.find(x => x.id === id);
+  // v67-fix: a cross-date pending booking listed by the Pending-Approval card may
+  // not be in the viewed day's allShifts; resolve from the cross-date cache too.
+  const s = findShiftAnywhere(id);
   if (!s) return;
   // Always replace clock-in/out cells cleanly (overrides any quick-clock inputs)
   const ciCell = document.getElementById(`ci-disp-${id}`);
@@ -10788,7 +10844,8 @@ function closeModal(id) { document.getElementById(id)?.classList.remove('open');
 
 // ── Shift audit trail ─────────────────────────────────────────────────────────
 async function openAuditModal(shiftId) {
-  const s = allShifts.find(x => String(x.id) === String(shiftId));
+  // v67-fix: resolve cross-date pending bookings (Pending-Approval card) too.
+  const s = findShiftAnywhere(shiftId);
   if (!s) return;
 
   const modal = document.getElementById('audit-modal');
@@ -10870,6 +10927,19 @@ async function openAuditModal(shiftId) {
 }
 // ── End shift audit trail ─────────────────────────────────────────────────────
 
+// v67-fix: resolve a shift by id from any in-memory source. allShifts holds only
+// the currently-viewed day; the cross-date pending-approval cache (pendingApprovalAll)
+// can hold bookings from other dates that the Pending-Approval card now lists. A
+// few flows (cancel, etc.) reach a shift that may be off the viewed day, so they
+// look it up here instead of allShifts alone. Compares by string id to be safe
+// against number/string id mismatches.
+function findShiftAnywhere(id) {
+  const sid = String(id);
+  let s = (Array.isArray(allShifts) ? allShifts : []).find(x => String(x.id) === sid);
+  if (s) return s;
+  s = (Array.isArray(pendingApprovalAll) ? pendingApprovalAll : []).find(x => String(x.id) === sid);
+  return s || null;
+}
 function openCancelModal(id, workerName, outlet, sched) {
   pendingCancelId = id; mcDataUrl = null;
   const recent = getRecentCancellations(workerName);
@@ -10931,7 +11001,14 @@ function removeMc() { mcDataUrl = null; document.getElementById('mc-uploaded').c
 
 async function confirmCancel() {
   if (!pendingCancelId) return;
-  const s = allShifts.find(x => x.id === pendingCancelId);
+  // v67-fix: the Pending-Approval card can now list bookings from OTHER dates
+  // (via pendingApprovalAll), but allShifts only holds the viewed day — so a
+  // cross-date cancel used to fail with "Shift not found". Resolve from allShifts
+  // first, then the cross-date pending cache, so the lookup succeeds regardless
+  // of which date the booking is on. All DB writes below target pendingCancelId,
+  // so they're date-independent; only the in-memory `s` (used for labels/logging)
+  // needs to be found.
+  const s = findShiftAnywhere(pendingCancelId);
   if (!s) { toast('Shift not found', 'error'); return; }
   // v57: capture before closeCancelModal() nulls it, so the import-row ack still
   // fires after the modal closes.
@@ -11605,6 +11682,9 @@ function resetOutletModal() {
   document.getElementById('of-banned-workers').value = '';
   _outletReqEditing = [];
   renderOutletRequirementsEditor();
+  outletGeo = { lat: null, lng: null };
+  hideOutletSuggestions();
+  updateOutletGeoStatus();
 }
 function openAddOutletModal() { resetOutletModal(); document.getElementById('add-outlet-modal').classList.add('open'); }
 function editOutlet(id) {
@@ -11624,6 +11704,12 @@ function editOutlet(id) {
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
   _outletReqEditing = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
   renderOutletRequirementsEditor();
+  outletGeo = {
+    lat: (meta.lat !== undefined && meta.lat !== null && meta.lat !== '') ? parseFloat(meta.lat) : null,
+    lng: (meta.lng !== undefined && meta.lng !== null && meta.lng !== '') ? parseFloat(meta.lng) : null
+  };
+  hideOutletSuggestions();
+  updateOutletGeoStatus();
   document.getElementById('add-outlet-modal').classList.add('open');
 }
 
@@ -11643,7 +11729,9 @@ async function saveOutlet() {
     chat_link: document.getElementById('of-chat-link').value.trim(),
     notes: document.getElementById('of-notes').value.trim(),
     banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
-    requirements: (_outletReqEditing || []).filter(r => r && r.id && r.label).map(r => ({ id: r.id, label: r.label }))
+    requirements: (_outletReqEditing || []).filter(r => r && r.id && r.label).map(r => ({ id: r.id, label: r.label })),
+    lat: (outletGeo.lat !== null && outletGeo.lng !== null) ? outletGeo.lat : (prevMeta.lat ?? null),
+    lng: (outletGeo.lat !== null && outletGeo.lng !== null) ? outletGeo.lng : (prevMeta.lng ?? null)
   };
   await saveProfileMeta();
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
@@ -11764,6 +11852,207 @@ async function deleteOutlet(id) {
   if (error) { toast('Failed to delete outlet: ' + error.message, 'error'); return; }
   toast('Outlet deleted');
   await loadOutlets(); loadOutletsList();
+}
+
+// ── Outlet address autocomplete (OpenStreetMap Nominatim — free, no key) ──────
+// Coordinates are stored in profileMeta.outlets[key].lat / .lng (no DB change).
+function updateOutletGeoStatus() {
+  const el = document.getElementById('of-geo-status');
+  if (!el) return;
+  if (outletGeo.lat !== null && outletGeo.lng !== null) {
+    el.innerHTML = `📍 Pinned at ${outletGeo.lat.toFixed(5)}, ${outletGeo.lng.toFixed(5)} <a href="#" onclick="clearOutletGeo();return false;" style="color:var(--red);margin-left:6px;">clear</a>`;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = 'No coordinates set — pick an address from the list to pin it on the map.';
+    el.style.color = 'var(--text3)';
+  }
+}
+function clearOutletGeo() { outletGeo = { lat: null, lng: null }; updateOutletGeoStatus(); }
+function hideOutletSuggestions() {
+  const box = document.getElementById('of-addr-suggestions');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+}
+function onOutletAddressInput() {
+  const q = document.getElementById('of-location').value.trim();
+  if (outletAddrTimer) clearTimeout(outletAddrTimer);
+  if (q.length < 3) { hideOutletSuggestions(); return; }
+  outletAddrTimer = setTimeout(() => fetchOutletAddressSuggestions(q), 450);
+}
+async function fetchOutletAddressSuggestions(q) {
+  const box = document.getElementById('of-addr-suggestions');
+  if (!box) return;
+  const country = document.getElementById('of-country').value;
+  const ccMap = { Singapore: 'sg', Malaysia: 'my', Philippines: 'ph' };
+  const cc = ccMap[country] || '';
+  box.style.display = 'block';
+  box.innerHTML = `<div style="padding:10px 12px;color:var(--text3);font-size:12px;">Searching addresses…</div>`;
+  try {
+    const params = new URLSearchParams({ format: 'json', q, limit: '6', addressdetails: '1' });
+    if (cc) params.set('countrycodes', cc);
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, { headers: { 'Accept-Language': 'en' } });
+    const results = await res.json();
+    if (!Array.isArray(results) || !results.length) {
+      box.innerHTML = `<div style="padding:10px 12px;color:var(--text3);font-size:12px;">No matches. You can still save with the typed text.</div>`;
+      return;
+    }
+    box.innerHTML = results.map(r => {
+      const label = escapeHtml(r.display_name || '');
+      return `<div class="addr-option" style="padding:9px 12px;cursor:pointer;font-size:12px;line-height:1.4;border-bottom:1px solid var(--border);"
+        onmouseenter="this.style.background='var(--bg2)'" onmouseleave="this.style.background=''"
+        onclick="selectOutletAddress(${parseFloat(r.lat)}, ${parseFloat(r.lon)}, '${escapeAttr(r.display_name || '')}')">${label}</div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = `<div style="padding:10px 12px;color:var(--text3);font-size:12px;">Address lookup unavailable — you can still save the typed text.</div>`;
+  }
+}
+function selectOutletAddress(lat, lng, displayName) {
+  document.getElementById('of-location').value = displayName;
+  outletGeo = { lat: parseFloat(lat), lng: parseFloat(lng) };
+  hideOutletSuggestions();
+  updateOutletGeoStatus();
+}
+
+// ── Live Shift Map ────────────────────────────────────────────────────────────
+function initShiftMapPage() {
+  const dEl = document.getElementById('shiftmap-date');
+  if (dEl && !dEl.value) dEl.value = formatDate(currentDate);
+  // Leaflet needs the container visible before init
+  setTimeout(() => {
+    if (!shiftMapInstance) {
+      shiftMapInstance = L.map('shiftmap-canvas', { zoomControl: true }).setView([1.3521, 103.8198], 11);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(shiftMapInstance);
+    } else {
+      shiftMapInstance.invalidateSize();
+    }
+    renderShiftMap();
+  }, 80);
+}
+
+// Classify a shift for the map: 'live' | 'pending' | 'scheduled' | 'done' | null
+function classifyShiftForMap(s) {
+  if (s.cancelled) return null;
+  if (isOpenSlot(s)) return null;             // unfilled available slots aren't a worker location
+  if (shiftIsPendingApproval(s)) return 'pending';
+  if (s.clock_in && s.clock_out) return 'done';
+  if (s.clock_in && !s.clock_out) return 'live';
+  return 'scheduled';
+}
+
+function outletCoordsLookup() {
+  // Prefer profileMeta coords; fall back to any latitude/longitude on the outlet row.
+  const map = {};
+  allOutlets.forEach(o => {
+    const meta = outletProfile(o.name) || {};
+    let lat = (meta.lat != null && meta.lat !== '') ? parseFloat(meta.lat) : null;
+    let lng = (meta.lng != null && meta.lng !== '') ? parseFloat(meta.lng) : null;
+    if ((lat == null || lng == null) && o.latitude != null && o.longitude != null && o.latitude !== '' && o.longitude !== '') {
+      lat = parseFloat(o.latitude); lng = parseFloat(o.longitude);
+    }
+    if (lat != null && lng != null && !isNaN(lat) && !isNaN(lng)) {
+      map[o.name] = { lat, lng, location: o.location };
+    }
+  });
+  return map;
+}
+
+async function renderShiftMap() {
+  if (!shiftMapInstance) return;
+  const dateStr = document.getElementById('shiftmap-date')?.value || formatDate(currentDate);
+  const showLive = document.getElementById('map-show-live')?.checked;
+  const showScheduled = document.getElementById('map-show-scheduled')?.checked;
+  const showPending = document.getElementById('map-show-pending')?.checked;
+  const showDone = document.getElementById('map-show-done')?.checked;
+
+  // Fetch shifts for the chosen date (independent of attendance day/week view),
+  // scoped to the user's country like the rest of the app.
+  let shifts = [];
+  try {
+    const { data } = await supabaseClient.from('shifts').select('*').eq('shift_date', dateStr).order('scheduled_start');
+    shifts = scopeShiftsToCountry(data || []);
+  } catch (e) { shifts = []; }
+
+  // Clear markers
+  shiftMapMarkers.forEach(m => shiftMapInstance.removeLayer(m));
+  shiftMapMarkers = [];
+
+  const coordOf = outletCoordsLookup();
+  const showByCls = { live: showLive, scheduled: showScheduled, pending: showPending, done: showDone };
+
+  const groups = {};
+  const missingPin = new Set();
+  let shownCount = 0;
+  shifts.forEach(s => {
+    const cls = classifyShiftForMap(s);
+    if (!cls || !showByCls[cls]) return;
+    const co = coordOf[s.outlet];
+    if (!co) { if (s.outlet) missingPin.add(s.outlet); return; }
+    if (!groups[s.outlet]) groups[s.outlet] = { outlet: s.outlet, lat: co.lat, lng: co.lng, location: co.location, shifts: [] };
+    groups[s.outlet].shifts.push({ ...s, _cls: cls });
+    shownCount++;
+  });
+
+  const colorFor = { live: '#34c77b', pending: '#f5a623', scheduled: '#4f8ef7', done: '#555c70' };
+  const priority = ['live', 'pending', 'scheduled', 'done']; // marker takes highest-priority class present
+  const bounds = [];
+  Object.values(groups).forEach(g => {
+    const markerCls = priority.find(c => g.shifts.some(s => s._cls === c)) || 'scheduled';
+    const color = colorFor[markerCls];
+    const pulse = markerCls === 'live' ? `<span style="position:absolute;inset:0;border-radius:50%;background:${color};opacity:0.4;animation:mapPulse 1.6s infinite;"></span>` : '';
+    const icon = L.divIcon({
+      className: 'shiftmap-pin',
+      html: `<div style="position:relative;width:26px;height:26px;">${pulse}<div style="position:relative;width:26px;height:26px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:600;font-family:var(--font);">${g.shifts.length}</div></div>`,
+      iconSize: [26, 26], iconAnchor: [13, 13]
+    });
+    const labelFor = { live: '<span style="color:#1b9e58;">● Live</span>', pending: '<span style="color:#c77f0a;">⏳ Pending</span>', scheduled: '<span style="color:#3b6fd0;">○ Scheduled</span>', done: '<span style="color:#888;">✓ Done</span>' };
+    const rows = g.shifts.map(s => {
+      const t = `${(s.scheduled_start||'').slice(0,5)}–${(s.scheduled_end||'').slice(0,5)}`;
+      return `<div style="padding:4px 0;border-top:1px solid #e5e5e5;"><strong>${escapeHtml(s.worker_name||'—')}</strong> ${labelFor[s._cls]}<br><span style="color:#666;">${escapeHtml(s.role||'')} · ${t}</span></div>`;
+    }).join('');
+    const popup = `<div style="font-family:sans-serif;min-width:180px;max-width:240px;color:#222;">
+      <div style="font-weight:600;font-size:13px;margin-bottom:2px;">${escapeHtml(g.outlet)}</div>
+      <div style="font-size:11px;color:#777;margin-bottom:4px;">${escapeHtml(g.location||'')}</div>${rows}</div>`;
+    const marker = L.marker([g.lat, g.lng], { icon }).addTo(shiftMapInstance).bindPopup(popup);
+    shiftMapMarkers.push(marker);
+    bounds.push([g.lat, g.lng]);
+  });
+
+  if (bounds.length) shiftMapInstance.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+
+  const warnEl = document.getElementById('shiftmap-warning');
+  if (warnEl) {
+    warnEl.innerHTML = missingPin.size
+      ? `<div class="alert alert-amber" style="margin-bottom:14px;"><span class="alert-icon">📍</span><span>${missingPin.size} outlet(s) with shifts today have no map pin: <strong>${[...missingPin].map(escapeHtml).join(', ')}</strong>. Open <strong>Outlets → Edit</strong> and pick an address from the search to place them on the map.</span></div>`
+      : '';
+  }
+  renderShiftMapList(Object.values(groups), shownCount, dateStr);
+}
+
+function renderShiftMapList(groups, shownCount, dateStr) {
+  const el = document.getElementById('shiftmap-list');
+  if (!el) return;
+  if (!shownCount) {
+    el.innerHTML = `<div class="empty-state" style="padding:30px 16px;"><div class="empty-icon">🗺️</div><p>No matching shifts to map for ${escapeHtml(dateStr)}.</p></div>`;
+    return;
+  }
+  const order = { live: 0, pending: 1, scheduled: 2, done: 3 };
+  const dotFor = { live: 'var(--green)', pending: 'var(--amber)', scheduled: 'var(--accent)', done: 'var(--text3)' };
+  const cards = groups.map(g => {
+    const sorted = [...g.shifts].sort((a, b) => order[a._cls] - order[b._cls]);
+    const rows = sorted.map(s => {
+      const t = `${(s.scheduled_start||'').slice(0,5)}–${(s.scheduled_end||'').slice(0,5)}`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;">
+        <span style="width:8px;height:8px;border-radius:50%;background:${dotFor[s._cls]};flex-shrink:0;"></span>
+        <span style="flex:1;"><strong>${escapeHtml(s.worker_name||'—')}</strong><br><span style="color:var(--text3);">${escapeHtml(s.role||'')} · ${t}</span></span></div>`;
+    }).join('');
+    return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;cursor:pointer;" onclick="focusShiftMapOutlet(${g.lat},${g.lng})">
+      <div style="font-weight:600;font-size:13px;">${escapeHtml(g.outlet)}</div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:4px;">${escapeHtml(g.location||'')}</div>${rows}</div>`;
+  }).join('');
+  el.innerHTML = `<div style="font-size:12px;color:var(--text2);margin-bottom:10px;">${shownCount} shift(s) across ${groups.length} outlet(s)</div>${cards}`;
+}
+
+function focusShiftMapOutlet(lat, lng) {
+  if (shiftMapInstance) shiftMapInstance.setView([lat, lng], 16, { animate: true });
 }
 
 
@@ -14635,7 +14924,9 @@ function buildApprovalWorkerMessage(s) {
 // the exact same worker-notify + ack-task flow the portal auto-flip uses. Used
 // when ops confirm an approval that hasn't come through the portal feed yet.
 async function approveBookingManually(shiftId) {
-  const s = (allShifts || []).find(x => String(x.id) === String(shiftId));
+  // v67-fix: the Approve button can be clicked on a cross-date pending booking
+  // listed by the Pending-Approval card, which isn't in the viewed day's allShifts.
+  const s = findShiftAnywhere(shiftId);
   if (!s) { toast('Shift not found', 'error'); return; }
   if (!shiftIsPendingApproval(s)) { toast('This booking isn\'t pending approval.', 'info'); return; }
   if (_approvalColumnMissing) { toast('Run: alter table shifts add column approval_status text; to enable approvals.', 'error'); return; }
@@ -20231,7 +20522,7 @@ const OPS_ONLY_PAGES = ['attendance','completed','workers','outlets','rates','st
 // blocked. He gets the Philippine-scoped operational views only — no finance,
 // expenses, salary, SGD/Xero billing, bulk import, cross-country activity log,
 // rates config, or cross-country team chat history.
-const PH_PARTNER_PAGES = ['attendance','completed','workers','outlets','standby','reports','analytics','incidents','messages','knowledge'];
+const PH_PARTNER_PAGES = ['attendance','completed','workers','outlets','shiftmap','standby','reports','analytics','incidents','messages','knowledge'];
 function navButtonForPage(page) {
   return Array.from(document.querySelectorAll('.nav-item')).find(b => {
     const oc = b.getAttribute('onclick') || '';
