@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v60 — PENDING CLIENT APPROVAL for bookings, end-to-end. A booking can now be "pending client approval": the client still has to approve it in the portal. (A) ADD SHIFT FORM gains a "Booking status" selector (Confirmed / Pending client approval); a pending pick writes approval_status='pending' on the shift (Confirmed leaves it null, so existing rows + a missing column read as confirmed). (B) STATUS BADGE shows "⏳ Pending approval" everywhere statusBadge() renders, with an inline "✓ Approve now" button (approveBookingManually) for ops to confirm without waiting on the portal. (C) PORTAL IMPORT reads portal status tokens: a booking the portal marks pending imports as pending approval (shown with a chip in the preview), one it marks approved imports as a normal confirmed shift. Carried through confirmImportBookings inserts. (D) AUTO-REFLECTION — syncPortalApprovals() runs inside loadPortalBookings (button + 5-min auto-importer), right after syncPortalClockTimes: for any reconciled row whose panel shift is still 'pending' but whose portal status now reads approved, it (1) flips the panel shift to approved/confirmed, (2) WhatsApps the WORKER that the shift is confirmed (buildApprovalWorkerMessage → sendPeriskopeMessage, once per shift), and (3) raises an acknowledgement task for ops. (E) ACK TASK — a new 'approval_ack' Tasks card ("✅ Booking approved") with an Acknowledge button; backed by a team-synced app_settings ledger key='approval_acks' (mirrors import_handled / import_ignored — survives refresh/session/teammates, notify-once guard) so NO shift_reminders schema change is needed. Approval state guards: never touches cancelled / Available / portal-cancelled / already-confirmed shifts. Status regexes handle snake_case tokens (pending_approval, shift_approved) and pending wins over approved on overlap. node --check passes; 22-case status-classification harness passes. ONE OPTIONAL SCHEMA ADD for durable team-wide pending state: run once in Supabase SQL —  alter table shifts add column approval_status text;  — the code degrades gracefully if it's absent (add-shift + approve still work locally, but the pending flag can't persist/sync until the column exists). loadShifts already selects * so the column flows through with no other change. -->
 <!-- Build patch: v59 — Deleted-in-portal detection now also catches NON-portal-feed bookings. The v58 cancellation-by-absence detector (detectDeletedPortalBookings) only trusted real pb|<id> ledger keys, so a booking that entered the panel via manual entry / paste / CSV (recorded under a fuzzy k|worker|date|start|end key) was never noticed when its app booking was hard-deleted — it kept resurfacing/sitting in the panel with no portal counterpart. Now loadPortalBookings passes the resolved import rows into the detector, which builds a presentFuzzyKeys set via the SAME importBookingKey() the ledger uses; any k| ledger entry whose key is absent from this load AND whose panel shift is still active is treated as a portal deletion and dropped into the existing "✕ Cancelled / deleted in the portal" section (flag-only, never auto-cancels, never auto-saved — same Apply-cancellation / Acknowledge flow). Fuzzy branch carries two EXTRA guards a real id doesn't need: (a) the matched panel shift must be portal-linked (sync_source set or isShiftPortalSynced) so ops-only shifts that were never in the app aren't flagged; (b) it's skipped if more than one live panel shift produces the same fuzzy key (ambiguous "which one was deleted?"). pb| path unchanged; today-or-future-only and panel-not-already-cancelled guards unchanged. node --check passes; isolated 8-case harness covers fuzzy-delete/present/ops-only/collision/past/panel-cancelled and pb present/absent. No schema change. -->
+
 <!-- Build patch: v58 — Deleted-in-portal detection (cancellation-by-absence): the portal HARD-DELETES a booking row when a shift is cancelled/deleted in the app (no status flip), so the v56 status-regex path can never see it. detectDeletedPortalBookings() runs after each load: any previously-imported booking (import_handled pb|<id> → panel shift) whose portal id is absent from the current feed but whose panel shift is still active and today-or-future is surfaced in the "✕ Cancelled / deleted in the portal" section. Flag-only; never auto-cancels; guarded against empty/failed loads. No schema change. -->
 <!-- Build patch: v57 — Three requests, all on the Import Bookings ↔ ops-panel link, no schema change. (1) CLOCK-IN/OUT AUTO-REFLECTION for synced bookings: a portal booking IS the app booking, so when a worker clocks in/out via the app portal (portal_bookings.clock_in_time / clock_out_time get populated), the new syncPortalClockTimes() — run inside loadPortalBookings right after autoStampSyncRows(), so it also fires on the v56 5-min auto-importer — pushes those times onto the already-synced panel shift (matched via the reconciled row's _existingShift / _importedShiftId). It only ADDS or CHANGES from a real portal value and NEVER blanks an existing panel clock time with a null portal value; it skips cancelled panel shifts, Available slots, and portal-cancelled rows. Each applied change is activity-logged ("Clocked in/out (portal)"). (2) CLOCK-OUT WHATSAPP ALERT as per usual: on a GENUINELY NEW clock-out applied this way (panel had no clock_out, portal now reports one) it fires the exact same buildClockOutMessage → notifyPayrollClockOut path every other clock-out uses, so the outlet group gets the standard payroll alert. A per-shift in-memory guard (_portalClockOutNotified) stops the auto-importer re-sending on its cadence within a session; a new clock-IN alone never triggers the alert. (3) CANCELLATION REFLECTED IN THE PANEL: the v56 "✕ Cancelled in the portal" section was flag-only. In-panel cancelled rows now get an "✕ Apply cancellation" button (beside Acknowledge) that opens the STANDARD cancellation modal (openCancelModal) targeting the real panel shift, so the established rules run unchanged (worker $15 penalty / MC waiver / good-will / outlet-delete, suspension counting, slot→Available, needs_replacement). On success, confirmCancel acknowledges the originating import row via a captured key (_pendingCancelImportRowKey → ackImportRowByPendingKey), so it drops out of the section and the nav badge; the key is cleared if the modal is closed without confirming. node --check passes; isolated logic harness covers new/repeat clock-out, null-never-blanks, cancelled/available/portal-cancelled/not-in-panel skips. -->
 <!-- Build patch: v56 — Two requests + a safety fix. (1) AUTO-IMPORTER ("cron-like"): a background timer (startAutoImport, every 5 min while the app is open) silently runs the SAME portal load→reconcile pipeline the "Load synced portal bookings" button uses, via a new loadPortalBookings({silent:true}) mode that suppresses toasts + the button's disabled/label churn. It does NOT auto-save — per ops, the user still clicks Confirm; it just keeps the Import Bookings preview and the new nav badge current so new portal bookings (and cancellations) surface on their own. First pass ~8s after boot, then on cadence; skips overlap while a prior run or a Confirm write is in flight. NOTE: this runs only while a browser tab is open — it is not a true 24/7 server cron (no backend to host one); a Supabase scheduled Edge Function would be needed for that. (2) NAV NOTIFICATION BADGE beside Import Bookings (#import-nav-badge): shows the count of portal bookings loaded-but-not-yet-saved (selectable rows = mapped, not cancelled, not already in panel, not ignored) PLUS any cancelled-in-portal bookings that are still active in the ops panel (they need attention). updateImportNavBadge() runs on every renderImportPreview, after each load, and after Confirm. (3) PORTAL CANCELLATION DETECTION (flag-only): loadPortalBookings already FETCHED portal_bookings.status/.working_status and portal_shifts.status but never read them (every row was hardcoded cancelled:false), so a customer cancelling in the app portal was invisible. Now portalStatusLooksCancelled() tests all three against a broad cancel-token regex (cancel/void/rejected/withdrawn/declined/no-show) and stamps r._portalCancelled. Such rows are excluded from importRowIsSelectable (never auto-saved) and the main actionable table, and dropped into a new collapsible "✕ Cancelled in the portal" section that distinguishes "still in the ops panel — needs your attention" (flag only; the app never auto-cancels the panel shift) from "not imported". Because we don't yet know this portal's exact cancel value, every distinct status string seen per load is console-logged once ([portal status values seen this load]) so the real value can be confirmed and the regex tightened later. No schema change. -->
@@ -392,6 +394,14 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .week-shift { background:var(--bg3); border:1px solid var(--border2); border-radius:var(--radius); padding:9px; font-size:12px; min-height:108px; }
 .week-shift.cancelled { opacity:0.75; border-color:rgba(232,64,64,0.55); background:rgba(232,64,64,0.10); }
 .week-shift.available { border-color:rgba(52,199,123,0.55); background:rgba(52,199,123,0.09); }
+/* Pending client approval — deliberately a distinct ORANGE so it can't be
+   confused with the amber "pending clock-in / grace" states. Left bar + tint. */
+.week-shift.pending-approval { border-color:rgba(255,138,0,0.6); background:rgba(255,138,0,0.10); border-left:3px solid #ff8a00; }
+tr.row-pending-approval > td { background:rgba(255,138,0,0.07); }
+tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
+.pending-approval-name { color:#ff8a00 !important; font-weight:700 !important; }
+.pending-approval-tag { display:inline-flex; align-items:center; gap:4px; font-size:9.5px; font-weight:700; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.05em; color:#ff8a00; background:rgba(255,138,0,0.13); border:1px solid rgba(255,138,0,0.4); border-radius:999px; padding:2px 7px; margin-top:3px; white-space:nowrap; }
+.badge-pending-approval { background:rgba(255,138,0,0.15); color:#ff8a00; border:1px solid rgba(255,138,0,0.45); }
 .available-name { color:var(--green); font-weight:700; }
 .empty-book-slot { border:1px dashed rgba(79,142,247,0.35); border-radius:var(--radius); min-height:84px; display:flex; align-items:center; justify-content:center; color:var(--accent); font-size:12px; cursor:pointer; background:rgba(79,142,247,0.035); }
 .empty-book-slot:hover { border-color:var(--accent); background:var(--accent-dim); }
@@ -1490,6 +1500,14 @@ tr:hover td { background: rgba(91,148,249,0.045); }
     <div class="form-grid">
       <div class="form-row"><label id="f-rate-label">Rate ($/hr)</label><input type="number" id="f-rate" step="0.50" min="1" value="12.00"></div>
       <div class="form-row"><label>Unpaid break</label><select id="f-break"><option value="0">0 min</option><option value="30">30 min</option><option value="60">1 hour</option><option value="90">1 hour 30 min</option><option value="120">2 hours</option><option value="150">2 hours 30 min</option><option value="180">3 hours</option></select></div>
+    </div>
+    <div class="form-row">
+      <label>Booking status</label>
+      <select id="f-approval">
+        <option value="confirmed" selected>Confirmed booking</option>
+        <option value="pending">Pending client approval</option>
+      </select>
+      <div class="sub-text" style="margin-top:6px;line-height:1.5;">Choose <strong>Pending client approval</strong> if the client still has to approve this in the portal. Once they approve it there, this shift flips to Confirmed automatically, the worker is notified on WhatsApp, and an acknowledgement task is raised.</div>
     </div>
     <div class="form-row">
       <label>Clock-in time <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional)</span></label>
@@ -2719,6 +2737,69 @@ function markImportHandled(row, shiftId) {
   };
 }
 
+// ── Booking-approval ledger ───────────────────────────────────────────────────
+// Tracks, per panel shift id, the lifecycle of a "pending client approval"
+// booking once the portal approves it:
+//   approvedAt   — when we first observed the portal flip pending → approved
+//   notifiedAt   — when the worker was WhatsApp-notified of the approval
+//   acked        — ops clicked "Acknowledge" on the approval task (clears it)
+//   ackedAt / ackedBy
+// Stored in the team-synced app_settings store (key='approval_acks'), mirroring
+// the import_handled / import_ignored ledgers, so the acknowledgement survives
+// refresh / new session / teammates WITHOUT needing extra shift_reminders
+// columns (keeping the reminder upsert schema untouched). The Tasks panel reads
+// this ledger to decide which approved shifts still need acknowledgement.
+let approvalAcks = loadApprovalAcks(); // { [shiftId]: { approvedAt, notifiedAt, acked, ackedAt, ackedBy, worker, outlet, date } }
+let approvalAcksLoaded = false;
+function loadApprovalAcks() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('approval_acks_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch(e) { return {}; }
+}
+async function loadApprovalAcksRemote() {
+  if (!supabaseClient) return;
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'approval_acks').maybeSingle();
+    if (error) { console.warn('approvalAcks remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      approvalAcks = { ...approvalAcks, ...data.value };
+      localStorage.setItem('approval_acks_v1', JSON.stringify(approvalAcks));
+    } else {
+      const local = loadApprovalAcks();
+      if (Object.keys(local).length) { approvalAcks = local; await saveApprovalAcks(); }
+    }
+    approvalAcksLoaded = true;
+  } catch(e) { console.warn('approvalAcks remote load error:', e); }
+}
+async function saveApprovalAcks() {
+  localStorage.setItem('approval_acks_v1', JSON.stringify(approvalAcks));
+  if (!supabaseClient) return false;
+  try {
+    let merged = approvalAcks;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'approval_acks').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        // Union, but let the most-advanced state win per shift (acked beats not-acked).
+        merged = { ...data.value };
+        for (const [k, v] of Object.entries(approvalAcks)) {
+          const prev = merged[k];
+          merged[k] = prev ? { ...prev, ...v, acked: !!(prev.acked || v.acked) } : v;
+        }
+        approvalAcks = merged;
+        localStorage.setItem('approval_acks_v1', JSON.stringify(approvalAcks));
+      }
+    } catch(e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'approval_acks', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('approvalAcks remote save failed:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('approvalAcks remote save error:', e); return false; }
+}
+
 // ── Import IGNORE ledger ──────────────────────────────────────────────────────
 // A booking the user explicitly never wants to import (e.g. a portal booking
 // that shouldn't be in the ops panel at all). Keyed by the same stable
@@ -3223,6 +3304,9 @@ async function init() {
   // Team-wide durable "cancellation acknowledged" ledger so acknowledged portal
   // cancellations stay dismissed across refresh/session/teammate (no schema change).
   loadImportCancelAckRemote().catch(()=>{});
+  // Team-wide durable "booking approval acknowledged" ledger — drives the Tasks
+  // acknowledgement card when a pending booking is approved (no schema change).
+  loadApprovalAcksRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
   // Team-wide Periskope config so every device can send WhatsApp (not just the one
   // where the API key was first entered).
   loadPeriskopeConfigShared().catch(()=>{});
@@ -5626,6 +5710,38 @@ function getOpenTasks() {
       });
     }
       });
+
+  // ── Booking-approval acknowledgement tasks ──────────────────────────────────
+  // When the portal client approves a previously-pending booking, syncPortalApprovals
+  // flips the shift to confirmed, notifies the worker, and records it in the
+  // approval_acks ledger. Surface an acknowledgement card here (just for ops
+  // awareness) until someone clicks Acknowledge. Built from the ledger so it
+  // survives refresh/teammates; matched to a live shift in the task pool so a
+  // deleted/cancelled shift drops the task automatically.
+  try {
+    const poolById = new Map(taskShiftPool().map(s => [String(s.id), s]));
+    for (const [sid, entry] of Object.entries(approvalAcks || {})) {
+      if (!entry || !entry.approvedAt || entry.acked) continue;
+      const s = poolById.get(String(sid));
+      if (!s || s.cancelled) continue;
+      if (String(s.worker_name || '').toLowerCase() === 'available') continue;
+      tasks.push({
+        type: 'approval_ack',
+        id: s.id,
+        worker: s.worker_name || entry.worker || '',
+        outlet: s.outlet || entry.outlet || '',
+        role: s.role || '',
+        date: s.shift_date || entry.date || '',
+        start: s.scheduled_start ? s.scheduled_start.slice(0,5) : (entry.start || ''),
+        end: s.scheduled_end ? s.scheduled_end.slice(0,5) : (entry.end || ''),
+        isToday: (s.shift_date === todayStr),
+        notified: !!entry.notifiedAt,
+        at: entry.approvedAt,
+        done: false
+      });
+    }
+  } catch (e) { /* ledger may be mid-load; skip silently */ }
+
   // Sort:
   //  1) incomplete tasks always on top; completed (collapsed) tasks at the bottom.
   //  2) within incomplete: NEWEST first (most recently raised at the very top).
@@ -5877,6 +5993,25 @@ function renderTasksPanel() {
   }).join('');
 }
 function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
+    if (t.type === 'approval_ack') {
+      return `<div class="task-card task-replacement" style="border-color:rgba(52,211,153,0.4);">
+        <div class="task-head">
+          <span class="task-tag tag-done">✅ Booking approved</span>
+          ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+          ${when}
+        </div>
+        <div class="task-body">
+          <div class="task-title">Client approved ${escapeHtml(t.worker)}'s booking${t.role ? ' · '+escapeHtml(t.role) : ''}</div>
+          ${shiftLine}
+          <div class="task-meta">👤 <strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)}</div>
+          <div class="sub-text" style="margin-top:4px;color:var(--text3);">Now confirmed${t.notified ? ' · worker notified on WhatsApp ✓' : ' · worker not notified (no phone on file)'}</div>
+        </div>
+        <div class="task-actions">
+          <button class="btn btn-primary btn-sm" onclick="acknowledgeApproval('${escapeAttr(String(t.id))}')" title="Clear this from Tasks">Acknowledge</button>
+          <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
+        </div>
+      </div>`;
+    }
     if (t.type === 'offer_accepted') {
       return `<div class="task-card task-replacement" style="border-color:rgba(52,211,153,0.4);">
         <div class="task-head">
@@ -6649,6 +6784,8 @@ function statusBadge(s) {
   if (isWorkerSuspended(s.worker_name)) return '<span class="badge badge-red">🚫 Suspended</span>';
   if (s.cancelled && s.mc_url) return '<span class="badge badge-amber">MC waived</span>';
   if (s.cancelled) return '<span class="badge badge-red">✕ Cancelled</span>';
+  if (shiftIsPendingApproval(s)) return '<span class="badge badge-pending-approval" title="Awaiting client approval in the portal. Flips to confirmed automatically once the client approves it there.">⏳ Pending approval</span>'
+    + `<button onclick="approveBookingManually('${s.id}')" title="Confirm this booking now — notifies the worker on WhatsApp and logs an acknowledgement task" style="display:block;margin-top:4px;font-size:10px;padding:2px 8px;background:none;border:1px solid var(--green);border-radius:3px;color:var(--green);cursor:pointer;">✓ Approve now</button>`;
   if (s.clock_in && s.clock_out) return '<span class="badge badge-green">✓ Clocked-out</span>';
   if (isPendingClockOut(s)) return '<span class="badge badge-amber">Pending clock-out</span>';
   if (s.clock_in && !s.clock_out) return '<span class="badge badge-blue">Ongoing</span>';
@@ -6997,8 +7134,8 @@ function renderTable() {
         ${assignAction}
         ${pendingOpAction1}
         <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
-      return `<tr class="${rowClass}" id="row-${s.id}">
-        <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
+      return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}">
+        <td><div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
         <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
         <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
         <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -7088,8 +7225,8 @@ function renderTable() {
           ${assignAction2}
           ${pendingOpAction2}
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
-        return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
+        return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}">
+          <td><div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -7183,13 +7320,13 @@ function renderTable() {
           ${pendingOpAction3}
           <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
       }
-      return `<tr class="${rowClass}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
+      return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
         <td colspan="5" style="padding:0;">
           <div class="collapse-bar" onclick="toggleExpandRow('${s.id}', event)">▲ collapse</div>
           <table style="width:100%;border-collapse:collapse;">
             <tr>
               <td style="padding:8px 14px;vertical-align:middle;min-width:160px;">
-                <div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div>
+                <div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div>
                 <div class="sub-text">${syncDot(s)}${s.outlet}</div>
                 ${srTag}${reminderPanelHtml(s)}
                 <button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button>
@@ -7221,10 +7358,11 @@ function renderTable() {
       const isCancelled = s.cancelled;
       const rowClass = 'collapsed-row' + (isCancelled ? ' row-cancelled' : (s.is_paid ? ' row-paid' : ''));
       if (expandedRows.has(s.id)) return buildFullRow(s);
-      return `<tr class="${rowClass}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
+      return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}" onclick="toggleExpandRow('${s.id}', event)">
         <td>
-          <div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : escapeHtml(workerName)}</div>
+          <div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : escapeHtml(workerName)}</div>
           <div class="sub-text">${escapeHtml(s.outlet||'')}</div>
+          ${shiftIsPendingApproval(s) ? `<div>${pendingApprovalTag(s)}</div>` : ''}
         </td>
         <td><span class="badge badge-gray" style="font-size:9px;">${escapeHtml(s.role||'')}</span></td>
         <td style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
@@ -7295,8 +7433,8 @@ function renderTable() {
             ${pendingOpAction4}
             <button class="btn btn-danger btn-sm" onclick="openCancelModal('${s.id}','${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">Cancel</button></div>`;
         }
-        return `<tr class="${rowClass}" id="row-${s.id}">
-          <td><div id="wn-disp-${s.id}"><div class="worker-name">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
+        return `<tr class="${rowClass}${shiftIsPendingApproval(s)?' row-pending-approval':''}" id="row-${s.id}">
+          <td><div id="wn-disp-${s.id}"><div class="worker-name${pendingApprovalNameClass(s)}">${isAvailable ? '<span class="available-name">Available</span>' : workerName}</div>${!isAvailable ? workerPhoneLine(workerName) : ''}${pendingApprovalTag(s)}</div><div class="sub-text">${syncDot(s)}${s.outlet}</div>${srTag}${reminderPanelHtml(s)}<button class="btn-audit" onclick="openAuditModal('${s.id}')" title="View shift history" style="margin-top:5px;">⏱ History</button></td>
           <td><span class="badge badge-gray" style="font-size:9px;">${s.role}</span></td>
           <td id="sched-disp-${s.id}" style="font-family:var(--mono);font-size:12px;color:var(--text2);">${scheduledRange(s)}</td>
           <td id="ci-disp-${s.id}">${renderTimeCell(s, 'clock_in')}</td>
@@ -7344,8 +7482,9 @@ function renderWeeklyGrid() {
     const hours = calcShiftHours(s);
     const workerName = String(s.worker_name || '').trim() || 'Available';
     const isAvailable = workerName.toLowerCase() === 'available';
-    const cls = s.cancelled ? ' cancelled' : (isAvailable ? ' available' : '');
-    const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong>${workerName}</strong>${workerPhoneLine(workerName)}`;
+    const isPendingAppr = shiftIsPendingApproval(s);
+    const cls = s.cancelled ? ' cancelled' : (isAvailable ? ' available' : (isPendingAppr ? ' pending-approval' : ''));
+    const nameHtml = isAvailable ? `<span class="available-name">Available</span>` : `<strong class="${pendingApprovalNameClass(s).trim()}">${workerName}</strong>${workerPhoneLine(workerName)}${pendingApprovalTag(s)}`;
     const replacement = s.sr_worker ? `<div class="week-meta">SR: ${s.sr_worker} · Net ${moneyForShift(netPaymentForShift(s), s)}</div>` : '';
     const actions = s.cancelled
       ? `<div class="week-actions">${s.sr_worker ? '' : `<button class="btn btn-ghost btn-sm" onclick="openSRModal('${s.id}',${s.rate},'${escapeAttr(workerName)}','${escapeAttr(s.outlet)}','${s.scheduled_start}')">SR</button>`}<button class="btn btn-danger btn-sm" onclick="deleteCancelledShift('${s.id}')">Delete</button></div>`
@@ -7359,7 +7498,8 @@ function renderWeeklyGrid() {
       if (!isExp) {
         return `<div class="week-shift${cls}${expandedCls}" onclick="if(!event.target.closest('button,input,a')){expandedRows.has('${s.id}')?expandedRows.delete('${s.id}'):expandedRows.add('${s.id}');renderTable();}" draggable="false">
           <div class="week-meta" style="color:var(--text);font-weight:600;font-size:12px;">${syncDot(s)}${escapeHtml(s.outlet||'—')}</div>
-          <div class="week-meta" style="font-size:11px;">${isAvailable?'<span class="available-name">Available</span>':`<strong style="font-size:12px;">${escapeHtml(workerName)}</strong>`}</div>
+          <div class="week-meta" style="font-size:11px;">${isAvailable?'<span class="available-name">Available</span>':`<strong class="${pendingApprovalNameClass(s).trim()}" style="font-size:12px;">${escapeHtml(workerName)}</strong>`}</div>
+          ${isPendingAppr ? `<div class="week-meta">${pendingApprovalTag(s)}</div>` : ''}
           <div class="week-time" style="font-size:11px;">${scheduledRange(s)}</div>
           <div class="week-meta" style="font-size:11px;color:var(--text3);">${escapeHtml(s.role||'—')}</div>
           <div style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;">${statusBadge(s)}<span style="color:var(--text3);font-size:11px;">›</span></div>
@@ -9108,6 +9248,24 @@ async function clearOfferAccepted(shiftId) {
   rerenderOfferPanels();
 }
 
+// Acknowledge a booking-approval task: marks the approval_acks ledger entry as
+// acknowledged (team-synced) so the card clears from Tasks. The shift stays
+// confirmed; this is awareness-only, so there's no completed-tasks log entry.
+async function acknowledgeApproval(shiftId) {
+  const sid = String(shiftId);
+  if (!approvalAcksLoaded) { try { await loadApprovalAcksRemote(); } catch(e){} }
+  const entry = approvalAcks[sid] || {};
+  approvalAcks[sid] = {
+    ...entry,
+    acked: true,
+    ackedAt: new Date().toISOString(),
+    ackedBy: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : ''
+  };
+  try { await saveApprovalAcks(); } catch(e){}
+  if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} }
+  renderTasksPanel();
+}
+
 // Assign the accepting standby worker into the open slot, clearing the
 // replacement + offer flags and removing them from the standby list.
 async function assignAcceptedStandby(shiftId) {
@@ -10265,6 +10423,7 @@ function openAddModal() {
   updateShiftOutletOptions(false);
   document.getElementById('f-name').value = '';
   document.getElementById('f-clockin').value = '';
+  const _appSel = document.getElementById('f-approval'); if (_appSel) _appSel.value = 'confirmed';
   document.getElementById('f-sched-end').value = '17:00';
   autoBreakForAddShift();
   document.getElementById('f-third-party').checked = false;
@@ -10359,6 +10518,12 @@ async function addShift() {
   const ci = document.getElementById('f-clockin').value;
   const lp = ci ? calcLatePenalty(sched, ci).penalty : 0;
   const thirdPartyFee = isThirdParty ? (parseFloat(document.getElementById('f-third-party-fee').value) || 10) : null;
+  // Booking status: 'pending' = awaiting client approval in the portal; anything
+  // else is a normal confirmed booking. Stored as approval_status on the shift; a
+  // confirmed booking is left null so existing shifts (and the column being absent)
+  // read as confirmed by default.
+  const approvalSel = document.getElementById('f-approval')?.value || 'confirmed';
+  const isPendingApproval = approvalSel === 'pending';
 
   // ── Overlap check ──
   if (!isThirdParty && name !== 'Available') {
@@ -10387,7 +10552,7 @@ async function addShift() {
     }
   }
 
-  const { error } = await supabaseClient.from('shifts').insert({
+  const insertPayload = {
     shift_date: formatDate(currentDate),
     worker_name: name,
     outlet: outletName,
@@ -10398,8 +10563,19 @@ async function addShift() {
     sr_worker: isThirdParty ? name : null,
     sr_rate: isThirdParty ? rate : null,
     sr_hours: null,
-    sr_absorbed: isThirdParty ? thirdPartyFee : null
-  });
+    sr_absorbed: isThirdParty ? thirdPartyFee : null,
+    approval_status: isPendingApproval ? 'pending' : null
+  };
+  let { error } = await supabaseClient.from('shifts').insert(insertPayload);
+  // Graceful degrade: if the approval_status column hasn't been added to the DB
+  // yet, retry the insert without it so adding a shift never hard-fails. The
+  // pending state then can't persist team-wide until the column exists.
+  if (error && approvalColumnMissing(error)) {
+    _approvalColumnMissing = true;
+    if (isPendingApproval) toast('Saved, but "Pending approval" can\'t sync yet — run: alter table shifts add column approval_status text;', 'info');
+    delete insertPayload.approval_status;
+    ({ error } = await supabaseClient.from('shifts').insert(insertPayload));
+  }
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
   if (!isThirdParty && name !== 'Available' && !allWorkers.find(x => x.name === name)) {
     await supabaseClient.from('workers').insert({ name, country: selectedCountry });
@@ -10408,13 +10584,13 @@ async function addShift() {
   const _addDateFmt = new Date(formatDate(currentDate)+'T00:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',weekday:'short'});
   const _isPast = formatDate(currentDate) < new Date().toISOString().slice(0,10);
   const _isFuture = formatDate(currentDate) > new Date().toISOString().slice(0,10);
-  const _bookingType = _isFuture ? 'Future booking created' : _isPast ? 'Past booking created' : 'Shift added';
+  const _bookingType = isPendingApproval ? 'Booking created (pending approval)' : (_isFuture ? 'Future booking created' : _isPast ? 'Past booking created' : 'Shift added');
   await logActivity(
     _bookingType,
-    `${name} at ${outletName} on ${_addDateFmt} ${sched}${schedEnd ? '–'+schedEnd : ''}${breakMins ? ' ('+breakMins+'m break)' : ''}`,
+    `${name} at ${outletName} on ${_addDateFmt} ${sched}${schedEnd ? '–'+schedEnd : ''}${breakMins ? ' ('+breakMins+'m break)' : ''}${isPendingApproval ? ' — awaiting client approval in the portal' : ''}`,
     'shift', '', { shift_date: formatDate(currentDate), worker_name: name, outlet: outletName }
   );
-  toast('Shift added!');
+  toast(isPendingApproval ? 'Booking added — pending client approval' : 'Shift added!');
   closeAddModal();
   await loadShifts();
 }
@@ -12560,6 +12736,59 @@ const PORTAL_CANCEL_RE = /\b(cancel+ed|cancel+ation|cancel|void(ed)?|reject(ed)?
 function portalStatusLooksCancelled(...vals) {
   return vals.some(v => v != null && v !== '' && PORTAL_CANCEL_RE.test(String(v)));
 }
+
+// ── Booking approval (pending client approval) ───────────────────────────────
+// A booking can sit in the ops panel as "pending client approval": the client
+// still has to approve it in the portal. We store this on the shift as
+// approval_status:
+//   'pending'  -> awaiting client approval (portal hasn't confirmed it yet)
+//   'approved' -> client approved it (set when the portal flips, or manually)
+//   null/''    -> a normal confirmed booking (the historical default, so existing
+//                 rows and a missing column both read as confirmed)
+// The column is optional: if it was never added to the shifts table, the code
+// degrades gracefully (pending state just can't persist team-wide). Add it with:
+//   alter table shifts add column approval_status text;
+let _approvalColumnMissing = false;
+function approvalColumnMissing(error) {
+  const msg = String(error?.message || error || '').toLowerCase();
+  return /approval_status/.test(msg) && /(column|schema cache|does not exist|could not find)/.test(msg);
+}
+function shiftIsPendingApproval(s) {
+  return !!s && String(s.approval_status || '').toLowerCase() === 'pending';
+}
+// Small inline tag used in worker-name cells/cards so a pending-approval booking
+// is unmistakable in EVERY view, not just the Status column. Includes the
+// "Approve now" action so ops can confirm it on the spot.
+function pendingApprovalTag(s, opts = {}) {
+  if (!shiftIsPendingApproval(s)) return '';
+  const withBtn = opts.withButton !== false;
+  const btn = withBtn
+    ? `<button onclick="event.stopPropagation();approveBookingManually('${s.id}')" title="Confirm this booking now — notifies the worker on WhatsApp and logs an acknowledgement task" style="margin-left:6px;font-size:9px;padding:1px 7px;background:none;border:1px solid var(--green);border-radius:999px;color:var(--green);cursor:pointer;font-weight:700;">✓ Approve</button>`
+    : '';
+  return `<div style="margin-top:3px;display:flex;align-items:center;flex-wrap:wrap;gap:2px;"><span class="pending-approval-tag" title="Awaiting client approval in the portal. Flips to confirmed automatically once the client approves it there, or tap Approve to confirm now.">⏳ Pending approval</span>${btn}</div>`;
+}
+// CSS class to colour a worker name orange when their booking is pending approval.
+function pendingApprovalNameClass(s) {
+  return shiftIsPendingApproval(s) ? ' pending-approval-name' : '';
+}
+// Portal status tokens that mean "the client has APPROVED this booking" (so a
+// panel shift that was pending can flip to approved). Broad on purpose; the exact
+// token this portal writes is console-logged each load (see notePortalStatus) so
+// it can be tightened later. We deliberately DON'T treat a bare clock-in/active
+// state as approval here — only explicit approval/confirmation words.
+// NOTE: \b doesn't break on underscores (\w includes _), so a snake_case status
+// like "pending_approval" is one token; we match the keyword as a substring
+// bounded by a non-letter (or string edge) on each side so "pending_approval"
+// still reads as pending and "shift_approved" as approved.
+const PORTAL_APPROVED_RE = /(^|[^a-z])(approv(ed|al)?|confirm(ed|ation)?|accept(ed)?|active|ongoing|completed?|complete)([^a-z]|$)/i;
+// Portal status tokens that mean "still waiting for the client to approve".
+const PORTAL_PENDING_RE = /(^|[^a-z])(pending|await(ing)?|unapprov(ed)?|approval|to[\s_-]?approve|requested|new|submitted)([^a-z]|$)/i;
+function portalStatusLooksApproved(...vals) {
+  return vals.some(v => v != null && v !== '' && PORTAL_APPROVED_RE.test(String(v)) && !PORTAL_PENDING_RE.test(String(v)));
+}
+function portalStatusLooksPending(...vals) {
+  return vals.some(v => v != null && v !== '' && PORTAL_PENDING_RE.test(String(v)));
+}
 // Collects the distinct status strings observed during a load so we can print
 // them once (not per-row) for diagnosis.
 let _portalStatusSeen = null;
@@ -13942,6 +14171,171 @@ async function syncPortalClockTimes(rows) {
   return updated;
 }
 
+// ── Booking approval auto-reflection ─────────────────────────────────────────
+// A booking can sit in the ops panel as "pending client approval"
+// (approval_status='pending') — created that way via the Add Shift form, or
+// imported from a portal booking the portal still marks pending. When the client
+// later APPROVES it in the portal, the portal status flips to an approved token.
+// This function reflects that flip onto the panel shift:
+//   1. set approval_status='approved' on the panel shift,
+//   2. WhatsApp the worker that their shift is confirmed,
+//   3. raise an acknowledgement task for ops (approval_acks ledger → Tasks).
+// Runs from loadPortalBookings (button + 5-min auto-importer) off the same
+// reconciled rows the clock-sync uses, so it needs no extra portal fetch.
+//
+// Guards (never disturb existing data):
+//   • only acts on a panel shift currently 'pending' whose portal row now reads
+//     approved (portalStatusLooksApproved on r._portalApproval),
+//   • skips cancelled panel shifts, Available slots, and portal-cancelled rows,
+//   • the worker WhatsApp + ack-task fire ONCE per shift (recorded in the
+//     team-synced approval_acks ledger, so the auto-importer's 5-min cadence and
+//     other teammates' devices don't re-send).
+async function syncPortalApprovals(rows) {
+  if (!supabaseClient || !Array.isArray(rows) || !rows.length) return 0;
+  if (_approvalColumnMissing) return 0; // can't persist the flip without the column
+  if (!approvalAcksLoaded) { try { await loadApprovalAcksRemote(); } catch(e){} }
+  let flipped = 0, notified = 0, ledgerDirty = false;
+  for (const r of rows) {
+    try {
+      if (r._portalApproval !== 'approved') continue;   // portal must say approved
+      const ex = r._existingShift;
+      if (!ex || !ex.id) continue;
+      if (r._existingMatch !== 'exact') continue;        // only true same-booking matches
+      if (r._forceMergeId) continue;
+      if (ex.cancelled) continue;
+      if (r._portalCancelled) continue;
+      if (!ex.worker_name || String(ex.worker_name).toLowerCase() === 'available') continue;
+      // Only act on a shift the panel currently holds as pending — never demote or
+      // re-touch a booking that's already confirmed/approved.
+      if (!shiftIsPendingApproval(ex)) continue;
+
+      // Flip the panel shift to approved.
+      const patch = { approval_status: 'approved', updated_at: new Date().toISOString() };
+      let { error } = await supabaseClient.from('shifts').update(patch).eq('id', ex.id);
+      if (error && approvalColumnMissing(error)) { _approvalColumnMissing = true; return flipped; }
+      if (error) { console.warn('[portal approval sync] update failed:', error.message); continue; }
+      ex.approval_status = 'approved';
+      flipped++;
+
+      // Record in the ledger that this shift was approved (so the Tasks panel can
+      // surface the acknowledgement, and so we only notify once).
+      const prev = approvalAcks[String(ex.id)] || {};
+      const nowIso = new Date().toISOString();
+      approvalAcks[String(ex.id)] = {
+        ...prev,
+        approvedAt: prev.approvedAt || nowIso,
+        worker: ex.worker_name || '',
+        outlet: ex.outlet || '',
+        date: ex.shift_date || '',
+        start: (ex.scheduled_start || '').slice(0,5),
+        end: (ex.scheduled_end || '').slice(0,5),
+        acked: !!prev.acked
+      };
+      ledgerDirty = true;
+
+      // Activity log (audit trail on the shift).
+      try {
+        await logActivity('Booking approved (portal)',
+          `Client approved ${ex.worker_name}'s booking at ${ex.outlet} on ${ex.shift_date} (${(ex.scheduled_start||'').slice(0,5)||'?'}–${(ex.scheduled_end||'').slice(0,5)||'?'}) — flipped from pending to confirmed`,
+          'shift', ex.id, { shift_date: ex.shift_date, worker_name: ex.worker_name, outlet: ex.outlet });
+      } catch (e) { /* best-effort */ }
+
+      // WhatsApp the worker — once per shift (guarded by the ledger's notifiedAt).
+      if (!approvalAcks[String(ex.id)].notifiedAt) {
+        try {
+          const phone = (workerPhone(ex.worker_name) || '').replace(/\D/g, '');
+          if (phone) {
+            const ok = await sendPeriskopeMessage(phone, buildApprovalWorkerMessage(ex));
+            if (ok) {
+              approvalAcks[String(ex.id)].notifiedAt = new Date().toISOString();
+              notified++;
+            }
+          } else {
+            console.log('[portal approval sync] no phone for', ex.worker_name, '— worker not notified');
+          }
+        } catch (e) { console.warn('[portal approval sync] worker notify failed:', e); }
+      }
+    } catch (e) { console.warn('[portal approval sync] row error:', e); }
+  }
+  if (ledgerDirty) { try { await saveApprovalAcks(); } catch(e){} }
+  if (flipped) {
+    try { await loadShifts(); } catch (e) {}
+    try { if (typeof updateTasksNavBadge === 'function') updateTasksNavBadge(); } catch(e){}
+    try { if (document.getElementById('tasks-modal')?.classList.contains('open')) renderTasksPanel(); } catch(e){}
+    console.log(`[portal approval sync] confirmed ${flipped} pending booking(s); notified ${notified} worker(s).`);
+  }
+  return flipped;
+}
+
+// Worker-facing WhatsApp message when a pending booking is approved by the client.
+function buildApprovalWorkerMessage(s) {
+  try {
+    const first = String(s.worker_name || '').trim().split(/\s+/)[0] || 'there';
+    const outlet = String(s.outlet || '').trim() || 'the outlet';
+    const dateStr = s.shift_date
+      ? new Date(s.shift_date + 'T00:00:00').toLocaleDateString('en-SG', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+      : '';
+    const start = (s.scheduled_start || '').slice(0,5);
+    const end   = (s.scheduled_end || '').slice(0,5);
+    const timeRange = start ? (end ? `${start}–${end}` : start) : '';
+    const lines = [];
+    lines.push('*Shift confirmed* ✅');
+    lines.push(`Hi ${first}, good news — your booking has been approved by the client and is now confirmed.`);
+    lines.push('');
+    lines.push(`📍 ${outlet}`);
+    if (dateStr) lines.push(`📅 ${dateStr}`);
+    if (timeRange) lines.push(`🕒 ${timeRange}`);
+    if (s.role) lines.push(`👤 ${s.role}`);
+    lines.push('');
+    lines.push('Please be on time. See you there!');
+    return lines.join('\n');
+  } catch (e) {
+    return `Your shift at ${String(s.outlet||'').trim()} on ${s.shift_date||''} has been confirmed. ✅`;
+  }
+}
+
+// Manually mark a panel shift as approved (from the shift row / detail), running
+// the exact same worker-notify + ack-task flow the portal auto-flip uses. Used
+// when ops confirm an approval that hasn't come through the portal feed yet.
+async function approveBookingManually(shiftId) {
+  const s = (allShifts || []).find(x => String(x.id) === String(shiftId));
+  if (!s) { toast('Shift not found', 'error'); return; }
+  if (!shiftIsPendingApproval(s)) { toast('This booking isn\'t pending approval.', 'info'); return; }
+  if (_approvalColumnMissing) { toast('Run: alter table shifts add column approval_status text; to enable approvals.', 'error'); return; }
+  const patch = { approval_status: 'approved', updated_at: new Date().toISOString() };
+  let { error } = await supabaseClient.from('shifts').update(patch).eq('id', s.id);
+  if (error && approvalColumnMissing(error)) { _approvalColumnMissing = true; toast('approval_status column missing — run the SQL once.', 'error'); return; }
+  if (error) { toast('Failed to approve: ' + error.message, 'error'); return; }
+  s.approval_status = 'approved';
+  if (!approvalAcksLoaded) { try { await loadApprovalAcksRemote(); } catch(e){} }
+  const prev = approvalAcks[String(s.id)] || {};
+  approvalAcks[String(s.id)] = {
+    ...prev,
+    approvedAt: prev.approvedAt || new Date().toISOString(),
+    worker: s.worker_name || '', outlet: s.outlet || '', date: s.shift_date || '',
+    start: (s.scheduled_start||'').slice(0,5), end: (s.scheduled_end||'').slice(0,5),
+    acked: !!prev.acked
+  };
+  try {
+    await logActivity('Booking approved (manual)',
+      `${s.worker_name}'s booking at ${s.outlet} on ${s.shift_date} marked confirmed by ops`,
+      'shift', s.id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  } catch(e) {}
+  if (!approvalAcks[String(s.id)].notifiedAt) {
+    try {
+      const phone = (workerPhone(s.worker_name) || '').replace(/\D/g, '');
+      if (phone) {
+        const ok = await sendPeriskopeMessage(phone, buildApprovalWorkerMessage(s));
+        if (ok) approvalAcks[String(s.id)].notifiedAt = new Date().toISOString();
+      }
+    } catch(e) {}
+  }
+  try { await saveApprovalAcks(); } catch(e){}
+  toast(`✅ ${String(s.worker_name||'Worker').split(' ')[0]}'s booking confirmed — worker notified`);
+  await loadShifts();
+  try { if (typeof updateTasksNavBadge === 'function') updateTasksNavBadge(); } catch(e){}
+}
+
 // ── v58: DELETED-IN-PORTAL detection (cancellation-by-absence) ───────────────
 // The portal hard-deletes a booking row when a shift is cancelled/deleted in the
 // app (confirmed: deletion is permanent, no status flag, no archive row). So a
@@ -14198,6 +14592,13 @@ async function loadPortalBookings(opts) {
       // Record what status strings this portal actually uses + detect cancel.
       notePortalStatus(b, shift);
       const portalCancelled = portalStatusLooksCancelled(b.status, b.working_status, shift?.status);
+      // Approval state from the portal status fields. A booking the portal still
+      // marks pending → import as pending approval; one it marks approved/active
+      // → confirmed. If neither token matches we leave it undecided (null) so the
+      // import doesn't force a state onto a portal that doesn't expose one.
+      const portalPending  = portalStatusLooksPending(b.status, b.working_status, shift?.status);
+      const portalApproved = portalStatusLooksApproved(b.status, b.working_status, shift?.status);
+      const rowApproval = portalPending ? 'pending' : (portalApproved ? 'approved' : null);
 
       const outletRaw = shift ? outletNameFor(shift.outlet_id) : '';
       const workerRaw = workerNameFor(b.user_id);
@@ -14261,6 +14662,7 @@ async function loadPortalBookings(opts) {
         _deduction:         0,
         _portalBookingId:   b.id,   // provenance, in case we want it later
         _portalCancelled:   portalCancelled, // v56: customer cancelled in app portal
+        _portalApproval:    rowApproval,      // 'pending' | 'approved' | null (from portal status)
 
         shift_date:          dateStr,
         worker_name:         isAvailableSlot ? 'Available' : (workerMatch?.name || workerRaw || 'Available'),
@@ -14274,6 +14676,7 @@ async function loadPortalBookings(opts) {
         clock_out:           finalClockOut,
         country:             country,
         cancelled:           false,
+        approval_status:     rowApproval,   // pending bookings import as pending approval
         late_penalty:        null,   // null = no override → auto-computed from clock-in vs scheduled (0 would suppress the late penalty)
         cancellation_penalty: 0,
         sr_worker:           null,
@@ -14340,6 +14743,12 @@ async function loadPortalBookings(opts) {
         renderImportPreview();
       }
     } catch (e) { console.warn('syncPortalClockTimes failed:', e); }
+
+    // Reflect portal client-approvals onto pending panel shifts: flip them to
+    // confirmed, WhatsApp the worker, and raise an acknowledgement task for ops.
+    try {
+      await syncPortalApprovals(importRows);
+    } catch (e) { console.warn('syncPortalApprovals failed:', e); }
 
     const needMap = rows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
     const seenCount = rows.filter(r => r._alreadyImported).length;
@@ -14828,8 +15237,11 @@ function renderImportPreview() {
       </td>`;
     } else {
       const st = (r.clock_in && r.clock_out) ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-blue">Scheduled</span>';
+      const pendChip = r.approval_status === 'pending'
+        ? '<div style="margin-top:3px;"><span class="badge badge-amber" title="Portal marks this booking as awaiting client approval. It imports as Pending approval and flips to Confirmed automatically once approved in the portal.">⏳ Pending approval</span></div>'
+        : '';
       statusCell = `<td>
-        ${st}
+        ${st}${pendChip}
         <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Cancel</button>${ignoreBtn}
         ${mergePicker()}
       </td>`;
@@ -15707,9 +16119,19 @@ async function _confirmImportBookingsInner() {
       sr_absorbed:      r.sr_absorbed || null,
       updated_at:       new Date().toISOString(),
     };
+    // Pending-approval bookings imported from the portal carry their state through.
+    // Only set it when the column is known-present and the portal said 'pending'
+    // (an approved/undecided portal row imports as a normal confirmed shift).
+    if (!_approvalColumnMissing && r.approval_status === 'pending') payload.approval_status = 'pending';
 
-    const { data: insRows, error } = await supabaseClient
+    let { data: insRows, error } = await supabaseClient
       .from('shifts').insert(payload).select('id');
+    // Graceful degrade if approval_status column is absent: drop it and retry.
+    if (error && approvalColumnMissing(error)) {
+      _approvalColumnMissing = true;
+      delete payload.approval_status;
+      ({ data: insRows, error } = await supabaseClient.from('shifts').insert(payload).select('id'));
+    }
     if (error) {
       console.error('Import row failed:', error.message, payload);
       toast(`Failed to save ${r.worker_name}: ${error.message}`, 'error');
