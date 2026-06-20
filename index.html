@@ -13136,14 +13136,40 @@ async function tagExistingShifts(rows) {
       // import "Hui Ling Chong") that is already portal-synced. If found, the
       // booking is already in the panel — mark it imported so it drops into the
       // "Already in the ops panel" section instead of resurfacing as new.
+      //
+      // v61 FIX — this fallback must stay TIME-AWARE. Previously it matched ANY
+      // synced same-worker shift on the date regardless of time, so when a worker
+      // ALREADY had a synced shift that day, a genuinely NEW second booking for
+      // the same worker on the same date (a different time slot, e.g. a later
+      // shift, often at another outlet) was wrongly absorbed into that first shift
+      // and hidden as "already in the ops panel" — it never surfaced as new to
+      // import. We now require the candidate's scheduled time to actually line up
+      // with this booking before treating it as the same record: either the times
+      // overlap, OR the panel shift has no usable scheduled time to compare (so we
+      // can't rule it out — keep prior lenient behaviour for timeless rows). A
+      // candidate whose time is present AND clearly different is NOT this booking.
       const importToks = importNameTokens(r.worker_name);
+      const rStart = importHHMM(r.scheduled_start);
+      const rEnd   = importHHMM(r.scheduled_end);
       const syncedSameWorkerDate = candidates.find(s => {
         const sToks = importNameTokens(s.worker_name);
         const nameMatches =
           importNormName(s.worker_name) === wNorm ||
           (importToks.length && (tokensSubset(importToks, sToks) || tokensSubset(sToks, importToks)));
         if (!nameMatches) return false;
-        return importPanelShiftIsSynced(s);
+        if (!importPanelShiftIsSynced(s)) return false;
+        // Time-awareness guard: only treat as the SAME booking when the times are
+        // compatible. If both sides have scheduled times and they don't overlap,
+        // this is a different shift for the same worker that day — let it through
+        // as new. If either side lacks a usable time, fall back to the old
+        // lenient same-worker+date match (can't disprove it's the same).
+        const sStart = importHHMM(s.scheduled_start);
+        const sEnd   = importHHMM(s.scheduled_end);
+        const bothTimed = rStart && rEnd && sStart && sEnd;
+        if (bothTimed && !importTimesOverlap(r.scheduled_start, r.scheduled_end, s.scheduled_start, s.scheduled_end)) {
+          return false;
+        }
+        return true;
       });
       if (syncedSameWorkerDate) {
         r._existingShift = syncedSameWorkerDate;
@@ -14531,22 +14557,30 @@ async function detectDeletedPortalBookings(bookings, resolvedRows) {
     const sDate = String(s.shift_date || '').slice(0, 10);
     if (sDate && sDate < today) continue;
 
-    // v59: fuzzy-key safety. A k| key (worker+date+start+end, no outlet) is less
-    // unique than a real portal id, so before treating its absence as a deletion
-    // we make sure it can't be confused with another booking:
-    //   (a) the matched panel shift must itself be portal-linked — i.e. it really
-    //       did come from an app booking — so we don't flag ops-only shifts that
-    //       were never in the portal to begin with; and
+    // v59/v61: fuzzy-key safety. A k| key (worker+date+start+end, no outlet) is
+    // less unique than a real portal id, so before treating its absence as a
+    // deletion we make sure it can't be confused with another booking:
+    //   (a) the matched panel shift must itself have a PORTAL ORIGIN — but it must
+    //       be established WITHOUT consulting the live portal feed, because a
+    //       booking that was just deleted in the app is (by definition) no longer
+    //       in the feed, so isShiftPortalSynced() would now return false for the
+    //       very rows this detector exists to catch. The fact that a k| ledger
+    //       entry EXISTS at all already proves this booking was previously
+    //       imported from the portal (or a Confirmed paste/CSV) into this exact
+    //       panel shift — that ledger record IS the durable provenance. We only
+    //       additionally honour a real durable stamp when the sync_source column
+    //       exists; we never RE-REQUIRE live-feed presence (the v60 bug that made
+    //       this whole branch dead in a DB without the sync_source column).
     //   (b) no OTHER non-cancelled panel shift may produce the same fuzzy key,
     //       which would make "which one was deleted?" ambiguous.
     // Both guards are skipped for pb| keys (a real id is already unambiguous).
     if (key.startsWith('k|')) {
-      // (a) only consider shifts that have a portal origin
-      let linked = false;
-      try { linked = !!(s.sync_source) || (typeof isShiftPortalSynced === 'function' && isShiftPortalSynced(s)); }
-      catch (e) { linked = !!s.sync_source; }
-      if (!linked) continue;
-      // (b) collision check across all live panel shifts
+      // (a) ledger presence already establishes portal origin (we are iterating
+      //     importHandled and rec.shiftId === this shift). If the durable
+      //     sync_source column happens to exist and is set, that's a bonus signal,
+      //     but its ABSENCE must NOT veto detection — otherwise a just-deleted
+      //     booking can never be flagged. So we do not gate on the live feed here.
+      // (b) collision check across all live panel shifts — the real protection.
       let sameKeyCount = 0;
       for (const other of (Array.isArray(allShifts) ? allShifts : [])) {
         if (!other || other.cancelled === true) continue;
