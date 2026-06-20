@@ -12883,6 +12883,46 @@ function portalStatusLooksApproved(...vals) {
 function portalStatusLooksPending(...vals) {
   return vals.some(v => v != null && v !== '' && PORTAL_PENDING_RE.test(String(v)));
 }
+// Resolve a booking's CLIENT-APPROVAL state from the portal feed.
+//
+// v63 FIX — the original derivation OR-ed all three status fields with "pending
+// wins", but those fields track DIFFERENT things: portal_bookings.status is the
+// CLIENT's decision (the live values are Accept / Reject / Cancel / Pending),
+// whereas portal_shifts.status / working_status reflect the WORKER's own
+// accept/pending response. So a booking the client has APPROVED (booking.status
+// = "Accept") could stay stuck on 'pending' forever just because the worker-side
+// shift.status still read "Pending" — which is exactly why Jonathan Herbsman's
+// approved booking never flipped to confirmed in the panel.
+//
+// Resolution order (most authoritative first):
+//   1. The booking's OWN status is the client's decision — trust it outright.
+//      Accept/approved → 'approved'; Pending/await → 'pending'.
+//   2. Only if the booking status is silent/ambiguous do we consult the shift +
+//      working_status as a fallback, keeping the old "pending wins" tie-break
+//      there (so we never force 'approved' onto a portal that doesn't expose one).
+// Returns 'approved' | 'pending' | null (undecided).
+function resolvePortalApproval(bookingStatus, workingStatus, shiftStatus) {
+  const bs = bookingStatus != null ? String(bookingStatus) : '';
+  // (0) A cancellation/rejection on the booking's own status is decisive and is
+  //     NOT an approval state — return null so the cancel path owns it and this
+  //     row can never be mistaken for approved/pending (the live negative values
+  //     are "Cancel" and "Reject"). Without this, a booking whose client status
+  //     is Cancel but whose worker-side shift.status still reads Accept could
+  //     resolve to 'approved' and be wrongly flipped to confirmed.
+  if (bs && portalStatusLooksCancelled(bs)) return null;
+  // (1) The booking's own status is the client decision — authoritative.
+  if (bs) {
+    if (PORTAL_PENDING_RE.test(bs)) return 'pending';
+    if (PORTAL_APPROVED_RE.test(bs)) return 'approved';
+  }
+  // (2) Booking status didn't decide it — fall back to the shift/worker fields,
+  //     pending still wins over approved on overlap (conservative). A cancel
+  //     token on those fields also yields null (handled by the cancel path).
+  if (portalStatusLooksCancelled(workingStatus, shiftStatus)) return null;
+  if (portalStatusLooksPending(workingStatus, shiftStatus)) return 'pending';
+  if (portalStatusLooksApproved(workingStatus, shiftStatus)) return 'approved';
+  return null;
+}
 // Collects the distinct status strings observed during a load so we can print
 // them once (not per-row) for diagnosis.
 let _portalStatusSeen = null;
@@ -14720,13 +14760,14 @@ async function loadPortalBookings(opts) {
       // Record what status strings this portal actually uses + detect cancel.
       notePortalStatus(b, shift);
       const portalCancelled = portalStatusLooksCancelled(b.status, b.working_status, shift?.status);
-      // Approval state from the portal status fields. A booking the portal still
-      // marks pending → import as pending approval; one it marks approved/active
-      // → confirmed. If neither token matches we leave it undecided (null) so the
-      // import doesn't force a state onto a portal that doesn't expose one.
-      const portalPending  = portalStatusLooksPending(b.status, b.working_status, shift?.status);
-      const portalApproved = portalStatusLooksApproved(b.status, b.working_status, shift?.status);
-      const rowApproval = portalPending ? 'pending' : (portalApproved ? 'approved' : null);
+      // Approval state from the portal status fields. v63: derive via
+      // resolvePortalApproval(), which trusts the booking's OWN status (the
+      // client's Accept/Pending/Reject decision) first and only falls back to the
+      // worker-side shift/working status when the booking status is silent — so a
+      // client-approved booking flips to confirmed even if the worker-level shift
+      // status still reads "Pending". (Previously "pending wins" across all three
+      // fields kept approved bookings stuck on pending.)
+      const rowApproval = resolvePortalApproval(b.status, b.working_status, shift?.status);
 
       const outletRaw = shift ? outletNameFor(shift.outlet_id) : '';
       const workerRaw = workerNameFor(b.user_id);
