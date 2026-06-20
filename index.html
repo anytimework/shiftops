@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
 <!-- Build patch: v62 — DIAGNOSE + FIX "pending shows 0 / no orange". Root cause when a pending booking doesn't show: the optional approval_status column isn't in the DB, so the flag silently saved as confirmed. (1) checkApprovalColumn() probes the column on every loadShifts (select approval_status limit 1); if it's missing it sets _approvalColumnMissing and shows a PERSISTENT amber banner above the metrics with the exact SQL (alter table shifts add column approval_status text;) instead of a one-off toast. Also console-logs the live pending count each load for quick confirmation. (2) EDIT ROW now has a "Booking status" dropdown (Confirmed / Pending client approval) so an existing confirmed shift can be flagged pending (or set back), wired into saveRow with the same column-missing graceful retry. Setting pending never notifies the worker (notification only fires on approval, unchanged). All guarded so projects without the column still save everything else. node --check passes; banner + edit control preview-rendered. No behavioural change for any shift that isn't approval_status='pending'. -->
+<!-- Build patch: v62 — OPEN-SLOT FILL: a portal booking that takes an existing open "Available" slot now MERGES into that slot instead of creating a duplicate, so the open slot and the actual booking stay as ONE synced record (fixes the "available bookings desync / confusing duplicate" concern). An Available slot has no worker name, so the name-keyed reconciler in tagExistingShifts could never recognise the named booking as the same shift. NEW: inside the no-time-overlap branch (which is where a named booking lands when only an unfilled slot exists), a booking now CLAIMS a matching open slot — same outlet (importOutletKey) + same date + overlapping time, slot worker_name empty/"Available" (isOpenSlot), not cancelled — tagged r._existingMatch='fill' / r._fillsOpenSlot=true. Slots are claimed ONE-BY-ONE per reconcile pass via a _claimedOpenSlotIds set (matched in stored order), so two bookings fill two distinct slots and a third overflows to a genuine new insert. REVIEWABLE, never silent: the row shows a green "🪑 Fills open slot" status with an "Add as new instead" toggle (_skipFill) and is included in the action-bar count + a teal fill note; you still click Confirm. On Confirm, _confirmImportBookingsInner re-fetches the slot, re-verifies it's STILL open and not already claimed in this pass (_filledSlotIdsThisPass — guards two-browser / two-row races), then UPDATEs it in place: sets worker_name + role + times + clock in/out + break + country, KEEPS the slot's panel rate & special-rate fields authoritative (same rule as a merge), preserves/keeps penalties (import never carries real ones), stamps sync_source='merged', records markImportHandled, ensures the worker exists in the roster, and logs "Open slot filled". If the slot was taken out from under us (or _skipFill) it falls through to the normal reconcile→insert path. Post-confirm it labels in the "Already in the ops panel" section as "Filled open slot" (_importedThisSession='filled'). Existing clock-sync / approval-sync untouched (both gate on _existingMatch==='exact', so 'fill' rows are excluded until confirmed). node --check passes; 5-case fill harness passes (distinct-slot fill, overflow→insert, wrong outlet, no overlap, cancelled slot). No schema change. -->
 <!-- Build patch: v61 — Pending-approval VISIBILITY + metric-card reshuffle (UI only, no schema change). (1) Pending-approval bookings are now unmistakable in every attendance view: orange worker name (.pending-approval-name), an "⏳ Pending approval" pill under the name (pendingApprovalTag, with an inline ✓ Approve button), an orange left-bar + tint on week cards (.week-shift.pending-approval) and table rows (tr.row-pending-approval), and a distinct orange status badge (.badge-pending-approval) instead of the overloaded amber. (2) For a pending-approval shift, the night/clock-in REMINDER PANEL is replaced by a "Booking pending client approval" notice (reminderPanelHtml early-returns it) — there's nothing to remind the worker about until the client confirms; an ✓ Approve now button sits in it. (3) METRIC CARDS: the standalone "Late" and "Cancellations" cards are merged into ONE "⚠️ Late & Cancellations" card (two tap-targets: Late filters the table, the Cancelled number opens the cancellations panel). (4) NEW "⏳ Pending Approval" metric card (orange) showing the count of pending-approval bookings; tapping it filters the attendance table to those bookings (new matchesMetricFilter 'pending_approval'). NOTE: the orange treatment only shows for shifts whose approval_status='pending' — created via Add Shift → "Pending client approval", or imported from a portal booking the portal marks pending. Requires the v60 optional column to persist team-wide:  alter table shifts add column approval_status text;  node --check passes; preview-rendered. -->
 <!-- Build patch: v60 — PENDING CLIENT APPROVAL for bookings, end-to-end. A booking can now be "pending client approval": the client still has to approve it in the portal. (A) ADD SHIFT FORM gains a "Booking status" selector (Confirmed / Pending client approval); a pending pick writes approval_status='pending' on the shift (Confirmed leaves it null, so existing rows + a missing column read as confirmed). (B) STATUS BADGE shows "⏳ Pending approval" everywhere statusBadge() renders, with an inline "✓ Approve now" button (approveBookingManually) for ops to confirm without waiting on the portal. (C) PORTAL IMPORT reads portal status tokens: a booking the portal marks pending imports as pending approval (shown with a chip in the preview), one it marks approved imports as a normal confirmed shift. Carried through confirmImportBookings inserts. (D) AUTO-REFLECTION — syncPortalApprovals() runs inside loadPortalBookings (button + 5-min auto-importer), right after syncPortalClockTimes: for any reconciled row whose panel shift is still 'pending' but whose portal status now reads approved, it (1) flips the panel shift to approved/confirmed, (2) WhatsApps the WORKER that the shift is confirmed (buildApprovalWorkerMessage → sendPeriskopeMessage, once per shift), and (3) raises an acknowledgement task for ops. (E) ACK TASK — a new 'approval_ack' Tasks card ("✅ Booking approved") with an Acknowledge button; backed by a team-synced app_settings ledger key='approval_acks' (mirrors import_handled / import_ignored — survives refresh/session/teammates, notify-once guard) so NO shift_reminders schema change is needed. Approval state guards: never touches cancelled / Available / portal-cancelled / already-confirmed shifts. Status regexes handle snake_case tokens (pending_approval, shift_approved) and pending wins over approved on overlap. node --check passes; 22-case status-classification harness passes. ONE OPTIONAL SCHEMA ADD for durable team-wide pending state: run once in Supabase SQL —  alter table shifts add column approval_status text;  — the code degrades gracefully if it's absent (add-shift + approve still work locally, but the pending flag can't persist/sync until the column exists). loadShifts already selects * so the column flows through with no other change. -->
 <!-- Build patch: v59 — Deleted-in-portal detection now also catches NON-portal-feed bookings. The v58 cancellation-by-absence detector (detectDeletedPortalBookings) only trusted real pb|<id> ledger keys, so a booking that entered the panel via manual entry / paste / CSV (recorded under a fuzzy k|worker|date|start|end key) was never noticed when its app booking was hard-deleted — it kept resurfacing/sitting in the panel with no portal counterpart. Now loadPortalBookings passes the resolved import rows into the detector, which builds a presentFuzzyKeys set via the SAME importBookingKey() the ledger uses; any k| ledger entry whose key is absent from this load AND whose panel shift is still active is treated as a portal deletion and dropped into the existing "✕ Cancelled / deleted in the portal" section (flag-only, never auto-cancels, never auto-saved — same Apply-cancellation / Acknowledge flow). Fuzzy branch carries two EXTRA guards a real id doesn't need: (a) the matched panel shift must be portal-linked (sync_source set or isShiftPortalSynced) so ops-only shifts that were never in the app aren't flagged; (b) it's skipped if more than one live panel shift produces the same fuzzy key (ambiguous "which one was deleted?"). pb| path unchanged; today-or-future-only and panel-not-already-cancelled guards unchanged. node --check passes; isolated 8-case harness covers fuzzy-delete/present/ops-only/collision/past/panel-cancelled and pb present/absent. No schema change. -->
@@ -12947,6 +12948,9 @@ function importReconciledTag(r) {
   if (r._importedThisSession === 'created') {
     return { label: 'Created', cls: 'badge-green', note: 'Created in the ops panel from this booking this session.' };
   }
+  if (r._importedThisSession === 'filled') {
+    return { label: 'Filled open slot', cls: 'badge-green', note: 'A worker took an open slot — the slot was updated in place this session (no duplicate).' };
+  }
   // Otherwise it was already in the panel before this load.
   if (r._existingMatch === 'exact') {
     return { label: 'Synced', cls: 'badge-green', note: 'Already in the ops panel — nothing new to import.' };
@@ -13016,11 +13020,24 @@ async function tagExistingShifts(rows) {
     r._existingMatch = null;
     r._alreadyImported = false;
     r._syncStampOnly = false;
+    r._fillsOpenSlot = false;   // v62: this booking fills an open "Available" slot
     r._overlapCandidates = [];
     r._mergeCandidates = [];
     // Keep any manual merge choice the user made, but drop it if it's no longer
     // a valid candidate after re-tagging (validated below).
   });
+
+  // v62 — OPEN-SLOT FILL: an "Available" slot saved into the panel (often from a
+  // prior import) has no worker name, so the name-keyed reconciler below can
+  // never recognise that a named portal booking is the SAME shift finally taken.
+  // That produced a duplicate: the open slot sat unfilled while a new named
+  // booking was inserted alongside it. To fix it we let a named booking CLAIM a
+  // matching open slot (same outlet + date + overlapping time) and, on Confirm,
+  // UPDATE that slot in place instead of inserting. Slots are claimed ONE-BY-ONE
+  // within a single reconcile pass (this set tracks which open slots are already
+  // spoken for) so two bookings fill two distinct slots and a third overflows to
+  // a genuine new insert. Open slots are matched in their stored order.
+  const _claimedOpenSlotIds = new Set();
 
   // Unique, named dates to query (skip 'Available' rows — nothing to dedupe)
   const dates = [...new Set(
@@ -13134,6 +13151,30 @@ async function tagExistingShifts(rows) {
       r._forceMergeId = null;
     }
     if (!sameWorker.length) {
+      // v62 — OPEN-SLOT FILL (before the other no-overlap fallbacks).
+      // A named booking won't overlap any same-NAMED panel shift when the panel
+      // only holds an unfilled "Available" slot for it. So first check whether
+      // this booking is the worker finally taking an OPEN slot: same outlet +
+      // same date + overlapping time, slot currently has no real worker, and the
+      // slot hasn't already been claimed by an earlier row in this same pass.
+      // If so, tag it to FILL that slot in place on Confirm (no duplicate insert)
+      // — surfaced as a reviewable "🪑 Fills open slot" action, never auto-saved.
+      const openSlot = candidates.find(s =>
+        isOpenSlot(s) &&
+        importOutletKey(s.outlet) === oNorm &&
+        importTimesOverlap(r.scheduled_start, r.scheduled_end, s.scheduled_start, s.scheduled_end) &&
+        !_claimedOpenSlotIds.has(s.id)
+      );
+      if (openSlot) {
+        _claimedOpenSlotIds.add(openSlot.id);
+        r._existingShift   = openSlot;
+        r._existingMatch   = 'fill';   // distinct from 'exact'/'overlap'
+        r._fillsOpenSlot   = true;
+        r._alreadyImported = false;    // it's NOT yet in the panel as this worker
+        r._syncStampOnly   = false;
+        continue;
+      }
+
       // No time-overlap match — but a portal re-load (or paste) of the SAME
       // worker at the SAME outlet on the SAME date is almost certainly the same
       // booking even if the stored scheduled times drifted (e.g. a prior merge
@@ -14749,8 +14790,13 @@ async function loadPortalBookings(opts) {
     const today = new Date().toISOString().slice(0, 10);
     const rows = [];
     _portalStatusSeen = new Set(); // reset diagnostic status collector each load
+    // v64: track which portal_shifts already have a booking row, so the
+    // bookingless-shift pass below (pending-approval shifts that exist only in
+    // portal_shifts until the client approves) doesn't double-count them.
+    const bookedShiftIds = new Set();
 
     for (const b of bookings) {
+      if (b.shift_id != null) bookedShiftIds.add(String(b.shift_id));
       const shift = b.shift_id != null ? shiftById.get(String(b.shift_id)) : null;
 
       // Date: prefer the shift's date, else the booking's own date
@@ -14847,6 +14893,96 @@ async function loadPortalBookings(opts) {
         cancelled:           false,
         approval_status:     rowApproval,   // pending bookings import as pending approval
         late_penalty:        null,   // null = no override → auto-computed from clock-in vs scheduled (0 would suppress the late penalty)
+        cancellation_penalty: 0,
+        sr_worker:           null,
+        sr_rate:             null,
+        sr_hours:            null,
+        sr_absorbed:         null,
+      });
+    }
+
+    // ── v64: PENDING-APPROVAL shifts that exist ONLY in portal_shifts ──────────
+    // A shift the client has posted but NOT yet approved has no portal_bookings
+    // row at all (a booking is only created once the client approves / a worker
+    // is assigned). The loop above iterates `bookings`, so those shifts were
+    // invisible — which is why future pending-approval bookings never appeared in
+    // the import preview. Here we sweep portal_shifts for any TODAY-OR-FUTURE
+    // shift that has no booking row yet, and synthesise an "Available / pending
+    // approval" row so ops can see (and optionally pre-stage) it. Guards:
+    //   • bookingless only (bookedShiftIds) — never double-counts a real booking
+    //   • today-or-future only — old unfilled shifts aren't dragged in
+    //   • a cancel/void/reject status on the shift is skipped (not pending)
+    //   • workerless by nature (no booking → no user_id), shown as "Available"
+    for (const shift of shifts) {
+      const sid = String(shift.id);
+      if (bookedShiftIds.has(sid)) continue; // already produced a row above
+
+      const dateStr = (shift.shift_date || '').slice(0, 10);
+      if (!dateStr) continue;
+      if (!isTodayOrFutureDate(dateStr)) continue; // only upcoming open shifts
+
+      // A cancelled/void/rejected shift is not a pending-approval one — skip so it
+      // doesn't masquerade as importable.
+      if (portalStatusLooksCancelled(shift.status)) continue;
+
+      notePortalStatus(null, shift);
+
+      // These open shifts are awaiting client approval by definition (no booking
+      // exists yet). If the shift's own status explicitly reads approved we still
+      // treat it as pending here, because without a booking row there is no
+      // worker-confirmed booking to import as confirmed — ops approve/assign it.
+      const rowApproval = 'pending';
+
+      const outletRaw = outletNameFor(shift.outlet_id);
+      const schedStart = importParseTime(shift.start_time) || null;
+      const schedEnd   = importParseTime(shift.end_time)   || null;
+      const roleRaw    = (shift.job_type || '').trim();
+
+      const outletInfo  = outletRaw ? resolveImportOutlet(outletRaw) : { name: '', match: null, fuzzy: null, alias: null, autoMatch: false };
+      const outletMatch = outletInfo.match;
+
+      let resolvedRate = parseFloat(shift.rate) || 0;
+      if (!resolvedRate && outletMatch) {
+        const suggested = getSuggestedRate(outletMatch.name, roleRaw, new Date(dateStr + 'T00:00:00'));
+        resolvedRate = suggested?.rate || 12;
+      }
+      if (!resolvedRate) resolvedRate = 12;
+
+      const breakMins = defaultBreakMinsForRange(schedStart, schedEnd) || 0;
+      const country = normaliseCountry(outletCountryFor(shift.outlet_id) || 'Singapore');
+
+      rows.push({
+        _workerRaw:         'Available',
+        _outletRaw:         outletRaw,
+        _workerMatch:       null,
+        _outletMatch:       outletMatch?.name || null,
+        _hasWorkerMismatch: false,            // no worker to map (open slot)
+        _hasOutletMismatch: !!outletRaw && !outletMatch,
+        _workerAutoMatched: false,
+        _outletAutoMatched: !!outletInfo.autoMatch,
+        _suggestedWorker:   null,
+        _suggestedOutlet:   outletInfo.fuzzy?.name || outletInfo.alias || null,
+        _deduction:         0,
+        _portalShiftId:     shift.id,         // provenance (shift, not booking)
+        _portalBookingId:   null,             // none exists yet
+        _portalCancelled:   false,
+        _portalApproval:    rowApproval,
+        _portalOpenShift:   true,             // v64: came from portal_shifts only
+
+        shift_date:          dateStr,
+        worker_name:         'Available',
+        outlet:              outletInfo.name || outletRaw || '',
+        role:                roleRaw,
+        scheduled_start:     schedStart || '09:00',
+        scheduled_end:       schedEnd || '17:00',
+        rate:                resolvedRate,
+        break_mins:          breakMins,
+        clock_in:            null,
+        clock_out:           null,
+        country:             country,
+        cancelled:           false,
+        approval_status:     rowApproval,
+        late_penalty:        null,
         cancellation_penalty: 0,
         sr_worker:           null,
         sr_rate:             null,
@@ -15358,6 +15494,21 @@ function renderImportPreview() {
         <span class="badge badge-red">Cancelled</span>
         <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._cancelled=false;renderImportPreview()">Undo</button>
       </td>`;
+    } else if (r._fillsOpenSlot && r._existingShift && !r._skipFill) {
+      // v62 — This named booking will FILL an existing open "Available" slot
+      // (same outlet + date + overlapping time) instead of creating a duplicate.
+      // On Confirm it updates that slot in place: sets the worker, clock times,
+      // role and times, keeping the slot's panel rate authoritative.
+      const ex = r._existingShift || {};
+      statusCell = `<td>
+        <span class="badge badge-green">🪑 Fills open slot</span>
+        <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
+          Takes the open <b>${escapeHtml(ex.outlet||'?')}</b> slot<br>
+          ${escapeHtml(ex.scheduled_start||'')}–${escapeHtml(ex.scheduled_end||'')} — updates it in place, no duplicate
+        </div>
+        <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--border2);border-radius:4px;color:var(--text2);cursor:pointer;" onclick="importRows[${idx}]._skipFill=${!r._skipFill};renderImportPreview()">${r._skipFill ? 'Will add as new — undo' : 'Add as new instead'}</button>${ignoreBtn}
+        ${mergePicker()}
+      </td>`;
     } else if (r._existingMatch === 'exact' && r._alreadyImported) {
       // Same booking already in ops panel, nothing new to sync.
       statusCell = `<td>
@@ -15457,12 +15608,13 @@ function renderImportPreview() {
 
   // Counts that drive the action bar. Only SELECTED (ticked) rows are written.
   const isEligible = r => importRowIsSelected(r);
+  const fillCount       = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._fillsOpenSlot && !r._skipFill).length;
   const stampOnlyCount  = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'exact' && r._syncStampOnly && !r._skipMerge).length;
   const autoMergeCount  = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'exact' && !r._alreadyImported && !r._syncStampOnly && !r._skipMerge).length;
   const manualMergeCount= importRows.filter(r => isEligible(r) && r._forceMergeId).length;
   const mergeCount    = autoMergeCount + manualMergeCount;
-  const insertCount   = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch !== 'exact').length;
-  const activeCount   = mergeCount + insertCount + stampOnlyCount; // total that will be written/stamped
+  const insertCount   = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch !== 'exact' && !(r._fillsOpenSlot && !r._skipFill)).length;
+  const activeCount   = mergeCount + insertCount + stampOnlyCount + fillCount; // total that will be written/stamped
   const alreadyCount  = importRows.filter(r => r._alreadyImported).length;
   const clashCount    = importRows.filter(r => isEligible(r) && !r._forceMergeId && r._existingMatch === 'overlap').length;
   const unmappedCount = importRows.filter(r => r._hasWorkerMismatch || r._hasOutletMismatch).length;
@@ -15477,6 +15629,9 @@ function renderImportPreview() {
     : '';
   const stampNote = stampOnlyCount > 0
     ? `<span style="font-size:12px;color:var(--accent);">🔗 ${stampOnlyCount} already in the panel — Confirm to mark synced.</span>`
+    : '';
+  const fillNote = fillCount > 0
+    ? `<span style="font-size:12px;color:var(--teal);">🪑 ${fillCount} will fill an open slot — Confirm updates the slot in place (no duplicate).</span>`
     : '';
   const clashNote = clashCount > 0
     ? `<span style="font-size:12px;color:var(--amber);">⚠️ ${clashCount} clash${clashCount!==1?'es':''} (different outlet) — review before saving.</span>`
@@ -15701,6 +15856,7 @@ function renderImportPreview() {
       <button class="btn btn-ghost btn-sm" onclick="clearImportBookings()">Clear</button>
       ${mergeNote}
       ${stampNote}
+      ${fillNote}
       ${clashNote}
       ${selectionNote}
       ${unmappedNote}
@@ -16037,6 +16193,9 @@ async function confirmImportBookings() {
 async function _confirmImportBookingsInner() {
 
   let saved = 0, merged = 0, skipped = 0, stamped = 0;
+  // v62 — open slots already filled in THIS confirm pass, so two rows can't both
+  // claim the same slot when several bookings target overlapping open slots.
+  const _filledSlotIdsThisPass = new Set();
 
   for (const r of importRows) {
     // Always skip unmapped rows — user must explicitly map or add before confirming
@@ -16140,6 +16299,95 @@ async function _confirmImportBookingsInner() {
         r._forceMergeId = null;
       }
       continue;
+    }
+
+    // ── v62 OPEN-SLOT FILL: a worker is taking an existing open "Available"
+    // slot. UPDATE that slot in place (set the worker + clock/role/time data)
+    // instead of inserting a duplicate, so the panel keeps ONE record for the
+    // shift. Re-checks at save time that the slot is still open and still
+    // unclaimed by an earlier row in THIS confirm pass, so two browsers / two
+    // rows can't both grab the same slot. If the slot was filled out from under
+    // us (or the user chose "Add as new instead"), fall through to a normal
+    // insert. The slot's panel rate / special-rate fields stay authoritative
+    // (same rule as a merge). ──
+    if (r._fillsOpenSlot && r._existingShift && r._existingShift.id && !r._skipFill) {
+      const slotId = r._existingShift.id;
+      // Re-fetch the live slot row and confirm it's still genuinely open.
+      const { data: liveRows } = await supabaseClient
+        .from('shifts')
+        .select('*')
+        .eq('id', slotId)
+        .limit(1);
+      const live = (liveRows || [])[0];
+      const stillOpen = live && !live.cancelled
+        && (!live.worker_name || String(live.worker_name).trim().toLowerCase() === 'available')
+        && !_filledSlotIdsThisPass.has(slotId);
+      if (!stillOpen) {
+        // The slot is gone / already taken — don't overwrite a real booking.
+        // Drop the fill tag and let the normal reconcile+insert path handle it
+        // (it'll insert this as a new booking, or merge if a same-named booking
+        // now exists).
+        r._fillsOpenSlot = false;
+        r._existingShift = null;
+        r._existingMatch = null;
+      } else {
+        _filledSlotIdsThisPass.add(slotId);
+        // KEEP the slot's rate + special-rate fields (authoritative); fall back
+        // to the import rate only if the slot has none.
+        const slotRate = (live.rate != null && live.rate !== '')
+          ? parseFloat(live.rate)
+          : (parseFloat(r.rate) || 12);
+        const fillPayload = {
+          worker_name:     r.worker_name,
+          role:            r.role || live.role,
+          outlet:          r.outlet,
+          scheduled_start: r.scheduled_start,
+          scheduled_end:   r.scheduled_end,
+          rate:            slotRate,
+          break_mins:      parseInt(r.break_mins) || 0,
+          clock_in:        r.clock_in  || live.clock_in  || null,
+          clock_out:       r.clock_out || live.clock_out || null,
+          country:         r.country || live.country,
+          updated_at:      new Date().toISOString(),
+        };
+        // Penalty rule mirrors merges: the import never carries real penalties,
+        // so keep the slot's existing values (normally none) rather than zeroing.
+        if (r.late_penalty != null && r.late_penalty !== '')
+          fillPayload.late_penalty = parseFloat(r.late_penalty) || 0;
+        else if (live.late_penalty != null)
+          fillPayload.late_penalty = live.late_penalty;
+        fillPayload.cancellation_penalty = (parseFloat(live.cancellation_penalty || 0) || parseFloat(r.cancellation_penalty || 0)) || 0;
+        if (live.sr_rate     != null) fillPayload.sr_rate     = live.sr_rate;
+        if (live.sr_worker   != null) fillPayload.sr_worker   = live.sr_worker;
+        if (live.sr_absorbed != null) fillPayload.sr_absorbed = live.sr_absorbed;
+        const { error: fillErr } = await supabaseClient
+          .from('shifts').update(fillPayload).eq('id', slotId);
+        if (fillErr) {
+          console.error('Open-slot fill failed:', fillErr.message, fillPayload);
+          toast(`Failed to fill slot for ${r.worker_name}: ${fillErr.message}`, 'error');
+          skipped++;
+        } else {
+          merged++;  // counts as a reconcile, not a new duplicate
+          r._importedShiftId = slotId;
+          r._alreadyImported = true;
+          r._importedThisSession = 'filled';
+          r._existingMatch = 'exact';
+          r._fillsOpenSlot = false;
+          // Make sure this worker exists in the roster for future lookups.
+          try {
+            const known = (workers || []).some(w => importNormName(w.name) === importNormName(r.worker_name));
+            if (!known) { await supabaseClient.from('workers').insert({ name: r.worker_name }); }
+          } catch (e) { /* best-effort */ }
+          await markShiftSyncSource(slotId, 'merged');
+          markImportHandled(r, slotId);
+          try {
+            await logActivity('Open slot filled',
+              `${r.worker_name} took the open ${r.outlet} slot on ${r.shift_date} (${(r.scheduled_start||'').slice(0,5)||'?'}–${(r.scheduled_end||'').slice(0,5)||'?'}) — slot updated in place, no duplicate created`,
+              'shift', slotId, { shift_date: r.shift_date, worker_name: r.worker_name, outlet: r.outlet });
+          } catch (e) { /* best-effort */ }
+        }
+        continue;
+      }
     }
 
     // ── Merge / reconcile against the ops panel ──
