@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
+<!-- Build patch: v69 — AUTHORIZED OT END TIME + "ARRIVED ON TIME" (forgot-to-tap fixes). Two ops overrides for the common "worker forgot to tap" cases, both reflected in worker pay AND client billing (payoutForShift = hours × rate runs through the same payrollStartTime/payrollEndTime). (A) AUTHORIZED OT END — previously OT was all-or-nothing: cap at scheduled end, or (Approve OT) pay to the real clock-out. New optional column ot_end (text 'HH:MM') lets ops type the exact time OT was authorized to. payrollEndTime() now: if ot_end is set, counts to it, CLAMPED to [scheduled end, actual clock-out] (can't bill below the shift or above hours actually worked); takes precedence over both the cap and ot_approved. Inline ⤓ time-input on the clock-out cell (setShiftOtEnd) next to the existing ⏱/✅ badge; a green "✅ OT→HH:MM" badge shows when set. Example: Aliff sched 10:30–14:30, OT authorized to 15:00, tapped out 15:13 → billed/paid to 15:00, not 15:13. (B) ARRIVED ON TIME — new optional column arrived_on_time (boolean). When set, payrollStartTime() returns the scheduled start (ignores the late tap) and effectiveLatePenalty() returns 0. Inline amber "⏱ late → on time?" badge appears on the clock-in cell only when the tap-in is genuinely late (status 'late'); flips to green "✅ on time" (toggleArrivedOnTime). Example: sched 11:00, tapped 11:06 → mark on time → billed/paid from 11:00, penalty cleared. (C) payrollStartNote() surfaces both ("on time — start counted …", "OT authorized to HH:MM …"). (D) checkOtColumn() now also probes ot_end + arrived_on_time; all three handlers degrade gracefully (toast with the exact SQL) if a column is absent. REQUIRES TWO ONE-LINE SQL (run once in Supabase): alter table shifts add column ot_end text;  and  alter table shifts add column arrived_on_time boolean default false;  — capping/penalty behaviour is unchanged until set. node --check passes (2/2 non-empty script blocks); 13-case unit harness passes (Aliff auth-end 15:00, clamp up/down, overnight 02:30, arrived-on-time 11:00 + penalty 0, plus regressions: normal cap, full OT-approved, past-shift untouched). No change to any shift without these flags set. -->
 <!-- Build patch: v68c — PAST SHIFTS LEFT COMPLETELY ALONE (no badges, no notes, original billing). v68b correctly stopped the cap from shrinking past overtime, but it overshot by surfacing a green "+Nm OT" badge on every past late clock-out — implying e.g. a 11:01 tap-out on an 11:00 shift was billable OT, when the system's long-standing clock-out rounding already absorbs 1–8 min overruns (11:01→11:00, 21:08→21:00) and only counts genuine 15/30 min overruns (22:15→22:15). The underlying past PAYMENT was always correct (payrollEndTime returns the raw clock-out for pre-cap shifts, then calcHours applies the original 5-min-grace/15-min rounding — byte-identical to pre-v68). This patch removes the misleading UI on pre-cap shifts: (1) renderTimeCell shows NO OT badge at all when shiftOtCapApplies(s) is false; (2) payrollStartNote no longer emits "end capped … OT not approved" or "OT approved" for those shifts — at most a neutral "end counted HH:MM" rounding note, exactly as before. Yesterday-onward shifts keep the full cap + amber "→ capped"/approve-OT flow unchanged. The completed-shift portal-sync freeze (v68b) is retained. node --check passes (2/2 non-empty script blocks); past-shift hours verified unchanged (Viknesh 4h, Chua 6h, Vicknesh 4.75h, Angel 4.25h). -->
 <!-- Build patch: v68b — OT CAP IS NOW DATE-SCOPED + COMPLETED SHIFTS FROZEN FROM PORTAL SYNC. Two fixes on top of v68. (1) The overtime cap was retroactively shrinking genuinely-approved past overtime. It now ONLY applies to shifts dated YESTERDAY or later: OT_CAP_EFFECTIVE_FROM = today−1 (local), and shiftOtCapApplies(s) returns false for any shift_date before it. payrollEndTime() treats a pre-cap shift exactly like ot_approved (real clock-out counted, no cap), so all historical payroll/billing is restored untouched. The amber "→ capped" badge and the edit-row "Approve overtime" control are suppressed on pre-cap shifts (nothing to cap); a plain non-clickable green "✅ +Nm OT" badge is shown instead for context. No schema change; ot_approved still works for today-onward shifts. (2) Once a worker has CLOCKED OUT, the panel shift is settled and is FROZEN from further portal sync: syncPortalClockTimes() now skips any row whose panel shift already has clock_out (marking it already-imported so it drops out of the actionable list). A portal crash, row rewrite, or wiped/shifted timestamp can no longer mutate an already-completed shift's clock_in/clock_out or disturb finalized pay. The clock-out WhatsApp alert + activity log still fire on the first capture as before. node --check passes (2/2 non-empty script blocks); date-gate unit cases pass (today/yesterday cap; 2-days-ago & older not; no-date safe). -->
 <!-- Build patch: v68 — OVERTIME CAP + APPROVE-OT (replaces the v67 clock-lock approach). Problem: a worker who clocks out a few minutes after their shift ends (e.g. 23:10 on a 23:00 shift — often just forgetting to tap out) was billed & paid for those extra minutes, inflating client invoices. Locking the clock-out fought portal sync and was clumsy. NEW MODEL: workers may still clock out late (the real clock_out is stored/displayed untouched and portal sync is left free), but the PAYROLL/BILLING clock-out is CAPPED at the scheduled end by default. (1) payrollEndTime(s, countedStart) is the mirror of payrollStartTime()'s early-clock-in floor: if the (overnight-aware) clock-out runs past scheduled end and OT is NOT approved, the counted end is capped at scheduled end; an on-time/early clock-out is untouched. calcShiftHours() now runs through it, so both worker payout and client billing (payoutForShift = hours × rate) cap automatically. (2) APPROVE OT — when overtime is genuine, ops ticks it and the real clock-out is counted for pay AND client bill. Two entry points: an inline badge on the clock-out cell (amber "⏱ +Nm → capped" → click to approve; green "✅ +Nm OT" when approved → click to remove; toggleShiftOT) and an "Approve overtime" checkbox in the edit row (only shown when a late clock-out exists; saved via saveRow). (3) payrollStartNote() now shows "end capped at HH:MM (late clock-out …, OT not approved)" or "OT approved" so the treatment is visible. (4) Optional column ot_approved (boolean) — checkOtColumn() probes on load; saveRow + toggleShiftOT degrade gracefully if absent (cap still applies; approval just can't persist). The v67 clock_locked mechanism (lock guard in syncPortalClockTimes, saveRow lock-set + retries, unlockShiftClock, checkClockLockedColumn, 🔒 badge) is fully removed. REQUIRES ONE-LINE SQL to persist approvals:  alter table shifts add column ot_approved boolean default false;  — runs fine without it (capping works immediately; approving needs the column). node --check passes (5/5 script blocks); cap/OT unit cases pass. -->
@@ -4701,10 +4702,21 @@ function minsToTime(mins) {
   mins = ((parseInt(mins, 10) || 0) + 1440) % 1440;
   return `${String(Math.floor(mins / 60)).padStart(2,'0')}:${String(mins % 60).padStart(2,'0')}`;
 }
+// v69: "Arrived on time" — when the worker physically arrived on time but
+// forgot to tap in (e.g. on-time at 11:00, tapped 11:06), ops flags
+// arrived_on_time=true. Payroll/billing then starts at the SCHEDULED start, not
+// the late tap, and the late penalty is zeroed (see effectiveLatePenalty). This
+// is what the client sees and is billed for.
+function shiftArrivedOnTime(s) {
+  return !!s && s.arrived_on_time === true;
+}
 function payrollStartTime(s) {
   const sched = s?.scheduled_start?.slice(0,5);
   const ci = s?.clock_in?.slice(0,5);
   if (!sched || !ci) return ci || null;
+  // Arrived-on-time override: count from the scheduled start regardless of the
+  // late tap-in.
+  if (shiftArrivedOnTime(s)) return sched;
   let schedM = toMins(sched);
   let ciM = toMins(ci);
   // If a shift starts late night and clock-in is after midnight, compare as next day.
@@ -4786,10 +4798,38 @@ function shiftOtCapApplies(s) {
   if (!d) return true;                      // no date → be safe, apply the cap
   return d >= OT_CAP_EFFECTIVE_FROM;        // yesterday or later → cap; older → don't
 }
+// v69: AUTHORIZED OT END. When ops authorized overtime to a SPECIFIC time (e.g.
+// to 15:00) but the worker tapped out a bit later (15:13), the client should be
+// billed (and the worker paid) to the AUTHORIZED time, not the raw tap-out and
+// not the scheduled-end cap. ot_end (text 'HH:MM') holds that authorized end.
+// Clamped to [scheduled end, actual clock-out] so it can never bill below the
+// shift or above what was actually worked. Takes precedence over both the cap
+// and full ot_approved. Returns null/'' when unset.
+function shiftAuthorizedOtEnd(s) {
+  const v = s?.ot_end;
+  if (v === null || v === undefined || v === '') return null;
+  const t = String(v).slice(0,5);
+  return /^\d{2}:\d{2}$/.test(t) ? t : null;
+}
 function payrollEndTime(s, countedStart) {
   const co = s?.clock_out?.slice(0,5);
   if (!co) return co || null;
   const schedEnd = s?.scheduled_end?.slice(0,5);
+  const startM = countedStart ? toMins(countedStart) : null;
+  // v69: an explicit authorized OT end wins over the cap and over full approval.
+  const authEnd = shiftAuthorizedOtEnd(s);
+  if (authEnd && schedEnd) {
+    let endM = toMins(schedEnd), coM = toMins(co), aM = toMins(authEnd);
+    if (startM !== null) {
+      if (endM <= startM) endM += 1440;
+      if (coM  <  startM) coM  += 1440;
+      if (aM   <  startM) aM   += 1440;
+    }
+    // Clamp the authorized end between the scheduled end and the real clock-out.
+    if (aM < endM) aM = endM;
+    if (aM > coM)  aM = coM;
+    return minsToTime(aM % 1440);
+  }
   // No scheduled end, OT explicitly approved, or shift pre-dates the cap feature
   // → use the real clock-out as-is (calcHours still applies its own 15-min/5-min
   // quantization + overnight roll).
@@ -4798,7 +4838,6 @@ function payrollEndTime(s, countedStart) {
   // duration math uses: roll end and clock-out past midnight relative to the
   // counted start so a 19:00→23:00 shift with a 23:10 clock-out, and a
   // 19:00→03:00 shift with a 03:12 clock-out, both compare correctly.
-  const startM = countedStart ? toMins(countedStart) : null;
   let endM = toMins(schedEnd);
   let coM  = toMins(co);
   if (startM !== null) {
@@ -4864,7 +4903,18 @@ function payrollStartNote(s) {
   const countedOut = counted && countedEndRaw ? quantizeClockOutTime(counted, countedEndRaw) : null;
   const schedEnd = s?.scheduled_end?.slice(0,5);
   const notes = [];
-  if (actual && counted && actual !== counted) notes.push(`start counted ${counted}`);
+  // v69: arrived-on-time override note.
+  if (shiftArrivedOnTime(s) && actual && counted && actual !== counted) {
+    notes.push(`on time — start counted ${counted} (tap-in ${actual})`);
+  } else if (actual && counted && actual !== counted) {
+    notes.push(`start counted ${counted}`);
+  }
+  // v69: authorized OT end note (takes precedence over the cap/approve wording).
+  const authEnd = shiftAuthorizedOtEnd(s);
+  if (authEnd && schedEnd && actualOut && shiftOtCapApplies(s) && actualOut > schedEnd) {
+    notes.push(`OT authorized to ${authEnd} (clock-out ${actualOut})`);
+    return notes.length ? `Payroll ${notes.join(', ')}` : '';
+  }
   if (actualOut && countedOut && actualOut !== countedOut) {
     // v68c: only annotate "capped … OT not approved" for shifts the cap actually
     // governs (yesterday onward). For past shifts the cap is off, so any
@@ -5412,6 +5462,8 @@ function latePenaltyOverrideValue(s) {
 
 function effectiveLatePenalty(s) {
   if (!s || s.cancelled) return 0;
+  // v69: flagged as arrived-on-time → no late penalty, regardless of tap-in time.
+  if (shiftArrivedOnTime(s)) return 0;
   const override = latePenaltyOverrideValue(s);
   if (override !== null) return override;
   return parseFloat(calcLatePenalty(s.scheduled_start?.slice(0,5), s.clock_in?.slice(0,5)).penalty || 0);
@@ -7920,6 +7972,24 @@ function renderTimeCell(s, field) {
   // Click toggles approval (toggleShiftOT). The actual clock-out value shown is
   // always the real one; only the badge reflects the billing treatment.
   let otBadge = '';
+  // v69: "Arrived on time" toggle on the clock-in cell. If the worker was late
+  // by penalty rules but physically arrived on time (just forgot to tap in), ops
+  // taps this so payroll/billing starts at the scheduled start and the late
+  // penalty is zeroed. Shown only when the tap-in is actually late (status
+  // 'late'), or when already flagged so it can be turned back off.
+  if (field === 'clock_in') {
+    const ci = s.clock_in?.slice(0,5);
+    const ss = s.scheduled_start?.slice(0,5);
+    if (ci && ss && shiftOtCapApplies(s)) {
+      const lateStatus = (typeof calcLatePenalty === 'function')
+        ? calcLatePenalty(ss, ci).status : 'on-time';
+      if (shiftArrivedOnTime(s)) {
+        otBadge = ` <span onclick="toggleArrivedOnTime('${s.id}', false)" title="Marked arrived on time — payroll/billing starts at the scheduled start ${ss} and no late penalty applies (actual tap-in ${ci}). Click to undo." style="cursor:pointer;font-size:10px;color:var(--green);white-space:nowrap;" role="button">✅ on time</span>`;
+      } else if (lateStatus === 'late') {
+        otBadge = ` <span onclick="toggleArrivedOnTime('${s.id}', true)" title="Late tap-in ${ci} (scheduled ${ss}). If the worker actually arrived on time and just forgot to clock in, click to bill/pay from ${ss} and clear the late penalty." style="cursor:pointer;font-size:10px;color:var(--amber,#f59e0b);white-space:nowrap;" role="button">⏱ late → on time?</span>`;
+      }
+    }
+  }
   if (field === 'clock_out') {
     const co = s.clock_out?.slice(0,5);
     const se = s.scheduled_end?.slice(0,5);
@@ -7938,10 +8008,20 @@ function renderTimeCell(s, field) {
           // extra minutes are billable OT when most are just late clock-outs the
           // rounding already absorbs. So: render nothing.
           otBadge = '';
-        } else if (shiftOtApproved(s)) {
-          otBadge = ` <span onclick="toggleShiftOT('${s.id}', false)" title="Overtime approved — ${extra} min past ${se} is billed & paid. Click to remove OT (revert to ${se})." style="cursor:pointer;font-size:10px;color:var(--green);white-space:nowrap;" role="button">✅ +${extra}m OT</span>`;
         } else {
-          otBadge = ` <span onclick="toggleShiftOT('${s.id}', true)" title="Late clock-out: ${extra} min past scheduled end ${se}. Billing capped at ${se}. Click to APPROVE overtime so it's billed & paid to ${co}." style="cursor:pointer;font-size:10px;color:var(--amber,#f59e0b);white-space:nowrap;" role="button">⏱ +${extra}m → capped</span>`;
+          // v69: authorized-end input. Ops types the exact end OT was authorized
+          // to (e.g. 15:00) and billing/pay counts to that, clamped between the
+          // scheduled end and the real clock-out. Blur/Enter commits via
+          // setShiftOtEnd. Sits alongside the approve/cap badge below.
+          const authEnd = shiftAuthorizedOtEnd(s) || '';
+          const otEndInput = ` <span style="display:inline-flex;align-items:center;gap:3px;white-space:nowrap;" title="Authorized OT end. Type the time overtime was authorized to (e.g. ${se}=no OT, or a later time). Billing & pay count to this, clamped between ${se} and ${co}. Leave blank to use the cap/approve toggle.">⤓<input type="time" value="${authEnd}" onclick="event.stopPropagation();" onchange="setShiftOtEnd('${s.id}', this.value)" style="background:var(--bg3);border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:var(--mono);font-size:10px;padding:1px 3px;width:78px;"></span>`;
+          if (shiftAuthorizedOtEnd(s)) {
+            otBadge = ` <span title="OT billed & paid to the authorized end ${shiftAuthorizedOtEnd(s)} (actual clock-out ${co}, scheduled end ${se}). Clear the field to remove." style="font-size:10px;color:var(--green);white-space:nowrap;">✅ OT→${shiftAuthorizedOtEnd(s)}</span>${otEndInput}`;
+          } else if (shiftOtApproved(s)) {
+            otBadge = ` <span onclick="toggleShiftOT('${s.id}', false)" title="Overtime approved — ${extra} min past ${se} is billed & paid. Click to remove OT (revert to ${se})." style="cursor:pointer;font-size:10px;color:var(--green);white-space:nowrap;" role="button">✅ +${extra}m OT</span>${otEndInput}`;
+          } else {
+            otBadge = ` <span onclick="toggleShiftOT('${s.id}', true)" title="Late clock-out: ${extra} min past scheduled end ${se}. Billing capped at ${se}. Click to APPROVE full overtime to ${co}, or type an authorized end at right." style="cursor:pointer;font-size:10px;color:var(--amber,#f59e0b);white-space:nowrap;" role="button">⏱ +${extra}m → capped</span>${otEndInput}`;
+          }
         }
       }
     }
@@ -13427,6 +13507,69 @@ async function toggleShiftOT(id, approve) {
   toast(want ? 'Overtime approved — counted to actual clock-out.' : 'Overtime removed — counted to scheduled end.');
   await loadShifts();
 }
+// v69: set/clear an AUTHORIZED OT END time. Pass '' to clear (revert to the
+// cap/approve toggle). Optional column ot_end (text). Degrades gracefully if the
+// column is missing.
+let _otEndColumnMissing = false;
+async function setShiftOtEnd(id, value) {
+  const s = allShifts.find(x => String(x.id) === String(id));
+  if (!s) return;
+  const raw = String(value || '').slice(0,5);
+  const t = /^\d{2}:\d{2}$/.test(raw) ? raw : null;   // null clears it
+  if (_otEndColumnMissing) {
+    toast('Add the ot_end column first: alter table shifts add column ot_end text;', 'error');
+    return;
+  }
+  const { error } = await supabaseClient.from('shifts')
+    .update({ ot_end: t, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error && /ot_end/i.test(error.message || '')) {
+    _otEndColumnMissing = true;
+    toast('ot_end column missing — run: alter table shifts add column ot_end text;', 'error');
+    return;
+  }
+  if (error) { toast('Failed to set OT end: ' + error.message, 'error'); return; }
+  s.ot_end = t;
+  const se = s.scheduled_end?.slice(0,5) || '—';
+  const co = s.clock_out?.slice(0,5) || '—';
+  try {
+    await logActivity(t ? 'OT end authorized' : 'OT end cleared',
+      `${s.worker_name || '—'} at ${s.outlet || '—'} — ${t ? `billed/paid to authorized end ${t} (sched end ${se}, clock-out ${co})` : `reverted to cap/approve (sched end ${se})`}`,
+      'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  } catch(e) {}
+  toast(t ? `OT counted to authorized end ${t}.` : 'Authorized OT end cleared.');
+  await loadShifts();
+}
+// v69: toggle "arrived on time" (forgot to tap in). When true, payroll/billing
+// starts at the scheduled start and the late penalty is zeroed. Optional column
+// arrived_on_time (boolean).
+let _arrivedColumnMissing = false;
+async function toggleArrivedOnTime(id, want) {
+  const s = allShifts.find(x => String(x.id) === String(id));
+  if (!s) return;
+  const value = (want === undefined) ? !shiftArrivedOnTime(s) : !!want;
+  if (_arrivedColumnMissing) {
+    toast('Add the arrived_on_time column first: alter table shifts add column arrived_on_time boolean default false;', 'error');
+    return;
+  }
+  const { error } = await supabaseClient.from('shifts')
+    .update({ arrived_on_time: value, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error && /arrived_on_time/i.test(error.message || '')) {
+    _arrivedColumnMissing = true;
+    toast('arrived_on_time column missing — run: alter table shifts add column arrived_on_time boolean default false;', 'error');
+    return;
+  }
+  if (error) { toast('Failed to update: ' + error.message, 'error'); return; }
+  s.arrived_on_time = value;
+  const ss = s.scheduled_start?.slice(0,5) || '—';
+  const ci = s.clock_in?.slice(0,5) || '—';
+  try {
+    await logActivity(value ? 'Marked arrived on time' : 'Cleared arrived-on-time',
+      `${s.worker_name || '—'} at ${s.outlet || '—'} — ${value ? `payroll from scheduled start ${ss}, late penalty cleared (tap-in ${ci})` : `reverted to actual tap-in ${ci}`}`,
+      'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+  } catch(e) {}
+  toast(value ? `Counted as on time — payroll from ${ss}, penalty cleared.` : 'Reverted to actual tap-in.');
+  await loadShifts();
+}
 function approvalColumnMissing(error) {
   const msg = String(error?.message || error || '').toLowerCase();
   return /approval_status/.test(msg) && /(column|schema cache|does not exist|could not find)/.test(msg);
@@ -13481,6 +13624,25 @@ async function checkOtColumn() {
     }
   } catch (e) {
     if (/ot_approved/i.test(String(e?.message || e || ''))) _otColumnMissing = true;
+  }
+  // v69: probe the two new optional columns the same way.
+  try {
+    const { error } = await supabaseClient.from('shifts').select('ot_end').limit(1);
+    if (error && /ot_end/i.test(error.message || '')) {
+      _otEndColumnMissing = true;
+      console.warn('[overtime] The ot_end column is MISSING. Authorized OT end times can\'t persist until you run:  alter table shifts add column ot_end text;');
+    } else if (!error) { _otEndColumnMissing = false; }
+  } catch (e) {
+    if (/ot_end/i.test(String(e?.message || e || ''))) _otEndColumnMissing = true;
+  }
+  try {
+    const { error } = await supabaseClient.from('shifts').select('arrived_on_time').limit(1);
+    if (error && /arrived_on_time/i.test(error.message || '')) {
+      _arrivedColumnMissing = true;
+      console.warn('[attendance] The arrived_on_time column is MISSING. "Arrived on time" flags can\'t persist until you run:  alter table shifts add column arrived_on_time boolean default false;');
+    } else if (!error) { _arrivedColumnMissing = false; }
+  } catch (e) {
+    if (/arrived_on_time/i.test(String(e?.message || e || ''))) _arrivedColumnMissing = true;
   }
 }
 // Small inline tag used in worker-name cells/cards so a pending-approval booking
