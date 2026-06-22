@@ -8373,6 +8373,58 @@ function buildClockOutMessage(s, co) {
     return `CLOCK-OUT: ${String(s.worker_name||'').trim()} at ${String(s.outlet||'').trim()} — clocked out ${co}`;
   }
 }
+// ── Paid-shift cancellation alert message ────────────────────────────────────
+// When a shift that was ALREADY MARKED PAID gets cancelled, payroll must know so
+// the payout can be clawed back / reconciled. Mirrors buildClockOutMessage's
+// look so it reads consistently in the same payroll group. `s` is the shift as
+// it was BEFORE the cancellation write (so worker/rate/hours are still intact).
+function buildPaidCancellationMessage(s, opts) {
+  try {
+    const o = opts || {};
+    const workerName = String(o.worker || s.worker_name || '').trim() || 'Unknown';
+    const outlet     = String(s.outlet || '').trim();
+    const sym        = currencySymbolForOutlet(outlet) || '$';
+    const fmt = v => `${sym}${parseFloat(v || 0).toFixed(2)}`;
+    const dateStr = s.shift_date ? new Date(s.shift_date + 'T00:00:00').toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+    const ci = String(s.clock_in || '').slice(0,5);
+    const co = String(s.clock_out || '').slice(0,5);
+
+    // What was actually paid out for this shift (net), so payroll knows the amount to recover.
+    let netPaid = 0;
+    try { netPaid = parseFloat(netPaymentForShift(s) || 0); } catch(e) {}
+
+    const worker = allWorkers.find(w => String(w.name||'').toLowerCase() === workerName.toLowerCase());
+    const payInfo = worker ? `${worker.bank_method || 'PayNow'} ${worker.bank_details || ''}`.trim() : '—';
+
+    const kind = o.cancelType === 'outlet_bypass' ? 'Outlet/client cancellation'
+      : o.cancelType === 'worker_mc'       ? 'Worker cancellation (MC)'
+      : o.cancelType === 'worker_goodwill' ? 'Worker cancellation (good-will)'
+      : 'Worker cancellation';
+    const penaltyAmount = parseFloat(o.penaltyAmount || 0);
+
+    let lines = [];
+    lines.push('*⚠️ PAID SHIFT CANCELLED*');
+    lines.push('This shift was already marked *PAID* — payroll to review / recover.');
+    lines.push('---');
+    lines.push(`Worker: ${workerName}`);
+    lines.push(`Outlet: ${outlet}`);
+    lines.push(`Date: ${dateStr}`);
+    if (s.scheduled_start || s.scheduled_end) {
+      lines.push(`Scheduled: ${String(s.scheduled_start||'').slice(0,5)}–${String(s.scheduled_end||'').slice(0,5)}`);
+    }
+    if (ci || co) lines.push(`Clock-in: ${ci || '—'}  Clock-out: ${co || '—'}`);
+    lines.push('---');
+    lines.push(`Cancellation: ${kind}`);
+    if (penaltyAmount > 0) lines.push(`Penalty: ${fmt(penaltyAmount)}`);
+    lines.push(`*Amount paid out: ${fmt(netPaid)}*`);
+    lines.push(`Paid to: ${payInfo}`);
+    return lines.join('\n');
+  } catch(e) {
+    console.error('[WA] buildPaidCancellationMessage error:', e);
+    return `PAID SHIFT CANCELLED: ${String(s.worker_name||'').trim()} at ${String(s.outlet||'').trim()} — this shift was already marked PAID, payroll to review.`;
+  }
+}
+
 // ── WhatsApp / Periskope Settings ────────────────────────────────────────────
 function switchWaTab(tab) {
   document.getElementById('wa-panel-periskope').style.display = tab === 'periskope' ? '' : 'none';
@@ -11297,6 +11349,12 @@ async function confirmCancel() {
   // v57: capture before closeCancelModal() nulls it, so the import-row ack still
   // fires after the modal closes.
   const _ackImportKey = _pendingCancelImportRowKey;
+  // v70: snapshot of the shift BEFORE any cancellation write, and whether it was
+  // already marked paid — used to alert payroll on WhatsApp that a PAID shift was
+  // cancelled (money to recover). Snapshot now because the worker path below
+  // mutates worker_name/rate/clock fields.
+  const _wasPaid = !!s.is_paid;
+  const _paidSnapshot = Object.assign({}, s);
 
   const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
   const isOutletBypass = type === 'outlet_bypass';
@@ -11322,6 +11380,13 @@ async function confirmCancel() {
       `Shift for ${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_ocDate} was cancelled by outlet and removed from schedule.`,
       'shift', pendingCancelId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
     );
+    if (_wasPaid) {
+      try {
+        await notifyPayrollClockOut(buildPaidCancellationMessage(_paidSnapshot, {
+          cancelType: 'outlet_bypass', worker: _paidSnapshot.worker_name, penaltyAmount: 0
+        }));
+      } catch (e) { console.warn('[WA] paid-cancel alert (outlet) failed:', e); }
+    }
     closeCancelModal();
     await loadShifts();
     toast('Outlet-cancelled shift removed from schedule');
@@ -11382,6 +11447,16 @@ async function confirmCancel() {
     `${originalWorker || 'Worker'} cancelled shift at ${s.outlet || '—'} on ${_wcDate} ${s.scheduled_start?.slice(0,5)||''}${cancelDetailTail}. Slot returned to Available.`,
     'shift', pendingCancelId, { shift_date: s.shift_date, worker_name: originalWorker, outlet: s.outlet }
   );
+
+  // v70: if this shift was already marked PAID, alert payroll so the payout can be
+  // recovered / reconciled. Uses the pre-cancellation snapshot for accurate figures.
+  if (_wasPaid) {
+    try {
+      await notifyPayrollClockOut(buildPaidCancellationMessage(_paidSnapshot, {
+        cancelType: type, worker: originalWorker, penaltyAmount: (isPenalty ? penaltyAmount : 0)
+      }));
+    } catch (e) { console.warn('[WA] paid-cancel alert (worker) failed:', e); }
+  }
 
   // Clear any dispute/late flags on this slot now that the cancellation is processed,
   // and mark it as Replacement-needed so the now-Available slot still surfaces in the
