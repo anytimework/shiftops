@@ -1,6 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v66 (AI BATCH ACTIONS + TOLERANT PARSING) — Fixes the "❌ Action 1 failed: JSON Parse error" + 12-vs-13 miscount seen when the AI changed many shift rates at once. ROOT CAUSE: a bulk request made the model emit many JSON action objects (often newline-separated inside one ```action``` fence, sometimes with a trailing comma/smart quote); executeAIAction did a bare JSON.parse() which can only parse ONE value, so the block threw and aborted. THREE changes: (1) parseActionObjects() — tolerant parser that splits a block into multiple top-level {…} objects (brace-aware, ignores braces inside strings), strips trailing commas, normalises smart quotes, drops the odd 'json' label, and SKIPS any single unparseable object instead of failing the batch. executeAIAction now takes a pre-parsed object; renderAIReply flattens all blocks via parseActionObjects and iterates objects (batch counts are now correct). (2) New setShiftRateBatch action — bulk rate change by outlet (+ optional worker/date-range/status=upcoming) in ONE Supabase .in() update, country-scoped, non-cancelled only, with activity log; reports how many changed. The model is told to use it for "make all X rates $Y" instead of emitting a long list of single setShiftRate blocks (which is what triggered the parse error). (3) Prompt: rate guidance rewritten to prefer the batch action and never emit more than a couple of action objects per reply. Only executeAIAction's signature, the renderAIReply action loop, the new action case, and the rates prompt line changed; aiQueryShifts (v65 formatting), loadShifts, buildSystemContext, resolveAIShift and all other handlers untouched. node --check passes; 8/8 parser cases pass incl. the 13-objects-one-bad scenario. -->
+
+<!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
+
 <!-- Build patch: v64.1 (AI PROMPT HARDENING) — Tightens the v64 cross-date rule after a live test showed the AI hedging ("I don't see any upcoming shifts in the visible schedule") and reaching for searchWorker (which returns a PROFILE, not shifts) instead of queryShifts. The cross-date RULE now: (a) forbids answering shift questions from SYSTEM CONTEXT or implying the on-screen window is the full DB, (b) forbids the "I don't see anything in the visible schedule / next 14 days" phrasing, (c) requires queryShifts as the FIRST action with no preamble for any upcoming/date/outlet/status shift question, (d) explicitly bars searchWorker for "does X have shifts" (searchWorker is profile-only). The searchWorker rule is scoped to profile/contact lookups. No JS logic changed — prompt text only; queryShifts/resolveAIShift/setShiftRate from v64 are intact and dispatched. node --check passes. -->
 <!-- Build patch: v64 (AI CROSS-VIEW + RATE) — Makes the AI chatbot operate on the FULL database, not just the date window currently on screen. ROOT CAUSE of "it can only see my current view": buildSystemContext() builds the AI's worldview from allShifts, but loadShifts() only fetches the viewed day/week from Supabase, so future/other-date shifts simply weren't in context, and any shiftId-keyed action (cancel/clockIn/clockOut/addNote/markPaid) did allShifts.find(...) which missed shifts outside that window. THREE additions, all additive: (1) New queryShifts action + aiQueryShifts(): live Supabase query the AI runs for any worker / outlet / date range / status (upcoming|cancelled|completed|open|all), country-scoped, returning matching shifts WITH ids — so "what are <worker>'s upcoming shifts" now pulls real future data. System prompt gains a top RULE forcing queryShifts for any cross-date/future question instead of guessing from the limited view. (2) resolveAIShift(id): checks allShifts + taskShiftCache, then falls back to a direct single-row Supabase fetch (country-scoped) so cancelShift/clockIn/clockOut/addNote/markPaid/setShiftRate work on ANY shift regardless of the viewed date. The 5 view-bound lookups were re-pointed to it. (3) New setShiftRate action: updates a specific shift's client rate (s.rate) by id with confirm-before-write + activity log; AI is told to queryShifts first to find the id and confirm old→new before applying. Exactly 6 original lines changed (5 lookups + default anchor), ~92 added, zero deletions of existing logic. node --check passes on the main script block. NOTE: the worker-facing Periskope "what shifts are available today/tomorrow" auto-reply is a SEPARATE server-side Edge Function (periskope-webhook) and is delivered as a standalone deployable handler, not in this file. -->
 
@@ -18376,6 +18380,10 @@ function renderKnowledgePage() {
 }
 
 let aiHistory  = []; // {role, content} for Claude API
+// Sentinel prefixing informational (non-success, non-error) action results such
+// as queryShifts output, so the renderer styles them as a normal bot bubble and
+// the success/error counters don't miscategorise them. Stripped before display.
+const AI_INFO_PREFIX = '\u2139\uFE0F\u200B'; // ℹ️ + zero-width space (unlikely to collide)
 
 function toggleAIChat() {
   aiChatOpen = !aiChatOpen;
@@ -18554,6 +18562,7 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "listOutletRequirements", "outlet": "<exact outlet name from DB>"}
 {"type": "queryShifts", "workerName": "<partial/full name or omit>", "outlet": "<partial/full outlet or omit>", "dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD", "status": "upcoming|cancelled|completed|open|all"}
 {"type": "setShiftRate", "shiftId": "<id>", "rate": 16.50}
+{"type": "setShiftRateBatch", "outlet": "<outlet, partial ok>", "workerName": "<optional, partial>", "dateFrom": "<optional YYYY-MM-DD>", "dateTo": "<optional YYYY-MM-DD>", "status": "<optional: upcoming>", "rate": 12.00}
 \`\`\`
 
 SCHEDULE CONFLICT RULES:
@@ -18590,8 +18599,9 @@ RULES:
    • Do NOT answer from SYSTEM CONTEXT and THEN offer to look up — just run queryShifts first and answer from its result.
    • Do NOT use searchWorker to answer a shift question. searchWorker returns a PROFILE (phone, pay method), not shifts. To find a person's shifts you MUST use queryShifts. searchWorker is ONLY for confirming a worker exists / getting their contact details, never for "do they have shifts".
    • For "upcoming shifts for <name>": output {"type":"queryShifts","workerName":"<name>","dateFrom":"<today's date>","status":"upcoming"} and nothing else, then report what comes back.
-   The queryShifts result includes each shift's id, usable for cancelShift, setShiftRate, clockIn/out, addNote — all of which now work on ANY shift regardless of the viewed date.
-- ADJUSTING RATES: To change the pay/charge rate on a specific shift, use setShiftRate with that shift's id and the new hourly rate (client rate). If you don't have the id, run queryShifts first to find it. If multiple shifts match, list them with their dates/outlets and ask which one before changing. Always confirm the worker, outlet, date and the old→new rate with the user before applying, then act on "yes/confirm".
+   The queryShifts result is AUTOMATICALLY rendered as a clean, formatted list for the user (grouped by date, with outlet, time and rate) — so you do NOT need to re-type the shifts out. After a queryShifts action, keep your own text very short or empty (e.g. a one-line summary like "Here are her upcoming shifts:" before the action, or nothing after). Do NOT paste the raw shift lines or ids back to the user.
+   The result also gives YOU each shift's id behind the scenes, usable for cancelShift, setShiftRate, clockIn/out, addNote — all of which now work on ANY shift regardless of the viewed date. For a follow-up like "change her 26 Jun Pasta Bar rate to 14", match the date+outlet to the right id from the most recent lookup and call setShiftRate; if it's ambiguous or you don't have it, run queryShifts again first.
+- ADJUSTING RATES: To change the rate on ONE specific shift, use setShiftRate with that shift's id and the new hourly rate (client rate). If you don't have the id, run queryShifts first; if several match, list them and ask which one. To change the rate on MANY shifts at once — e.g. "make all Breadtalk Events rates $12", "set every upcoming Pasta Bar shift for Delphine to $14" — use ONE setShiftRateBatch action (outlet + optional workerName/dateFrom/dateTo/status), NOT a long list of individual setShiftRate blocks. setShiftRateBatch updates them all in a single operation and reports how many changed, so it's faster and can't partly fail. Always confirm the scope (outlet, who, date range) and the new rate with the user before applying, then act on "yes/confirm". Never emit more than a couple of action objects in one reply — for anything bulk, use the batch action.
 - Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
 - BEFORE creating a shift: confirm with the user by showing the worker's full name AND phone number from the WORKERS list, plus the exact outlet name. Wait for "yes/confirm" before executing.
 - BEFORE creating an available slot or batch of slots: confirm outlet name, dates, and times with the user, then execute on confirmation.
@@ -18683,25 +18693,118 @@ async function aiQueryShifts(a) {
     else if (status === 'cancelled')rows = rows.filter(s => s.cancelled);
     else if (status === 'completed')rows = rows.filter(s => s.clock_in && s.clock_out && !s.cancelled);
     else if (status === 'open')     rows = rows.filter(s => isOpenSlot(s));
-    if (!rows.length) return `No shifts found for that query.`;
+    if (!rows.length) return `${AI_INFO_PREFIX}No shifts found for that query.`;
+
     const sym = (o) => currencySymbolForOutlet(o);
-    const lines = rows.slice(0, 80).map(s =>
-      `[${s.shift_date} ${s.scheduled_start?.slice(0,5)||'?'}-${s.scheduled_end?.slice(0,5)||'?'}] ` +
-      `${s.worker_name||'Available'} @ ${s.outlet||'?'} | ` +
-      `rate:${sym(s.outlet)}${parseFloat(s.rate||0).toFixed(2)} ` +
-      `CI:${s.clock_in?.slice(0,5)||'—'} CO:${s.clock_out?.slice(0,5)||'—'} ` +
-      `${s.cancelled?'CANCELLED ':''}${isOpenSlot(s)?'OPEN-SLOT ':''}id:${s.id}`
-    ).join('\n');
-    const more = rows.length > 80 ? `\n… and ${rows.length - 80} more (narrow the dates/outlet to see them).` : '';
-    return `Found ${rows.length} shift(s):\n${lines}${more}`;
+    const shown = rows.slice(0, 80);
+
+    // Short readable date like "Mon 23 Jun" from a YYYY-MM-DD string.
+    const niceDate = (ds) => {
+      try {
+        const d = new Date(ds + 'T00:00:00');
+        return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+      } catch(e) { return ds; }
+    };
+
+    // Group rows by date for a tidy, scannable layout.
+    const byDate = {};
+    shown.forEach(s => { (byDate[s.shift_date] ||= []).push(s); });
+    const dateKeys = Object.keys(byDate).sort();
+
+    // Optional one-line summary (worker + outlet spread) when it's a single worker.
+    const workerNames = [...new Set(shown.map(s => (s.worker_name||'').trim()).filter(Boolean))];
+    const outletNames = [...new Set(shown.map(s => (s.outlet||'').trim()).filter(Boolean))];
+    let summary = '';
+    if (workerNames.length === 1) {
+      summary = `<div class="aiq-summary"><strong>${escapeHtml(workerNames[0])}</strong> — ${rows.length} ${status !== 'all' ? status + ' ' : ''}shift${rows.length===1?'':'s'}${outletNames.length ? ` across ${outletNames.map(escapeHtml).join(', ')}` : ''}</div>`;
+    } else {
+      summary = `<div class="aiq-summary">${rows.length} ${status !== 'all' ? status + ' ' : ''}shift${rows.length===1?'':'s'} found</div>`;
+    }
+
+    let html = summary + `<div class="aiq-list">`;
+    for (const ds of dateKeys) {
+      html += `<div class="aiq-day"><div class="aiq-day-head">📅 ${escapeHtml(niceDate(ds))}</div>`;
+      for (const s of byDate[ds]) {
+        const st = s.scheduled_start?.slice(0,5) || '?';
+        const en = s.scheduled_end?.slice(0,5) || '?';
+        const rate = `${sym(s.outlet)}${parseFloat(s.rate||0).toFixed(2)}`;
+        const who = s.worker_name && s.worker_name.toLowerCase() !== 'available' ? '' : `<span class="aiq-open">OPEN</span> `;
+        const tags = [];
+        if (s.cancelled) tags.push(`<span class="aiq-tag aiq-cancel">cancelled</span>`);
+        if (s.clock_in && s.clock_out) tags.push(`<span class="aiq-tag aiq-done">done</span>`);
+        else if (s.clock_in) tags.push(`<span class="aiq-tag aiq-live">clocked in</span>`);
+        const tagHtml = tags.length ? ' ' + tags.join(' ') : '';
+        // The id is kept ONLY in the hidden SHIFT_IDS comment (consumed for the
+        // AI's memory, stripped before display) — not on the visible row — so no
+        // UUID ever lands in the user-facing message.
+        html += `<div class="aiq-row">`
+              + `<span class="aiq-time">${st}–${en}</span> `
+              + `${who}<span class="aiq-outlet">${escapeHtml(s.outlet||'?')}</span> `
+              + `<span class="aiq-rate">${rate}/hr</span>${tagHtml}`
+              + `</div>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+    if (rows.length > 80) html += `<div class="aiq-more">…and ${rows.length - 80} more — narrow the dates or outlet to see them.</div>`;
+
+    // Hidden machine-readable id map appended as an HTML comment so the AI's
+    // own reasoning (and any copy of the rendered text) can still resolve a
+    // described shift to its id for follow-up actions, without showing UUIDs.
+    const idMap = shown.map(s => `${s.shift_date} ${s.scheduled_start?.slice(0,5)||''} ${s.outlet||''} = ${s.id}`).join(' | ');
+    html += `<!--SHIFT_IDS ${escapeHtml(idMap)} -->`;
+
+    return `${AI_INFO_PREFIX}${html}`;
   } catch (e) {
     return `❌ Query failed: ${e.message}`;
   }
 }
 
 // Parse and execute action blocks from Claude's response
-async function executeAIAction(actionJson) {
-  const a = JSON.parse(actionJson);
+// Tolerantly parse one action block that may contain ONE or MANY JSON objects.
+// Claude sometimes emits several action objects (one per line, or concatenated)
+// inside a single ```action``` fence, or slips in a trailing comma / smart quote
+// — a bare JSON.parse() then throws and fails the whole batch. This returns an
+// array of parsed action objects, skipping any single malformed one.
+function parseActionObjects(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return [];
+  // Normalise smart quotes and strip an accidental leading "json" label.
+  s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'").replace(/^json\s*/i, '');
+  // Fast path: a single clean object or a proper JSON array.
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? v : [v];
+  } catch (_e) { /* fall through to multi-object scanning */ }
+  // Scan for balanced top-level { ... } objects and parse each independently.
+  const objs = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') { if (depth === 0) start = i; depth++; }
+    else if (c === '}') {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        let chunk = s.slice(start, i + 1);
+        // Drop trailing commas before } or ] which JSON.parse rejects.
+        chunk = chunk.replace(/,(\s*[}\]])/g, '$1');
+        try { objs.push(JSON.parse(chunk)); }
+        catch (e) { console.warn('[AI] skipped unparseable action object:', chunk.slice(0, 120)); }
+        start = -1;
+      }
+    }
+  }
+  return objs;
+}
+
+async function executeAIAction(a) {
   switch (a.type) {
 
     case 'clockIn': {
@@ -19141,7 +19244,41 @@ async function executeAIAction(actionJson) {
       return `✅ Rate updated for **${s.worker_name||'Available'} @ ${s.outlet}** on ${s.shift_date}: ${sym}${oldRate.toFixed(2)} → **${sym}${newRate.toFixed(2)}/hr**`;
     }
 
+    case 'setShiftRateBatch': {
+      // Bulk rate change in ONE query — e.g. "make all Breadtalk Events rates
+      // $12". Filters by outlet (required, partial match) and optionally worker
+      // and a date range. Country-scoped. Only updates non-cancelled shifts.
+      const newRate = parseFloat(a.rate);
+      if (!(newRate >= 0)) return `❌ Invalid rate "${a.rate}". Give a number like 12.00.`;
+      if (!a.outlet) return `❌ setShiftRateBatch needs an outlet.`;
+      let q = supabaseClient.from('shifts').select('*').ilike('outlet', `%${a.outlet}%`).neq('cancelled', true);
+      if (a.workerName) q = q.ilike('worker_name', `%${a.workerName}%`);
+      if (a.dateFrom)   q = q.gte('shift_date', a.dateFrom);
+      if (a.dateTo)     q = q.lte('shift_date', a.dateTo);
+      const { data: matches, error: selErr } = await q;
+      if (selErr) return `❌ Lookup failed: ${selErr.message}`;
+      let rows = scopeShiftsToCountry(matches || []);
+      if (a.status === 'upcoming') {
+        const todayStr = formatDate(new Date());
+        rows = rows.filter(s => s.shift_date >= todayStr);
+      }
+      if (!rows.length) return `❌ No matching shifts to update for "${a.outlet}"${a.workerName ? ` / ${a.workerName}` : ''}.`;
+      const ids = rows.map(s => s.id);
+      const { error: updErr } = await supabaseClient.from('shifts')
+        .update({ rate: newRate, updated_at: new Date().toISOString() })
+        .in('id', ids);
+      if (updErr) return `❌ Batch update failed: ${updErr.message}`;
+      const sym = currencySymbolForOutlet(rows[0].outlet);
+      const outletLabel = [...new Set(rows.map(s => s.outlet))].join(', ');
+      await logActivity('AI: Batch rate change',
+        `${ids.length} shift(s) at ${outletLabel}${a.workerName ? ` for ${a.workerName}` : ''} set to ${sym}${newRate.toFixed(2)}/hr`,
+        'shift', null, { outlet: outletLabel });
+      await loadShifts();
+      return `✅ **${ids.length} shift(s)** at **${outletLabel}**${a.workerName ? ` for **${a.workerName}**` : ''} updated to **${sym}${newRate.toFixed(2)}/hr**`;
+    }
+
     default:
+      return `❓ Unknown action: ${a.type}`;
   }
 }
 
@@ -19159,24 +19296,54 @@ async function renderAIReply(reply) {
 
   aiAddMsg(displayText, 'bot');
 
+  // Flatten every ```action``` block into a flat list of parsed action objects.
+  // A single block may legitimately contain several objects; parseActionObjects
+  // splits and sanitises them and silently drops any one that is unparseable, so
+  // a malformed object in a big batch no longer throws "JSON Parse error" and
+  // aborts everything.
+  const actions = [];
+  for (const m of actionMatches) {
+    const objs = parseActionObjects(m[1]);
+    for (const o of objs) if (o && o.type) actions.push(o);
+  }
+
   // Show a progress indicator when multiple actions are being executed
   let progressEl = null;
-  if (actionMatches.length > 1) {
-    progressEl = aiAddMsg(`⏳ Executing ${actionMatches.length} actions...`, 'bot');
+  if (actions.length > 1) {
+    progressEl = aiAddMsg(`⏳ Executing ${actions.length} actions...`, 'bot');
   }
 
   let successCount = 0;
   const errors = [];
-  for (let i = 0; i < actionMatches.length; i++) {
+  const historyNotes = []; // plain-text results fed back to the AI for context
+  for (let i = 0; i < actions.length; i++) {
     try {
-      const result = await executeAIAction(actionMatches[i][1].trim());
+      const result = await executeAIAction(actions[i]);
       if (result) {
-        if (result.startsWith('✅')) successCount++;
-        else errors.push(result);
-        // Only show individual results for small batches (≤3)
-        if (actionMatches.length <= 3) {
-          const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-          aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
+        const isInfo = result.startsWith(AI_INFO_PREFIX);
+        if (isInfo) {
+          // Informational result (e.g. queryShifts) — already HTML, render as a
+          // normal bot bubble. Strip the sentinel and the hidden id-map comment.
+          const stripped = result.slice(AI_INFO_PREFIX.length);
+          if (actions.length <= 3) {
+            const infoHtml = stripped.replace(/<!--SHIFT_IDS[\s\S]*?-->/g, '');
+            aiAddMsg(infoHtml, 'bot');
+          }
+          // For the AI's memory: hand back a compact plain-text id map (from the
+          // hidden comment) so a follow-up like "change the 26 Jun one" can map
+          // to a shift id without re-querying or showing UUIDs to the user.
+          const idm = stripped.match(/<!--SHIFT_IDS([\s\S]*?)-->/);
+          if (idm) historyNotes.push(`[shift lookup results — date time outlet = id]\n${idm[1].trim()}`);
+          // Not counted as success or error — it's neutral information.
+        } else {
+          if (result.startsWith('✅')) successCount++;
+          else errors.push(result);
+          historyNotes.push(result.replace(/\*\*/g, ''));
+          // Only show individual results for small batches (≤3)
+          if (actions.length <= 3) {
+            const resultHtml = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+            aiAddMsg(resultHtml, result.startsWith('✅') ? 'bot' : 'error');
+          }
         }
       }
     } catch(e) {
@@ -19184,13 +19351,20 @@ async function renderAIReply(reply) {
     }
   }
 
+  // Feed the action outcomes back into the conversation so the AI has them on
+  // the next turn (e.g. to resolve "the 26 Jun Pasta Bar shift" to its id for a
+  // rate change). Kept out of the visible chat — it's context for the model.
+  if (historyNotes.length) {
+    aiHistory.push({ role: 'user', content: `(system: action results for your reference, do not repeat verbatim)\n${historyNotes.join('\n\n')}` });
+  }
+
   // For large batches, show a summary instead of individual messages
-  if (actionMatches.length > 3) {
+  if (actions.length > 3) {
     if (progressEl) progressEl.remove();
-    let summary = `✅ **${successCount} of ${actionMatches.length} actions completed successfully.**`;
+    let summary = `✅ **${successCount} of ${actions.length} actions completed successfully.**`;
     if (errors.length) summary += `<br>⚠️ ${errors.length} error(s):<br>` + errors.map(e => escapeHtml(e)).join('<br>');
     aiAddMsg(summary.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'), successCount > 0 ? 'bot' : 'error');
-  } else if (errors.length && actionMatches.length <= 3) {
+  } else if (errors.length && actions.length <= 3) {
     errors.forEach(e => aiAddMsg(e, 'error'));
   }
 }
@@ -23220,6 +23394,22 @@ async function initTeamChat() {
 .ai-msg-bot { background:var(--bg3); color:var(--text); align-self:flex-start; border-bottom-left-radius:3px; }
 .ai-msg-user { background:var(--teal); color:#fff; align-self:flex-end; border-bottom-right-radius:3px; }
 .ai-msg-error { background:rgba(232,64,64,0.15); color:var(--red); align-self:flex-start; border-bottom-left-radius:3px; }
+/* Formatted queryShifts result (v65) */
+.aiq-summary { font-size:12px; color:var(--text2); margin-bottom:8px; }
+.aiq-summary strong { color:var(--text); }
+.aiq-list { display:flex; flex-direction:column; gap:8px; }
+.aiq-day-head { font-size:11px; font-weight:600; color:var(--text2); margin:2px 0 3px; }
+.aiq-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; padding:3px 0 3px 8px;
+  border-left:2px solid var(--border2); margin-bottom:2px; }
+.aiq-time { font-family:var(--mono,monospace); font-size:11.5px; color:var(--text); min-width:84px; }
+.aiq-outlet { color:var(--text); font-weight:500; }
+.aiq-rate { color:var(--green); font-size:11.5px; }
+.aiq-open { color:var(--teal); font-weight:600; font-size:10.5px; }
+.aiq-tag { font-size:10px; padding:1px 6px; border-radius:8px; }
+.aiq-tag.aiq-cancel { background:rgba(232,64,64,0.18); color:var(--red); }
+.aiq-tag.aiq-done { background:rgba(120,120,120,0.18); color:var(--text3); }
+.aiq-tag.aiq-live { background:rgba(40,180,99,0.18); color:var(--green); }
+.aiq-more { font-size:11px; color:var(--text3); margin-top:6px; font-style:italic; }
 .ai-quick-btn { font-size:11px; padding:4px 9px; background:var(--bg3); border:1px solid var(--border2);
   border-radius:12px; color:var(--text2); cursor:pointer; white-space:nowrap; }
 .ai-quick-btn:hover { border-color:var(--teal); color:var(--teal); }
