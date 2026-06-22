@@ -7412,6 +7412,30 @@ function renderTable() {
       matchesMetricFilter(s) && _matchSearch(s) &&
       !(shiftIsPendingApproval(s) && _isUnassignedSlot(s))
     );
+    // Surface open slots for the VIEWED DAY directly in the attendance log as "Available"
+    // rows. Same-day open slots from the day-scoped allShifts already appear; this also
+    // pulls in any open slot for THIS date that lives in `availableSlots` (loaded across
+    // today + all upcoming) but was missed by the day-scoped shifts query — e.g. an open
+    // slot just saved from Import Bookings. Strictly limited to the currently viewed date
+    // so other dates' open slots never bleed into the log (those stay in the popup). Only
+    // on the default 'all' view (payroll metric tabs gate on isPayableShift) and day view.
+    // De-duped by id against rows already present.
+    if ((!activeMetricFilter || activeMetricFilter === 'all') && attendanceView !== 'week') {
+      const viewedDate = formatDate(currentDate);
+      const presentIds = new Set(rows.map(s => String(s.id)));
+      const extraOpen = (availableSlots || []).filter(s =>
+        s && String(s.shift_date || '') === viewedDate &&
+        !presentIds.has(String(s.id)) &&
+        !(shiftIsPendingApproval(s) && _isUnassignedSlot(s)) &&
+        _matchSearch(s)
+      );
+      if (extraOpen.length) {
+        rows = rows.concat(extraOpen).sort((a, b) => {
+          const ta = String(a.scheduled_start || ''), tb = String(b.scheduled_start || '');
+          return ta < tb ? -1 : ta > tb ? 1 : 0;
+        });
+      }
+    }
   }
   // When viewing Clocked-In tab, sort by earliest scheduled clock-out time (ascending)
   // so ops team can see who is clocking out first at the top
@@ -8853,8 +8877,11 @@ async function autoSendShiftReminders() {
     if (!phone) continue;
     const r = shiftReminders[s.id] || {};
 
-    // 🌙 Night reminder: send to tomorrow's workers between 7 PM (1140) and 10 PM (1320)
-    if (s.shift_date === tomorrowStr && !r.nightSent && nowMins >= 1140 && nowMins < 1320) {
+    // 🌙 Night reminder: send to tomorrow's workers at 9 PM (21:00). Tight 21:00–21:05
+    // window so the once-per-minute sweep fires it right at 9pm; the !r.nightSent guard
+    // (deduped team-wide via persistReminder) ensures it's sent once only, even if the
+    // panel is open across several ticks. (Was previously the 7pm–10pm window 1140–1320.)
+    if (s.shift_date === tomorrowStr && !r.nightSent && nowMins >= 1260 && nowMins < 1265) {
       const ok = await sendPeriskopeMessage(phone, buildNightReminderMessage(s));
       if (ok) {
         if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
@@ -8865,11 +8892,14 @@ async function autoSendShiftReminders() {
       }
     }
 
-    // ⏰ Clock-in reminder: send 60-90 min before shift start on the day
+    // ⏰ Clock-in reminder: send 3 hours before shift start on the day. Window runs
+    // from 180 min before start up to 15 min before, so the first qualifying minute-tick
+    // inside that span sends it (once only, via the !r.clockinSent guard). Previously
+    // this window started 90 min before; widened to 3 hours per ops request.
     if (s.shift_date === todayStr && !r.clockinSent && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
-      if (nowMins >= shiftMins - 90 && nowMins < shiftMins - 15) {
+      if (nowMins >= shiftMins - 180 && nowMins < shiftMins - 15) {
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
@@ -10031,7 +10061,7 @@ function openEditRow(id) {
 
 // Inline worker assignment for Available slots (without opening full edit)
 function openAssignWorkerInline(id) {
-  const s = allShifts.find(x => x.id === id);
+  const s = (typeof findShiftAnywhere === 'function') ? findShiftAnywhere(id) : allShifts.find(x => x.id === id);
   if (!s) return;
   const wnCell = document.getElementById(`wn-disp-${id}`);
   if (!wnCell) { openEditRow(id); return; } // fallback to full edit
@@ -10048,7 +10078,7 @@ function openAssignWorkerInline(id) {
   setTimeout(() => document.getElementById(`assign-wn-${id}`)?.focus(), 50);
 }
 async function confirmAssignWorker(id) {
-  const s = allShifts.find(x => x.id === id);
+  const s = (typeof findShiftAnywhere === 'function') ? findShiftAnywhere(id) : allShifts.find(x => x.id === id);
   if (!s) return;
   const input = document.getElementById(`assign-wn-${id}`);
   const typed = input ? input.value.trim() : '';
@@ -10089,7 +10119,7 @@ function cancelAssignWorker(id) {
 // ── Assign with Special Rate (own member, sr_rate set, sr_worker null) ──────
 let pendingAssignSRId = null;
 function openAssignSRModal(id) {
-  const s = allShifts.find(x => x.id === id);
+  const s = (typeof findShiftAnywhere === 'function') ? findShiftAnywhere(id) : allShifts.find(x => x.id === id);
   if (!s) return;
   pendingAssignSRId = id;
   document.getElementById('assign-sr-info').innerHTML =
@@ -11188,6 +11218,10 @@ function findShiftAnywhere(id) {
   let s = (Array.isArray(allShifts) ? allShifts : []).find(x => String(x.id) === sid);
   if (s) return s;
   s = (Array.isArray(pendingApprovalAll) ? pendingApprovalAll : []).find(x => String(x.id) === sid);
+  if (s) return s;
+  // Upcoming open slots surfaced in the attendance log come from availableSlots
+  // (future-dated, not in the day-scoped allShifts), so resolve them here too.
+  s = (Array.isArray(availableSlots) ? availableSlots : []).find(x => String(x.id) === sid);
   return s || null;
 }
 function openCancelModal(id, workerName, outlet, sched) {
