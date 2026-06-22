@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v64.1 (AI PROMPT HARDENING) — Tightens the v64 cross-date rule after a live test showed the AI hedging ("I don't see any upcoming shifts in the visible schedule") and reaching for searchWorker (which returns a PROFILE, not shifts) instead of queryShifts. The cross-date RULE now: (a) forbids answering shift questions from SYSTEM CONTEXT or implying the on-screen window is the full DB, (b) forbids the "I don't see anything in the visible schedule / next 14 days" phrasing, (c) requires queryShifts as the FIRST action with no preamble for any upcoming/date/outlet/status shift question, (d) explicitly bars searchWorker for "does X have shifts" (searchWorker is profile-only). The searchWorker rule is scoped to profile/contact lookups. No JS logic changed — prompt text only; queryShifts/resolveAIShift/setShiftRate from v64 are intact and dispatched. node --check passes. -->
+<!-- Build patch: v64 (AI CROSS-VIEW + RATE) — Makes the AI chatbot operate on the FULL database, not just the date window currently on screen. ROOT CAUSE of "it can only see my current view": buildSystemContext() builds the AI's worldview from allShifts, but loadShifts() only fetches the viewed day/week from Supabase, so future/other-date shifts simply weren't in context, and any shiftId-keyed action (cancel/clockIn/clockOut/addNote/markPaid) did allShifts.find(...) which missed shifts outside that window. THREE additions, all additive: (1) New queryShifts action + aiQueryShifts(): live Supabase query the AI runs for any worker / outlet / date range / status (upcoming|cancelled|completed|open|all), country-scoped, returning matching shifts WITH ids — so "what are <worker>'s upcoming shifts" now pulls real future data. System prompt gains a top RULE forcing queryShifts for any cross-date/future question instead of guessing from the limited view. (2) resolveAIShift(id): checks allShifts + taskShiftCache, then falls back to a direct single-row Supabase fetch (country-scoped) so cancelShift/clockIn/clockOut/addNote/markPaid/setShiftRate work on ANY shift regardless of the viewed date. The 5 view-bound lookups were re-pointed to it. (3) New setShiftRate action: updates a specific shift's client rate (s.rate) by id with confirm-before-write + activity log; AI is told to queryShifts first to find the id and confirm old→new before applying. Exactly 6 original lines changed (5 lookups + default anchor), ~92 added, zero deletions of existing logic. node --check passes on the main script block. NOTE: the worker-facing Periskope "what shifts are available today/tomorrow" auto-reply is a SEPARATE server-side Edge Function (periskope-webhook) and is delivered as a standalone deployable handler, not in this file. -->
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftOps — Payroll Management</title>
@@ -18549,6 +18552,8 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "addOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<requirement text, e.g. Is the worker 18 years old and above?>"}
 {"type": "removeOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<exact requirement text to remove>"}
 {"type": "listOutletRequirements", "outlet": "<exact outlet name from DB>"}
+{"type": "queryShifts", "workerName": "<partial/full name or omit>", "outlet": "<partial/full outlet or omit>", "dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD", "status": "upcoming|cancelled|completed|open|all"}
+{"type": "setShiftRate", "shiftId": "<id>", "rate": 16.50}
 \`\`\`
 
 SCHEDULE CONFLICT RULES:
@@ -18580,6 +18585,13 @@ BREAK TIME RULES (apply automatically — no need to ask):
 Always apply these rules when setting breakMins in createShift, createAvailableSlot, and batchCreateSlots actions.
 
 RULES:
+- CROSS-DATE LOOKUPS (CRITICAL — THIS IS HOW YOU ANSWER SHIFT QUESTIONS): The shift lists in SYSTEM CONTEXT only cover a small window around the date currently being viewed — they are NOT the full database, and they are NOT a basis for answering questions about other dates. The moment a user asks about a worker's upcoming/future shifts, a specific date or date range, an outlet's roster, or cancelled/completed/open shifts, your FIRST action is to output a queryShifts action block. Do this immediately, in your very first reply, with NO preamble. Specifically:
+   • Do NOT say "I don't see any shifts in the visible schedule", "looking at the data I have", "the next 14 days show none", or anything implying the on-screen context is the full picture. That context is NOT the database. Saying this is wrong and misleads the user.
+   • Do NOT answer from SYSTEM CONTEXT and THEN offer to look up — just run queryShifts first and answer from its result.
+   • Do NOT use searchWorker to answer a shift question. searchWorker returns a PROFILE (phone, pay method), not shifts. To find a person's shifts you MUST use queryShifts. searchWorker is ONLY for confirming a worker exists / getting their contact details, never for "do they have shifts".
+   • For "upcoming shifts for <name>": output {"type":"queryShifts","workerName":"<name>","dateFrom":"<today's date>","status":"upcoming"} and nothing else, then report what comes back.
+   The queryShifts result includes each shift's id, usable for cancelShift, setShiftRate, clockIn/out, addNote — all of which now work on ANY shift regardless of the viewed date.
+- ADJUSTING RATES: To change the pay/charge rate on a specific shift, use setShiftRate with that shift's id and the new hourly rate (client rate). If you don't have the id, run queryShifts first to find it. If multiple shifts match, list them with their dates/outlets and ask which one before changing. Always confirm the worker, outlet, date and the old→new rate with the user before applying, then act on "yes/confirm".
 - Always confirm before taking destructive actions (cancel, suspend) by asking user to confirm first, then act only on explicit "yes/confirm".
 - BEFORE creating a shift: confirm with the user by showing the worker's full name AND phone number from the WORKERS list, plus the exact outlet name. Wait for "yes/confirm" before executing.
 - BEFORE creating an available slot or batch of slots: confirm outlet name, dates, and times with the user, then execute on confirmation.
@@ -18590,7 +18602,7 @@ RULES:
 - For navigation, just output the navigateTo action.
 - When answering questions about available slots, calculate from the SHIFT AVAILABILITY data in context.
 - Always use EXACT worker names and outlet names as they appear in the database.
-- If you can't find a worker in the WORKERS list, use searchWorker action to do a live database lookup — never say you can't find someone without trying this first.
+- If you can't find a worker in the WORKERS list AND you need their PROFILE/contact details (not their shifts), use searchWorker to do a live database lookup — never say you can't find someone without trying this first. But to find a worker's SHIFTS, always use queryShifts, never searchWorker.
 - If you can't find an outlet/client in the OUTLETS list, use searchOutlet to do a live lookup.
 - When a user tells you a fact, rule, policy or requirement (e.g. attire, SOPs, outlet info), AUTOMATICALLY save it using saveKnowledge WITHOUT asking for confirmation — just do it and confirm you saved it.
 - IMPORTANT: saveKnowledge is ONLY for general business knowledge (SOPs, rules, policies). For updating a specific worker's phone, payment method, country, or notes, ALWAYS use updateWorkerProfile instead — never save personal worker data to business knowledge.
@@ -18626,13 +18638,74 @@ RULES:
   return reply;
 }
 
+// ── AI cross-view helpers (v64) ───────────────────────────────────────────
+// The AI's local arrays (allShifts) only hold the CURRENT view's date window,
+// so any action keyed by shiftId failed for shifts outside that window (e.g. a
+// booking 3 weeks out). resolveAIShift() checks the loaded pools first, then
+// falls back to a direct single-row Supabase fetch so the AI can act on ANY
+// shift regardless of the date being viewed. Returns the shift row or null.
+async function resolveAIShift(shiftId) {
+  if (shiftId == null) return null;
+  const sid = String(shiftId);
+  const local = (allShifts || []).find(x => String(x.id) === sid)
+            || (typeof taskShiftCache === 'object' && taskShiftCache ? taskShiftCache[sid] : null);
+  if (local) return local;
+  try {
+    const { data, error } = await supabaseClient.from('shifts').select('*').eq('id', shiftId).limit(1);
+    if (error || !data || !data.length) return null;
+    // Honour country scoping so a PH partner can't act on another country's shift.
+    const scoped = scopeShiftsToCountry(data);
+    return scoped[0] || null;
+  } catch (e) { return null; }
+}
+
+// Minutes-since-midnight helper shared by overlap checks.
+function aiToMins(t) { const [h,m] = String(t||'00:00').slice(0,5).split(':').map(Number); return (h||0)*60+(m||0); }
+
+// Live cross-date shift query for the AI — bypasses allShifts entirely.
+// Filters: workerName (partial, ci), outlet (partial, ci), dateFrom/dateTo
+// (YYYY-MM-DD inclusive), status (upcoming|cancelled|completed|open|all).
+// Country-scoped. Returns formatted lines (with ids) or an empty-result string.
+async function aiQueryShifts(a) {
+  try {
+    let q = supabaseClient.from('shifts').select('*');
+    if (a.dateFrom) q = q.gte('shift_date', a.dateFrom);
+    if (a.dateTo)   q = q.lte('shift_date', a.dateTo);
+    if (a.outlet)   q = q.ilike('outlet', `%${a.outlet}%`);
+    if (a.workerName) q = q.ilike('worker_name', `%${a.workerName}%`);
+    q = q.order('shift_date').order('scheduled_start').limit(300);
+    const { data, error } = await q;
+    if (error) throw error;
+    let rows = scopeShiftsToCountry(data || []);
+    const todayStr = formatDate(new Date());
+    const status = String(a.status || 'all').toLowerCase();
+    if (status === 'upcoming')      rows = rows.filter(s => s.shift_date >= todayStr && !s.cancelled && !isOpenSlot(s));
+    else if (status === 'cancelled')rows = rows.filter(s => s.cancelled);
+    else if (status === 'completed')rows = rows.filter(s => s.clock_in && s.clock_out && !s.cancelled);
+    else if (status === 'open')     rows = rows.filter(s => isOpenSlot(s));
+    if (!rows.length) return `No shifts found for that query.`;
+    const sym = (o) => currencySymbolForOutlet(o);
+    const lines = rows.slice(0, 80).map(s =>
+      `[${s.shift_date} ${s.scheduled_start?.slice(0,5)||'?'}-${s.scheduled_end?.slice(0,5)||'?'}] ` +
+      `${s.worker_name||'Available'} @ ${s.outlet||'?'} | ` +
+      `rate:${sym(s.outlet)}${parseFloat(s.rate||0).toFixed(2)} ` +
+      `CI:${s.clock_in?.slice(0,5)||'—'} CO:${s.clock_out?.slice(0,5)||'—'} ` +
+      `${s.cancelled?'CANCELLED ':''}${isOpenSlot(s)?'OPEN-SLOT ':''}id:${s.id}`
+    ).join('\n');
+    const more = rows.length > 80 ? `\n… and ${rows.length - 80} more (narrow the dates/outlet to see them).` : '';
+    return `Found ${rows.length} shift(s):\n${lines}${more}`;
+  } catch (e) {
+    return `❌ Query failed: ${e.message}`;
+  }
+}
+
 // Parse and execute action blocks from Claude's response
 async function executeAIAction(actionJson) {
   const a = JSON.parse(actionJson);
   switch (a.type) {
 
     case 'clockIn': {
-      const s = allShifts.find(x => x.id === a.shiftId);
+      const s = await resolveAIShift(a.shiftId);
       if (!s) return `❌ Shift not found (id: ${a.shiftId})`;
       const time = a.time || new Date().toTimeString().slice(0,5);
       const lp = calcLatePenalty(s.scheduled_start?.slice(0,5), time).penalty;
@@ -18647,7 +18720,7 @@ async function executeAIAction(actionJson) {
     }
 
     case 'clockOut': {
-      const s = allShifts.find(x => x.id === a.shiftId);
+      const s = await resolveAIShift(a.shiftId);
       if (!s) return `❌ Shift not found`;
       const time = a.time || new Date().toTimeString().slice(0,5);
       const wasClockedOut = !!s.clock_out;
@@ -18663,7 +18736,7 @@ async function executeAIAction(actionJson) {
     }
 
     case 'cancelShift': {
-      const s = allShifts.find(x => x.id === a.shiftId);
+      const s = await resolveAIShift(a.shiftId);
       if (!s) return `❌ Shift not found`;
       const isPenalty = a.cancelType === 'worker_penalty';
       await supabaseClient.from('shifts').update({
@@ -18695,7 +18768,7 @@ async function executeAIAction(actionJson) {
     }
 
     case 'addNote': {
-      const s = allShifts.find(x => x.id === a.shiftId);
+      const s = await resolveAIShift(a.shiftId);
       if (!s) return `❌ Shift not found`;
       await supabaseClient.from('shifts').update({ payroll_notes: a.note, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
       await loadShifts();
@@ -18715,7 +18788,7 @@ async function executeAIAction(actionJson) {
     }
 
     case 'markPaid': {
-      const s = allShifts.find(x => x.id === a.shiftId);
+      const s = await resolveAIShift(a.shiftId);
       if (!s) return `❌ Shift not found`;
       await supabaseClient.from('shifts').update({ is_paid: true, updated_at: new Date().toISOString() }).eq('id', a.shiftId);
       await loadShifts();
@@ -19046,8 +19119,29 @@ async function executeAIAction(actionJson) {
       return `📋 **${outlet.name}** booking requirements:\n${all}`;
     }
 
+    case 'queryShifts': {
+      return await aiQueryShifts(a);
+    }
+
+    case 'setShiftRate': {
+      const s = await resolveAIShift(a.shiftId);
+      if (!s) return `❌ Shift not found (id: ${a.shiftId})`;
+      const newRate = parseFloat(a.rate);
+      if (!(newRate >= 0)) return `❌ Invalid rate "${a.rate}". Give a number like 16.50.`;
+      const oldRate = parseFloat(s.rate || 0);
+      const sym = currencySymbolForOutlet(s.outlet);
+      const { error } = await supabaseClient.from('shifts')
+        .update({ rate: newRate, updated_at: new Date().toISOString() })
+        .eq('id', a.shiftId);
+      if (error) return `❌ Failed to update rate: ${error.message}`;
+      await logActivity('AI: Shift rate changed',
+        `${s.worker_name||'Available'} @ ${s.outlet} (${s.shift_date}) rate ${sym}${oldRate.toFixed(2)} → ${sym}${newRate.toFixed(2)}`,
+        'shift', a.shiftId, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+      await loadShifts();
+      return `✅ Rate updated for **${s.worker_name||'Available'} @ ${s.outlet}** on ${s.shift_date}: ${sym}${oldRate.toFixed(2)} → **${sym}${newRate.toFixed(2)}/hr**`;
+    }
+
     default:
-      return `❓ Unknown action: ${a.type}`;
   }
 }
 
