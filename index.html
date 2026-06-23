@@ -2107,6 +2107,17 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
         <select id="wf-disliked-select" onchange="addDislikedOutlet(this.value); this.value='';"></select>
       </div>
     </div>
+    <div class="form-row"><label>Dates this worker is NOT available <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(they'll be hidden from slot offers on these dates)</span></label>
+      <div class="ms-picker" id="wf-unavail-picker">
+        <div class="ms-chips" id="wf-unavail-chips"></div>
+        <div class="ms-empty" id="wf-unavail-empty">No unavailable dates. Add one below — e.g. a worker said they can't work next week.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;margin-top:6px;">
+          <div style="flex:1;min-width:120px;"><label style="font-size:10px;color:var(--text3);">From</label><input type="date" id="wf-unavail-from" style="width:100%;"></div>
+          <div style="flex:1;min-width:120px;"><label style="font-size:10px;color:var(--text3);">To <span style="color:var(--text3);">(same as From for a single day)</span></label><input type="date" id="wf-unavail-to" style="width:100%;"></div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addUnavailRange()">+ Add</button>
+        </div>
+      </div>
+    </div>
     <div class="form-row" id="wf-bans-row" style="display:none;">
       <label style="color:var(--red);">🚫 Outlets that have banned this worker</label>
       <div class="ms-picker" id="wf-bans-picker">
@@ -2618,6 +2629,24 @@ function mergeProfileMeta(primary, secondary) {
             passed[ok] = Array.from(new Set([...a, ...b]));
           });
           merged.passed_requirements = passed;
+        }
+        // UNAVAILABLE ranges: [{from,to,note?}]. Union by from|to key so neither
+        // device loses an entry the other added. (A removal on one device can be
+        // re-introduced by the other's stale copy — acceptable: ops just re-removes;
+        // safer than silently dropping a real "can't work" the other device set.)
+        const pu = Array.isArray(pe.unavailable) ? pe.unavailable : [];
+        const su = Array.isArray(se.unavailable) ? se.unavailable : [];
+        if (pu.length || su.length) {
+          const seenU = new Set();
+          const u = [];
+          [...pu, ...su].forEach(r => {
+            if (!r || !r.from || !r.to) return;
+            const k = String(r.from).slice(0,10) + '|' + String(r.to).slice(0,10);
+            if (seenU.has(k)) return;
+            seenU.add(k);
+            u.push({ from: String(r.from).slice(0,10), to: String(r.to).slice(0,10), ...(r.note ? { note: r.note } : {}) });
+          });
+          merged.unavailable = u;
         }
       }
       out[sectionName][k] = merged;
@@ -3283,6 +3312,50 @@ function assignmentRestriction(workerName, outletName) {
     return `${REQ_SENTINEL}${worker} must meet ${unmet.length} booking requirement${unmet.length!==1?'s':''} for ${outlet}.`;
   }
   return null;
+}
+
+// ── Worker self-declared unavailability ──────────────────────────────────────
+// A worker can tell ops (e.g. last week over WhatsApp) that they're NOT available
+// on a date or a range of dates ("not free tomorrow", "out the whole next week").
+// We store this per-worker in profileMeta so it syncs team-wide and survives
+// refresh, the same way disliked_outlets / passed_requirements do:
+//   profileMeta.workers[wKey].unavailable = [{ from:'YYYY-MM-DD', to:'YYYY-MM-DD', note? }]
+// A single day is stored as from===to. When a slot's date falls inside ANY range,
+// the worker is hidden from that slot's offer lists (standby + likely) and a live
+// offer to them is blocked — so ops never offers a slot the worker already
+// declined. Past ranges are harmless (a future slot never matches them).
+function workerUnavailableRanges(workerName) {
+  const u = workerProfile(workerName).unavailable;
+  if (!Array.isArray(u)) return [];
+  return u.filter(r => r && r.from && r.to);
+}
+// True if `dateStr` (YYYY-MM-DD) falls within any of the worker's unavailable
+// ranges. String compare is safe for zero-padded ISO dates.
+function isWorkerUnavailableOn(workerName, dateStr) {
+  if (!workerName || !dateStr) return false;
+  const d = String(dateStr).slice(0,10);
+  return workerUnavailableRanges(workerName).some(r => {
+    const from = String(r.from).slice(0,10);
+    const to   = String(r.to).slice(0,10);
+    const lo = from <= to ? from : to;   // tolerate reversed entries
+    const hi = from <= to ? to : from;
+    return d >= lo && d <= hi;
+  });
+}
+// Human-readable reason for the day, e.g. "Unavailable 24 Jun – 30 Jun" — used in
+// the offer panel so ops can SEE who's hidden and why (not silently dropped).
+function workerUnavailabilityLabel(workerName, dateStr) {
+  const d = String(dateStr || '').slice(0,10);
+  const hit = workerUnavailableRanges(workerName).find(r => {
+    const from = String(r.from).slice(0,10), to = String(r.to).slice(0,10);
+    const lo = from <= to ? from : to, hi = from <= to ? to : from;
+    return d >= lo && d <= hi;
+  });
+  if (!hit) return '';
+  const fmt = s => { const dt = new Date(String(s).slice(0,10) + 'T00:00:00'); return isNaN(dt) ? s : dt.toLocaleDateString('en-SG', { day:'numeric', month:'short' }); };
+  const from = String(hit.from).slice(0,10), to = String(hit.to).slice(0,10);
+  const range = from === to ? fmt(from) : `${fmt(from)} – ${fmt(to)}`;
+  return `Unavailable ${range}${hit.note ? ' · ' + hit.note : ''}`;
 }
 function profileNoteBlock(text, tone = 'blue') {
   const clean = String(text || '').trim();
@@ -9150,6 +9223,8 @@ function eligibleStandbyForSlot(slot) {
       // A soft requirements gate does NOT hide a worker — they can pass the
       // checklist when assigned; only hard restrictions remove the option.
       { const rstr = assignmentRestriction(name, outlet); if (rstr && !isRequirementGate(rstr)) return false; }
+      // Worker told us they're NOT free on this date — hide them from the offer.
+      if (isWorkerUnavailableOn(name, slot.date)) return false;
       // Skip workers whose existing assigned shift that day clashes with this slot.
       if (workerHasClashingShift(name, slot)) return false;
       return true;
@@ -9319,6 +9394,7 @@ function likelyWorkersForSlot(slot, freqCache, scheduled) {
     const freq = entry.dow[targetDow] || 0;
     if (freq <= 0) return;                                   // never worked this weekday
     if (standbyKeys.has(key)) return;                        // already in standby section above
+    if (isWorkerUnavailableOn(name, slot.date)) return;      // worker said they're not free this date
     // Time-aware exclusion against AUTHORITATIVE DB data: if they already have a
     // shift that day whose time overlaps this slot, never offer (double-book /
     // clash). The window lookup matches by normalized name OR phone, so a spelling
@@ -9464,6 +9540,87 @@ function buildShiftConfirmedMessage(slot, workerName) {
 // {id, outlet, role, date, start, end}. Used by BOTH the Replacement-needed
 // panel and the Available-slots panel. Banned / disliked-outlet workers are
 // excluded by eligibleStandbyForSlot so they never appear here.
+
+// ── Search any roster worker to offer (incl. brand-new members) ──────────────
+// The standby + "likely" lists only surface workers with a history or a standby
+// entry, so a NEW member who can work won't appear. This search box lets ops type
+// any name from the full roster and offer the slot to them directly. It applies
+// the same guards as the chips: a worker who's banned/disliked, has a clashing
+// shift that day, or marked themselves unavailable that date is shown disabled
+// with the reason, never offered silently.
+function offerSearchInputId(slot) { return 'offer-search-' + String(slot.id).replace(/[^a-zA-Z0-9_-]/g,''); }
+function renderOfferSearchBlock(slot) {
+  const inputId = offerSearchInputId(slot);
+  const idAttr = escapeAttr(String(slot.id));
+  return `<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px;">
+    <div class="standby-meta" style="margin-bottom:5px;font-weight:600;color:var(--accent);">\ud83d\udd0d Search any worker to offer</div>
+    <div class="standby-meta" style="color:var(--text3);margin-bottom:5px;">For a new member or anyone not listed above — type a name, then offer.</div>
+    <div style="position:relative;">
+      <input type="text" id="${inputId}" autocomplete="off" placeholder="Start typing a worker's name\u2026"
+        oninput="onOfferSearchInput('${idAttr}','${inputId}')"
+        onfocus="onOfferSearchInput('${idAttr}','${inputId}')"
+        style="width:100%;font-family:var(--font);font-size:12px;padding:7px 9px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+      <div id="${inputId}-dd" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:60;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;margin-top:2px;max-height:240px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.4);"></div>
+    </div></div>`;
+}
+function onOfferSearchInput(shiftId, inputId) {
+  const input = document.getElementById(inputId);
+  const dd = document.getElementById(inputId + '-dd');
+  if (!input || !dd) return;
+  const slot = resolveOfferableSlot(shiftId);
+  if (!slot) { dd.style.display = 'none'; return; }
+  const q = String(input.value || '').trim().toLowerCase();
+  // Country-scope the roster the same way the rest of the app does.
+  let roster = Array.isArray(allWorkers) ? allWorkers.slice() : [];
+  const matches = roster
+    .filter(w => {
+      const nm = String(w.name || '').trim();
+      if (!nm || nm.toLowerCase() === 'available') return false;
+      return !q || nm.toLowerCase().includes(q);
+    })
+    .sort((a,b) => String(a.name).localeCompare(String(b.name)))
+    .slice(0, 12);
+  if (!matches.length) {
+    dd.innerHTML = `<div style="padding:9px 12px;color:var(--text3);font-size:12px;">No workers match \u201c${escapeHtml(input.value)}\u201d.</div>`;
+    dd.style.display = 'block';
+    return;
+  }
+  const rem = shiftReminders[slot.id] || {};
+  const offeredKeys = (Array.isArray(rem.offeredNames) ? rem.offeredNames : []).map(n => String(n).toLowerCase());
+  dd.innerHTML = matches.map(w => {
+    const name = w.name;
+    const key = String(name).toLowerCase();
+    const phone = workerPhone(name);
+    const rstr = assignmentRestriction(name, slot.outlet || '');
+    const hardBan = rstr && !isRequirementGate(rstr);
+    const unavail = isWorkerUnavailableOn(name, slot.date);
+    const clash = workerHasClashingShift(name, slot);
+    const already = offeredKeys.includes(key);
+    let reason = '';
+    if (hardBan) reason = rstr;
+    else if (unavail) reason = workerUnavailabilityLabel(name, slot.date);
+    else if (clash) reason = 'Already has a clashing shift that day';
+    else if (!phone) reason = 'No phone number on file';
+    const sub = phone ? `\u260e ${escapeHtml(phone)}` : 'No phone on file';
+    const blocked = hardBan || unavail || clash || !phone;
+    const click = blocked ? '' : ` onclick="offerFromSearch('${escapeAttr(String(slot.id))}','${escapeAttr(name)}','${escapeAttr(inputId)}')"`;
+    const cursor = blocked ? 'default' : 'pointer';
+    const opacity = blocked ? '0.55' : '1';
+    return `<div class="search-dd-item" style="cursor:${cursor};opacity:${opacity};"${click}>
+      <div style="font-weight:600;font-size:12px;">${already ? '\u2713 ' : ''}${escapeHtml(name)}</div>
+      <div style="font-size:10px;color:var(--text3);margin-top:2px;">${blocked ? escapeHtml(reason) : sub}${already && !blocked ? ' \u00b7 already offered (offers again)' : ''}</div>
+    </div>`;
+  }).join('');
+  dd.style.display = 'block';
+}
+async function offerFromSearch(shiftId, workerName, inputId) {
+  const dd = document.getElementById(inputId + '-dd');
+  const input = document.getElementById(inputId);
+  if (dd) dd.style.display = 'none';
+  if (input) input.value = '';
+  await offerSlotToStandby(shiftId, workerName);
+}
+
 function renderOfferToStandbyBlock(slot) {
   const rem = shiftReminders[slot.id] || {};
   const offered = Array.isArray(rem.offeredNames) ? rem.offeredNames : [];
@@ -9473,10 +9630,21 @@ function renderOfferToStandbyBlock(slot) {
     return `<div class="alert alert-green" style="margin-top:8px;padding:8px 10px;font-size:11px;"><span class="alert-icon">\u2705</span><span><strong>${escapeHtml(rem.offerAcceptedBy)}</strong> accepted this slot \u2014 confirm in the Tasks panel.</span></div>`;
   }
   const eligible = eligibleStandbyForSlot(slot);
+  // Standby workers for this date who are hidden because they told us they're not
+  // free — surfaced as a small note so ops can SEE who was skipped (not silent).
+  const unavailHidden = standbyForDay(slot.date)
+    .map(x => String(x.worker_name || '').trim())
+    .filter((n, i, arr) => n && arr.findIndex(m => m.toLowerCase() === n.toLowerCase()) === i)
+    .filter(n => isWorkerUnavailableOn(n, slot.date));
+  const unavailNote = unavailHidden.length
+    ? `<div class="standby-meta" style="margin-top:6px;color:var(--amber);">\ud83d\udeab Hidden (said not available): ${unavailHidden.map(n => escapeHtml(n)).join(', ')}</div>`
+    : '';
   if (!eligible.length) {
     return `<div style="margin-top:9px;border-top:1px dashed var(--border);padding-top:8px;">
       <div class="standby-meta" style="color:var(--text3);">No standby workers available for this date${slot.outlet ? ' / outlet' : ''}.</div>
+      ${unavailNote}
       ${renderLikelyWorkersPlaceholder(slot)}
+      ${renderOfferSearchBlock(slot)}
     </div>`;
   }
   const chips = eligible.map(x => {
@@ -9501,8 +9669,10 @@ function renderOfferToStandbyBlock(slot) {
   return `<div style="margin-top:9px;border-top:1px dashed var(--border);padding-top:8px;">
     <div class="standby-meta" style="margin-bottom:6px;font-weight:600;color:var(--purple);">\ud83e\uddfe Offer slot to standby</div>
     <div class="standby-actions" style="margin-top:0;">${chips}${offerAll}</div>
+    ${unavailNote}
     ${sentNote}
     ${renderLikelyWorkersPlaceholder(slot)}
+    ${renderOfferSearchBlock(slot)}
   </div>`;
 }
 
@@ -9517,6 +9687,10 @@ async function resendOfferToStandby(shiftId, workerName) {
 async function offerSlotToStandby(shiftId, workerName) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
+  if (isWorkerUnavailableOn(workerName, slot.date)) {
+    toast(`${workerName} marked themselves unavailable that day (${workerUnavailabilityLabel(workerName, slot.date)}) — not offered. Clear it in their worker profile to override.`, 'error');
+    return;
+  }
   const restriction = assignmentRestriction(workerName, slot.outlet || '');
   // A requirements gate doesn't block the OFFER — requirements are confirmed when
   // the worker is actually assigned on acceptance. Only hard restrictions block.
@@ -11774,6 +11948,49 @@ function removeDislikedOutlet(name) {
   wfDislikedOutlets = wfDislikedOutlets.filter(o => normProfileKey(o) !== normProfileKey(name));
   renderDislikedOutletPicker();
 }
+// ── Worker unavailable-date ranges (modal editor) ────────────────────────────
+let wfUnavailable = [];   // [{ from, to, note? }]
+function _fmtUnavail(s) {
+  const dt = new Date(String(s).slice(0,10) + 'T00:00:00');
+  return isNaN(dt) ? s : dt.toLocaleDateString('en-SG', { weekday:'short', day:'numeric', month:'short' });
+}
+function renderUnavailPicker() {
+  const chips = document.getElementById('wf-unavail-chips');
+  const empty = document.getElementById('wf-unavail-empty');
+  if (!chips) return;
+  // Sort by start date for a tidy list.
+  wfUnavailable.sort((a,b) => String(a.from).localeCompare(String(b.from)));
+  chips.innerHTML = wfUnavailable.map((r, i) => {
+    const label = String(r.from).slice(0,10) === String(r.to).slice(0,10)
+      ? _fmtUnavail(r.from)
+      : `${_fmtUnavail(r.from)} → ${_fmtUnavail(r.to)}`;
+    return `<span class="ms-chip">${escapeHtml(label)}<button type="button" title="Remove" onclick="removeUnavailRange(${i})">×</button></span>`;
+  }).join('');
+  if (empty) empty.style.display = wfUnavailable.length ? 'none' : 'block';
+}
+function addUnavailRange() {
+  const fromEl = document.getElementById('wf-unavail-from');
+  const toEl = document.getElementById('wf-unavail-to');
+  let from = fromEl && fromEl.value ? fromEl.value : '';
+  let to = toEl && toEl.value ? toEl.value : '';
+  if (!from && !to) { toast('Pick at least a "From" date', 'error'); return; }
+  if (!from) from = to;
+  if (!to) to = from;                 // single day if only one side filled
+  if (from > to) { const t = from; from = to; to = t; }   // normalise order
+  // Skip exact duplicates.
+  if (wfUnavailable.some(r => String(r.from).slice(0,10) === from && String(r.to).slice(0,10) === to)) {
+    toast('That date range is already added', 'info');
+  } else {
+    wfUnavailable.push({ from, to });
+  }
+  if (fromEl) fromEl.value = '';
+  if (toEl) toEl.value = '';
+  renderUnavailPicker();
+}
+function removeUnavailRange(i) {
+  wfUnavailable.splice(i, 1);
+  renderUnavailPicker();
+}
 // Outlet-side bans: which outlets have barred THIS worker (outlet.banned_workers).
 // Distinct from disliked_outlets (worker's own avoid list). Read-only list with
 // the ability to lift a ban, which edits the outlet's profile, not the worker's.
@@ -11825,6 +12042,8 @@ function resetWorkerModal() {
   document.getElementById('wf-notes').value = '';
   wfDislikedOutlets = [];
   renderDislikedOutletPicker();
+  wfUnavailable = [];
+  renderUnavailPicker();
   wfBanWorkerName = '';
   renderWorkerBans();
 }
@@ -11844,6 +12063,10 @@ function editWorker(id) {
   document.getElementById('wf-notes').value = meta.notes || '';
   wfDislikedOutlets = Array.isArray(meta.disliked_outlets) ? meta.disliked_outlets.slice() : [];
   renderDislikedOutletPicker();
+  wfUnavailable = Array.isArray(meta.unavailable)
+    ? meta.unavailable.filter(r => r && r.from && r.to).map(r => ({ from: String(r.from).slice(0,10), to: String(r.to).slice(0,10), ...(r.note ? { note: r.note } : {}) }))
+    : [];
+  renderUnavailPicker();
   wfBanWorkerName = w.name || '';
   renderWorkerBans();
   document.getElementById('add-worker-modal').classList.add('open');
@@ -11858,9 +12081,16 @@ async function saveWorker() {
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldWorker = editingWorkerId ? allWorkers.find(x => x.id === editingWorkerId) : null;
   if (oldWorker && normProfileKey(oldWorker.name) !== normProfileKey(name)) delete profileMeta.workers[normProfileKey(oldWorker.name)];
+  // Preserve any existing profile fields (e.g. passed_requirements) — overwrite
+  // only the fields this modal actually edits.
+  const existingProfile = profileMeta.workers[normProfileKey(name)] || {};
   profileMeta.workers[normProfileKey(name)] = {
+    ...existingProfile,
     notes: document.getElementById('wf-notes').value.trim(),
-    disliked_outlets: wfDislikedOutlets.slice()
+    disliked_outlets: wfDislikedOutlets.slice(),
+    unavailable: wfUnavailable
+      .filter(r => r && r.from && r.to)
+      .map(r => ({ from: String(r.from).slice(0,10), to: String(r.to).slice(0,10), ...(r.note ? { note: r.note } : {}) }))
   };
   await saveProfileMeta();
   toast(editingWorkerId ? 'Worker updated!' : 'Worker added!');
