@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v71 (OPEN-SLOT FILL: APPROVAL FLAG + STALE-REMINDER RESET) — Two real bugs surfaced on a slot that was filled in place after a previous worker took then cancelled it (same shift id reused). (1) PENDING-APPROVAL LOST ON FILL: resolvePortalApproval() correctly resolved the booking to 'pending', and the insert + merge paths wrote approval_status, but the OPEN-SLOT FILL path built its own fillPayload that omitted approval_status entirely — so a portal booking the app showed as ⏳ Pending Approval imported into the ops panel as a normal CONFIRMED shift. FIX: fillPayload now sets approval_status = (r.approval_status==='pending' ? 'pending' : null) when the column is known-present, with the same approvalColumnMissing()→drop-and-retry graceful degrade the insert path uses (so a pending fill keeps its orange state, an approved/undecided fill clears any stale pending flag the slot carried). (2) REMINDERS AUTO-MARKED SENT+ACKED ON A FRESH BOOKING: reminder send/ack state (shiftReminders) is keyed by shift.id, and an open slot is updated IN PLACE on fill — so when a slot went taken→cancelled→Available→re-filled, the previous occupant's nightSent/nightAcked/clockinSent/clockinResponded flags lingered on the reused id. The new worker therefore showed reminders already sent+acknowledged AND, worse, would be SILENTLY SKIPPED by autoSendShiftReminders() (whose !nightSent / !clockinSent guards read false). This was NOT the night-reminder auto-send (that's gated to a 21:00–21:05 window) and NOT the clock-in all-true stamp (worker hadn't clocked in) — it was stale state. FIX: new resetReminderLifecycleForRefill(shiftId) zeroes the per-occupant lifecycle (send/ack + dispute/late/offer + needsReplacement), called at every reuse-in-place point: confirmCancel (slot→Available; replacement state re-asserted right after), confirmAssignWorker (in-app assign; replacement snapshotted BEFORE reset so the completed-task log stays accurate), the standby/offer assign path, and the import open-slot fill. No schema change. node --check passes (2/2 non-empty script blocks); surgical diff — only fillPayload, the 3 assign/cancel reminder-clear blocks, and the one new helper changed; nothing else touched. -->
 <!-- Build patch: v66 (AI BATCH ACTIONS + TOLERANT PARSING) — Fixes the "❌ Action 1 failed: JSON Parse error" + 12-vs-13 miscount seen when the AI changed many shift rates at once. ROOT CAUSE: a bulk request made the model emit many JSON action objects (often newline-separated inside one ```action``` fence, sometimes with a trailing comma/smart quote); executeAIAction did a bare JSON.parse() which can only parse ONE value, so the block threw and aborted. THREE changes: (1) parseActionObjects() — tolerant parser that splits a block into multiple top-level {…} objects (brace-aware, ignores braces inside strings), strips trailing commas, normalises smart quotes, drops the odd 'json' label, and SKIPS any single unparseable object instead of failing the batch. executeAIAction now takes a pre-parsed object; renderAIReply flattens all blocks via parseActionObjects and iterates objects (batch counts are now correct). (2) New setShiftRateBatch action — bulk rate change by outlet (+ optional worker/date-range/status=upcoming) in ONE Supabase .in() update, country-scoped, non-cancelled only, with activity log; reports how many changed. The model is told to use it for "make all X rates $Y" instead of emitting a long list of single setShiftRate blocks (which is what triggered the parse error). (3) Prompt: rate guidance rewritten to prefer the batch action and never emit more than a couple of action objects per reply. Only executeAIAction's signature, the renderAIReply action loop, the new action case, and the rates prompt line changed; aiQueryShifts (v65 formatting), loadShifts, buildSystemContext, resolveAIShift and all other handlers untouched. node --check passes; 8/8 parser cases pass incl. the 13-objects-one-bad scenario. -->
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
@@ -3887,6 +3888,29 @@ async function toggleReminder(shiftId, field, checked) {
   updateReminderPanelInPlace(shiftId); // instant local update, no scroll jump
   checkReminderAlerts();
   await persistReminder(shiftId);      // sync to Supabase for all other users
+}
+// v71: a shift slot id is REUSED in place when an open slot is (re)filled, so a
+// prior worker's reminder send/ack flags can linger on the id and cause the NEW
+// worker to be silently skipped by autoSendShiftReminders() (its !nightSent /
+// !clockinSent guards read false). This clears the per-occupant reminder
+// lifecycle — the night/clock-in SEND + ACK flags and the dispute/late/offer
+// fields tied to the previous occupancy — while leaving the slot's identity
+// alone. Called when a slot is returned to Available (cancel) and when it's
+// re-filled (import open-slot fill / in-app fill). Persists so teammates sync.
+async function resetReminderLifecycleForRefill(shiftId) {
+  if (!shiftId) return;
+  shiftReminders[shiftId] = {
+    nightSent: false, nightAcked: false,
+    clockinSent: false, clockinResponded: false,
+    disputed: false, disputeKind: '', disputeReason: '', disputeAt: '',
+    lateNotified: false, lateReason: '', lateAt: '', lateAck: false,
+    outletInformed: false,
+    needsReplacement: false, replacementAt: '', replacedWorker: '',
+    offeredNames: [], offerSentAt: '', offerAccepted: false,
+    offerAcceptedBy: '', offerAcceptedAt: '', offerOutletInformed: ''
+  };
+  try { localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders)); } catch (e) {}
+  await persistReminder(shiftId);
 }
 // Quick "worker acknowledged" from a reminder alert banner. Ticks the relevant
 // acknowledgement: if a clock-in reminder was sent, mark clock-in responded;
@@ -9903,11 +9927,10 @@ async function assignWorkerToOpenSlot(shiftId, worker) {
     }
   } catch(e) { console.warn('[Assign] confirmation WA failed:', e); }
   // Clear replacement / offer flags — slot is filled.
-  if (shiftReminders[shiftId]) {
-    shiftReminders[shiftId].needsReplacement = false;
-    shiftReminders[shiftId].disputed = false;
-    try { await persistReminder(shiftId); } catch(e){}
-  }
+  // v71: reset the FULL reminder lifecycle for the new occupant. The slot id is
+  // reused in place, so a previous worker's send/ack flags would otherwise linger
+  // and make autoSendShiftReminders() skip this newly-assigned worker.
+  await resetReminderLifecycleForRefill(shiftId);
   // Remove the assigned worker from the standby list for that date.
   try {
     const match = (allStandby || []).find(x => x.available_date === slot.date && String(x.worker_name||'').toLowerCase() === worker.toLowerCase());
@@ -10317,23 +10340,26 @@ async function confirmAssignWorker(id) {
     try { await supabaseClient.from('workers').insert({ name }); await loadWorkers(); } catch(e) {}
   }
   await logActivity('Assigned worker to slot', `${name} assigned to slot at ${s.outlet} on ${s.shift_date}`, 'shift', id, { worker_name: name, outlet: s.outlet });
-  // Re-filling a slot clears any replacement-needed flag on it (and logs completion)
-  if (shiftReminders[id] && shiftReminders[id].needsReplacement) {
+  // Re-filling a slot clears any replacement-needed flag on it (and logs completion).
+  // v71: snapshot the replacement state BEFORE resetting, so the completed-task log
+  // is still accurate, then reset the FULL reminder lifecycle for the new occupant
+  // (the slot id is reused in place — a prior worker's send/ack flags would otherwise
+  // linger and cause autoSendShiftReminders() to skip this newly-assigned worker).
+  const _wasReplacement = !!(shiftReminders[id] && shiftReminders[id].needsReplacement);
+  const _replacedWorker = (shiftReminders[id] && shiftReminders[id].replacedWorker) || '';
+  if (_wasReplacement) {
     await logCompletedTask({
       id, type: 'replacement',
-      worker: shiftReminders[id].replacedWorker || '', outlet: s.outlet || '', role: s.role || '',
+      worker: _replacedWorker, outlet: s.outlet || '', role: s.role || '',
       date: s.shift_date || '',
       start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
       end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
-      reason: shiftReminders[id].replacedWorker ? `${shiftReminders[id].replacedWorker} dropped out` : 'Worker dropped out',
+      reason: _replacedWorker ? `${_replacedWorker} dropped out` : 'Worker dropped out',
       outcome: `Re-filled with ${name}`,
       completedAt: new Date().toISOString()
     });
-    shiftReminders[id].needsReplacement = false;
-    shiftReminders[id].replacementAt = '';
-    shiftReminders[id].replacedWorker = '';
-    await persistReminder(id);
   }
+  await resetReminderLifecycleForRefill(id);
   toast(`✓ Assigned ${name}`);
   await loadShifts();
 }
@@ -11635,11 +11661,12 @@ async function confirmCancel() {
   // Clear any dispute/late flags on this slot now that the cancellation is processed,
   // and mark it as Replacement-needed so the now-Available slot still surfaces in the
   // Tasks panel and Replacement-needed list (across all dates) until it is re-filled.
-  if (!shiftReminders[pendingCancelId]) shiftReminders[pendingCancelId] = {};
-  shiftReminders[pendingCancelId].disputed = false;
-  shiftReminders[pendingCancelId].disputeKind = '';
-  shiftReminders[pendingCancelId].disputeReason = '';
-  shiftReminders[pendingCancelId].lateNotified = false;
+  // v71: ALSO reset the per-occupant reminder SEND/ACK lifecycle. The slot id is
+  // reused in place, so the cancelling worker's nightSent/clockinSent/…/acked flags
+  // would otherwise linger and cause the NEXT worker who fills this slot to be
+  // silently skipped by autoSendShiftReminders(). Reset clears them at the source;
+  // we then re-assert the replacement state for the now-open slot.
+  await resetReminderLifecycleForRefill(pendingCancelId);
   shiftReminders[pendingCancelId].needsReplacement = true;
   shiftReminders[pendingCancelId].replacementAt = new Date().toISOString();
   shiftReminders[pendingCancelId].replacedWorker = originalWorker || '';
@@ -17675,8 +17702,26 @@ async function _confirmImportBookingsInner() {
         if (live.sr_rate     != null) fillPayload.sr_rate     = live.sr_rate;
         if (live.sr_worker   != null) fillPayload.sr_worker   = live.sr_worker;
         if (live.sr_absorbed != null) fillPayload.sr_absorbed = live.sr_absorbed;
-        const { error: fillErr } = await supabaseClient
+        // v71: carry the portal approval state onto the slot, exactly like the
+        // insert/merge paths do. Previously the fill path omitted this, so a
+        // booking the portal marked pending filled an open slot but landed as a
+        // normal confirmed shift (approval_status stayed null on the slot). Now a
+        // pending portal booking keeps its ⏳ pending state; an approved/undecided
+        // one clears any stale pending flag the slot may have carried. Only touched
+        // when the column is known-present (graceful degrade handled on error).
+        if (!_approvalColumnMissing) {
+          fillPayload.approval_status = (r.approval_status === 'pending') ? 'pending' : null;
+        }
+        let { error: fillErr } = await supabaseClient
           .from('shifts').update(fillPayload).eq('id', slotId);
+        // Graceful degrade if the approval_status column is absent: drop it and
+        // retry, mirroring the insert path, so the fill still succeeds.
+        if (fillErr && approvalColumnMissing(fillErr)) {
+          _approvalColumnMissing = true;
+          delete fillPayload.approval_status;
+          ({ error: fillErr } = await supabaseClient
+            .from('shifts').update(fillPayload).eq('id', slotId));
+        }
         if (fillErr) {
           console.error('Open-slot fill failed:', fillErr.message, fillPayload);
           toast(`Failed to fill slot for ${r.worker_name}: ${fillErr.message}`, 'error');
@@ -17688,6 +17733,14 @@ async function _confirmImportBookingsInner() {
           r._importedThisSession = 'filled';
           r._existingMatch = 'exact';
           r._fillsOpenSlot = false;
+          // v71: a slot id is REUSED in place on fill. If a previous worker had
+          // occupied this same slot (taken → cancelled → back to Available), its
+          // reminder lifecycle flags (nightSent/clockinSent/…/acked) survived on
+          // this id and would make autoSendShiftReminders() silently SKIP the new
+          // worker (the !nightSent / !clockinSent guards read false). Reset the
+          // reminder send/ack lifecycle for the new occupant; preserve nothing
+          // stale. needsReplacement is cleared too — the slot is now filled.
+          await resetReminderLifecycleForRefill(slotId);
           // Make sure this worker exists in the roster for future lookups.
           try {
             const known = (workers || []).some(w => importNormName(w.name) === importNormName(r.worker_name));
