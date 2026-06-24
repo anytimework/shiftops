@@ -6,7 +6,7 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
-<!-- Build patch: v76 (DUPLICATE REMINDERS + REMINDERS TO CANCELLED/ON-HOLD — STOPPED) — Fixes three reminder faults seen in the field: a worker got the SAME night reminder TWICE, got a reminder for a shift they'd CANCELLED, and (separately) an ON-HOLD account still received one. ROOT CAUSES, all in autoSendShiftReminders(): (1) DUPLICATES — the send-once guard reads !shiftReminders[shift.id].nightSent, keyed by ROW id. A worker can have more than one ROW for the same logical shift (e.g. a booking cancelled→slot returned to Available while a duplicate row lingered, or an import that created a parallel row); each id has its own reminder record, so each passed the guard and fired. There was also no in-flight guard, so the 15s polling tick (or a second open tab) could re-enter the async sweep and double-send in the window between the !nightSent check and the persist. (2) CANCELLED — a cancelled booking is returned to Available (worker_name='Available', cancelled=false) and is correctly skipped; the reminder that reached a 'cancelled' shift actually came from a surviving DUPLICATE row still carrying the worker name — so fixing the duplicate path fixes this too. (3) ON-HOLD — the loop never checked suspension, so a suspended/on-hold worker's shift still reminded. FIX (additive, ONE function): (a) module-level _reminderSweepInFlight guard bails if a sweep is already running (kills re-entrant/multi-tab double-sends); (b) DEDUPE BY LOGICAL SHIFT (worker|date|start|end), not row id — a per-sweep Set plus a siblingAlreadySent() scan across all loaded rows sharing that key, so once ANY row's reminder is sent+persisted no sibling row ever re-sends, across ticks and across devices (shiftReminders syncs team-wide via Supabase); (c) a freshness re-read of the live reminder state immediately before each send; (d) skip isWorkerSuspended(worker) so on-hold workers are never reminded. Genuinely-different shifts for the same worker (different times) still both send. No schema change. node --check passes (2/2 inline script blocks); 6-case harness passes (duplicate rows→one send, cancelled/available sibling, suspended→none, cross-tick duplicate, concurrent sweeps→one, two distinct shifts→both). Surgical diff: only autoSendShiftReminders() + its preceding flag changed; 852 functions unchanged, nothing else touched. -->
+<!-- Build patch: v77b (REMINDER TIMEZONE OFF-BY-ONE + DUPLICATE/CANCELLED SENDS) — Worked from the v75-topped June24_1ndex build per ops. THREE faults in autoSendShiftReminders(): (1) THE BIG ONE — a TODAY shift received a "tomorrow" night reminder at 9pm. ROOT CAUSE: the day strings were built with nowDate.setHours(0,0,0,0) then .toISOString().slice(0,10). setHours sets LOCAL midnight but toISOString() prints UTC, so in SG/MY/PH (UTC+8) local-midnight maps to the PREVIOUS calendar day in UTC. At 21:02 SGT on 24 Jun this yielded today="2026-06-23", tomorrow="2026-06-24", so a real 24-Jun (today) shift matched the tomorrow night-reminder window and fired. FIX: compute todayStr/tomorrowStr with the existing formatDate() helper, which uses LOCAL date parts (getFullYear/Month/Date) — today=24, tomorrow=25, correct in every UTC+ zone. (2) SENT TWICE — the !nightSent guard is keyed by ROW id, but a worker can have >1 row for one logical shift (a cancelled booking that left a duplicate row), so each row fired. Plus no in-flight guard, so the 15s tick / a second tab could re-enter the async sweep and double-send. FIX: module-level _reminderSweepInFlight guard + dedupe by logical key (worker|date|start|end) via a per-sweep Set and a siblingAlreadySent() scan + a freshness re-read before each send. (3) REMINDED A CANCELLED SHIFT — a WORKER cancellation sets worker_name='Available' (cancelled stays false), so the existing s.cancelled check missed it; the 'available' name-check is what skips it, and a suspended/on-hold worker is now skipped too via isWorkerSuspended(). Genuinely-different shifts for the same worker still both send. No schema change. node --check passes (2/2 inline script blocks); 5-case harness (run under TZ=Asia/Singapore at 21:02 SGT) passes: today shift→no reminder, real tomorrow→exactly one, duplicate tomorrow rows→one, hard-cancelled→none, suspended→none. Surgical diff: only autoSendShiftReminders() + its preceding flag changed; 852 functions unchanged, nothing else touched. -->
 <!-- Build patch: v75 (DELETE-STICKS — REAL FIX + CLOCK-SYNC RESTORED) — Fixes two linked regressions. PROBLEM A: a deleted portal shift (e.g. Jonathan Herbsman) STILL kept coming back after v73. PROBLEM B: worse, portal clock-ins/outs stopped syncing onto the ops panel entirely. SHARED ROOT CAUSE — a KEY-SHAPE MISMATCH in the v73 delete. importBookingKey() keys a live portal booking by its real id → "pb|<id>" (it reads row._portalBookingId). But a SHIFT object has no _portalBookingId, so v73's deleteCancelledShift() could only ever write the ignore under the fuzzy "k|worker|date|start|end" key. The importer then looked the booking up under "pb|<id>" and never found the "k|" ignore → it resurrected (Bug A). And because the "k|" key is OUTLET-BLIND, that stale delete-ignore ALSO matched any OTHER active booking for the same worker at the same date/time → tagExistingShifts flagged those rows _ignored and `continue`d with _existingShift=null, so syncPortalClockTimes (which requires _existingMatch==='exact') skipped them → portal clock-in/out stopped syncing (Bug B). FIX (additive, two functions, no schema change): (1) deleteCancelledShift() now REVERSE-LOOKS-UP the import_handled ledger by the deleted shiftId to recover the EXACT key the importer uses (the real "pb|<id>"), writes the ignore under THAT key, and prunes the stale import_handled entry. It falls back to the fuzzy "k|" key only when no ledger record exists, and now records the outletKey on every delete-ignore for disambiguation. (2) isImportIgnored() gains a guard: a delete-origin "k|" ignore only suppresses a row when the OUTLET also matches (pb|/os| unique-id ignores and manual "Ignore" choices are unchanged, key-only). Legacy v73 "k|" delete-ignores that carry no outletKey no longer suppress at all — restoring clock-sync immediately — while the corrected pb|-keyed ignore stops the resurrection going forward. NOTE: a shift already deleted under v73 must be deleted once more under v75 to write the durable pb| ignore; clock-sync is restored on load regardless. Exactly two functions changed (isImportIgnored + the delete ignore-write), ~85 lines added / 9 removed, nothing else touched. node --check passes (2/2 inline script blocks); 14-case logic harness passes (resurrection blocked, clock-sync unblocked, manual ignore unchanged, same/different-outlet disambiguation, ledger + fallback paths). -->
 <!-- Build patch: v74 (SHIFT-CREATED AUTHOR IS NOW REAL, NOT THE VIEWER) — Fixes the glitch where the SAME shift's "Shift created" row in Shift History showed a DIFFERENT author depending on who opened it ("Jon" to Jon, "Jayden" to Jayden). ROOT CAUSE: the "Shift created" row was SYNTHESIZED at view time, not stored. The Add-Shift insert never wrote a created_by on the shift row, and its logActivity('…created') call passed refId='' (the insert didn't return the new id), so no creation entry was tied to the shift either. With both real sources empty, openAuditModal fell through to `currentInternalUser` — i.e. whoever was VIEWING — and printed them as the creator. FIX (additive, two functions): (1) saveShift insert now stamps created_by: currentInternalUser and captures the new id via .select('id'); the creation event is logged against that REAL shift id so the audit trail is correct going forward. Graceful-degrade retries strip created_by (and the existing approval_status path) if those columns don't exist yet, so adding a shift never hard-fails — the logged creation entry fixes the author even without the column. (2) openAuditModal no longer invents an author: it suppresses the synthetic "Shift created" row when a real creation log already exists (prevents a double row for new shifts), and for older shifts with no creation log it uses s.created_by → earliest real log author → "—", NEVER currentInternalUser. So a shift with an unknown creator now reads "—" instead of impersonating the viewer. OPTIONAL durable schema add (creator persists team-wide on the row): run once in Supabase — alter table shifts add column created_by text; — loadShifts already selects * so it flows through with no other change; the audit-log creation entry already makes the History author correct regardless. node --check passes (2/2 inline script blocks). -->
 <!-- Build patch: v73 (DELETE-STICKS FOR PORTAL SHIFTS — resurrection guard) — Fixes "I keep deleting this shift but it comes back over and over without being prompted." ROOT CAUSE: a portal-originated booking (e.g. Jonathan Herbsman) is still LIVE in the portal feed, so deleting only the panel copy can't remove it upstream. On the next load, tagExistingShifts (the import_handled self-cleaning step) finds the ledger entry pointing at a shiftId that no longer exists and PRUNES it "so this booking can be re-imported cleanly" — then the 5-min auto-importer re-surfaces it and any confirm re-creates it. So a plain hard-delete always loses the race against the importer. FIX (additive, single function): deleteCancelledShift() now, AFTER a successful hardDeleteShift, writes an import_ignored entry under the SAME stable importBookingKey() the importer reads (a shift-shaped object keys identically — worker_name/shift_date/scheduled_start/scheduled_end → the k| fuzzy key), so the booking lands in "Ignored — won't be imported" instead of resurrecting. GUARDS: only for portal-linked shifts (isShiftPortalSynced) so ops-only deletes don't pollute the ignore ledger, and never for open/available slots (isOpenSlot — no stable fuzzy key). The confirm dialog now states the booking will be marked ignored, and it's fully UNDOABLE from Import Bookings → Ignored (existing unignoreImportRow). Persisted via saveImportIgnored (localStorage + Supabase merge-union, team-wide). Exactly one function changed (~45 lines added, original delete/error/reload flow preserved); no schema change. node --check passes (2/2 inline script blocks). -->
@@ -9037,36 +9037,40 @@ function buildClockinReminderMessage(s) {
 
 // ── Auto-send reminders (runs on polling tick) ───────────────────────────────
 let _lastReminderCheck = 0;
-let _reminderSweepInFlight = false; // v75: prevents overlapping async sweeps (multi-tab / re-entrancy) from double-sending
+let _reminderSweepInFlight = false; // v77b: prevents overlapping async sweeps (multi-tab / re-entrancy) from double-sending
 async function autoSendShiftReminders() {
   const pk = getPeriskopeConfig();
   if (!pk?.enabled || !pk?.apikey) return;
   const now = Date.now();
   if (now - _lastReminderCheck < 60000) return; // throttle to once per minute
-  // v75: in-flight guard. The send below is async (await sendPeriskopeMessage),
-  // and this function is invoked from a 15s polling tick. Without this guard, two
-  // ticks (or two open tabs on the same device) could both pass the !nightSent
-  // check before either persists nightSent=true, sending the SAME reminder twice —
-  // exactly the duplicate seen in the field. Bail if a sweep is already running.
+  // v77b: in-flight guard — the send is async and this runs on a 15s polling tick,
+  // so two ticks (or two open tabs) could both pass the !nightSent check before
+  // either persists, sending the SAME reminder twice. Bail if a sweep is running.
   if (_reminderSweepInFlight) return;
   _reminderSweepInFlight = true;
   _lastReminderCheck = now;
 
   try {
+  // v77b — TIMEZONE FIX (this is why a TODAY shift got a "tomorrow" reminder at 9pm).
+  // The old code did `nowDate.setHours(0,0,0,0)` (local midnight) then
+  // `.toISOString().slice(0,10)` — but toISOString() prints UTC, so for any zone
+  // east of UTC (Singapore/Malaysia/Philippines = UTC+8) local-midnight converts to
+  // the PREVIOUS calendar day in UTC. At 9pm SGT on 24 Jun this produced
+  // today="2026-06-23" and tomorrow="2026-06-24", so a real 24-Jun (today) shift
+  // matched the "tomorrow" night-reminder window and fired wrongly. formatDate()
+  // uses LOCAL date parts (getFullYear/Month/Date), so the dates are correct.
   const nowDate  = new Date(); nowDate.setHours(0,0,0,0);
   const tomorrowDate = new Date(nowDate); tomorrowDate.setDate(nowDate.getDate() + 1);
-  const todayStr    = nowDate.toISOString().slice(0,10);
-  const tomorrowStr = tomorrowDate.toISOString().slice(0,10);
+  const todayStr    = formatDate(nowDate);
+  const tomorrowStr = formatDate(tomorrowDate);
   const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
 
-  // v75: DEDUPE BY LOGICAL SHIFT, not just row id. A worker can end up with more
-  // than one shift ROW for the same logical shift (same worker + date + time) —
-  // e.g. a booking that was cancelled (slot→Available) while a duplicate row
-  // lingered, or an import that created a parallel row. Each row has its own
-  // shiftReminders[id], so each would independently pass the !nightSent guard and
-  // fire — producing the duplicate reminder seen in the field. We track which
-  // logical (worker|date|start|end) shifts we've already sent a night / clock-in
-  // reminder for in THIS sweep, and skip any further row that maps to the same one.
+  // v77b: dedupe by LOGICAL shift (worker|date|start|end), not row id — a worker can
+  // have more than one ROW for the same shift (e.g. a cancelled booking that left a
+  // duplicate row), and each row's own shiftReminders[id] would independently pass
+  // the !nightSent guard and fire, sending the SAME reminder twice. Track which
+  // logical shifts we've already sent for and skip duplicates (this sweep + any
+  // sibling row already marked sent, across ticks/devices).
   const _nightSentThisSweep = new Set();
   const _clockinSentThisSweep = new Set();
   const logicalKey = (s) => [
@@ -9075,15 +9079,6 @@ async function autoSendShiftReminders() {
     String(s.scheduled_start || '').slice(0,5),
     String(s.scheduled_end || '').slice(0,5),
   ].join('|');
-
-  // v75: a logical shift may have MORE THAN ONE row (different ids) — e.g. a
-  // cancelled-then-duplicated booking. The per-sweep Sets above dedupe within one
-  // sweep, but two rows could still be sent on DIFFERENT ticks (each has its own
-  // id, each !nightSent). siblingAlreadySent() scans every loaded shift sharing
-  // this logical key and reports whether ANY of their reminder records already has
-  // the given flag set — so once one row's reminder is sent + persisted, no sibling
-  // row will ever send the same reminder again, across ticks and across devices
-  // (shiftReminders is synced from Supabase).
   const siblingAlreadySent = (s, flag) => {
     const lk = logicalKey(s);
     for (const other of (allShifts || [])) {
@@ -9097,11 +9092,13 @@ async function autoSendShiftReminders() {
 
   for (const s of (allShifts || [])) {
     const workerName = String(s.worker_name || '').trim();
-    // Skip anything that isn't an ACTIVE assignment: open slots, cancelled rows.
+    // Skip anything that isn't an ACTIVE assignment: open/Available slots and
+    // cancelled rows. NOTE: a WORKER cancellation returns the slot to
+    // worker_name='Available' (cancelled stays false), so the 'available' check is
+    // what actually skips a cancelled-then-freed slot — the s.cancelled check only
+    // catches outlet/hard cancellations.
     if (!workerName || workerName.toLowerCase() === 'available' || s.cancelled) continue;
-    // v75: never remind a suspended / on-hold worker (the field screenshot showed an
-    // on-hold worker still receiving a reminder). Their shifts shouldn't be reminded
-    // until the hold is lifted.
+    // v77b: never remind a suspended / on-hold worker.
     if (isWorkerSuspended(workerName)) continue;
     const phone = workerPhone(workerName);
     if (!phone) continue;
@@ -9113,17 +9110,11 @@ async function autoSendShiftReminders() {
     // (deduped team-wide via persistReminder) ensures it's sent once only, even if the
     // panel is open across several ticks. (Was previously the 7pm–10pm window 1140–1320.)
     if (s.shift_date === tomorrowStr && !r.nightSent && nowMins >= 1260 && nowMins < 1265) {
-      // v75: logical-dedupe — if another row for this same worker/date/time already
-      // sent (this sweep or earlier this minute), don't send again.
-      if (_nightSentThisSweep.has(lk)) continue;
-      // v75: durable cross-row/cross-tick dedupe — a SIBLING row (different id, same
-      // logical shift) already sent this reminder → skip.
-      if (siblingAlreadySent(s, 'nightSent')) { _nightSentThisSweep.add(lk); continue; }
-      // v75: freshness re-check — re-read live state right before sending so a
-      // concurrent device/tab that already marked it sent (and synced) is respected.
+      if (_nightSentThisSweep.has(lk)) continue;                      // dupe row this sweep
+      if (siblingAlreadySent(s, 'nightSent')) { _nightSentThisSweep.add(lk); continue; } // sibling row already sent
       const live = shiftReminders[s.id] || {};
-      if (live.nightSent) { _nightSentThisSweep.add(lk); continue; }
-      _nightSentThisSweep.add(lk); // claim BEFORE awaiting so a re-entrant tick can't double up
+      if (live.nightSent) { _nightSentThisSweep.add(lk); continue; } // freshness re-check
+      _nightSentThisSweep.add(lk);                                    // claim before awaiting
       const ok = await sendPeriskopeMessage(phone, buildNightReminderMessage(s));
       if (ok) {
         if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
@@ -9132,7 +9123,7 @@ async function autoSendShiftReminders() {
         await persistReminder(s.id);
         toast(`🌙 Night reminder sent to ${workerName}`);
       } else {
-        _nightSentThisSweep.delete(lk); // send failed → allow a retry next sweep
+        _nightSentThisSweep.delete(lk);                               // failed → allow retry
       }
     }
 
