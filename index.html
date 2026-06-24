@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<!-- Build patch: v72 (CROSS-DATE TASKS/PENDING + IMPORT PENDING CHIP) — Two fixes from a live observation (Tasks card showed 0 on one date, 2 on another; a pending-approval portal booking that filled an open slot showed no pending state in Import Bookings). (1) CROSS-DATE TASKS & PENDING APPROVAL: approval-acknowledgement tasks ("✅ Booking approved") are keyed by the approval_acks ledger, NOT by a shiftReminders flag, so loadTaskShiftCache() (which only fetched reminder-flagged ids + the viewed day's allShifts) never pulled their shift into taskShiftPool() unless that shift happened to be on the date currently on screen — making the task, and the Tasks card count, appear only while viewing that shift's own date. FIX: loadTaskShiftCache() now also folds every un-acknowledged approval_acks shift id into its id-fetch (via a Set, de-duped) AND folds the cross-date pendingApprovalAll cache straight into taskShiftCache, so approval-ack tasks and pending-approval shifts are present in the pool on EVERY date, exactly like dispute/late/offer tasks already are. loadShifts() reordered so checkApprovalColumn()+loadPendingApprovalAll() resolve BEFORE loadTaskShiftCache() (the cache now depends on that cross-date data being current). No schema change; getOpenTasks()'s own date guards (shift_date>=today) are unchanged, so nothing new surfaces — items that were already open just stop vanishing when you change the viewed date. (2) IMPORT PREVIEW PENDING CHIP ON ALL BRANCHES: the "⏳ Pending approval" chip in renderImportPreview() was only emitted in the brand-new-booking else branch, so a pending booking reconciled as "🪑 Fills open slot" or "🔗 Merge" showed no pending indicator in the preview — even though it imports as pending correctly (fillPayload/merge both carry approval_status) and shows pending on the Pending Approval card once saved. FIX: the chip is computed once per row (const pendChip, from r.approval_status==='pending') and appended to the fills-open-slot, merge-manual, and merge-into-existing branches as well as the existing brand-new branch. Pure UI/visibility — no change to what's written on Confirm. node --check passes (main block); surgical diff — only loadShifts ordering, loadTaskShiftCache id-collection, and the import-preview chip placement changed; nothing else touched. -->
 <!-- Build patch: v71 (OPEN-SLOT FILL: APPROVAL FLAG + STALE-REMINDER RESET) — Two real bugs surfaced on a slot that was filled in place after a previous worker took then cancelled it (same shift id reused). (1) PENDING-APPROVAL LOST ON FILL: resolvePortalApproval() correctly resolved the booking to 'pending', and the insert + merge paths wrote approval_status, but the OPEN-SLOT FILL path built its own fillPayload that omitted approval_status entirely — so a portal booking the app showed as ⏳ Pending Approval imported into the ops panel as a normal CONFIRMED shift. FIX: fillPayload now sets approval_status = (r.approval_status==='pending' ? 'pending' : null) when the column is known-present, with the same approvalColumnMissing()→drop-and-retry graceful degrade the insert path uses (so a pending fill keeps its orange state, an approved/undecided fill clears any stale pending flag the slot carried). (2) REMINDERS AUTO-MARKED SENT+ACKED ON A FRESH BOOKING: reminder send/ack state (shiftReminders) is keyed by shift.id, and an open slot is updated IN PLACE on fill — so when a slot went taken→cancelled→Available→re-filled, the previous occupant's nightSent/nightAcked/clockinSent/clockinResponded flags lingered on the reused id. The new worker therefore showed reminders already sent+acknowledged AND, worse, would be SILENTLY SKIPPED by autoSendShiftReminders() (whose !nightSent / !clockinSent guards read false). This was NOT the night-reminder auto-send (that's gated to a 21:00–21:05 window) and NOT the clock-in all-true stamp (worker hadn't clocked in) — it was stale state. FIX: new resetReminderLifecycleForRefill(shiftId) zeroes the per-occupant lifecycle (send/ack + dispute/late/offer + needsReplacement), called at every reuse-in-place point: confirmCancel (slot→Available; replacement state re-asserted right after), confirmAssignWorker (in-app assign; replacement snapshotted BEFORE reset so the completed-task log stays accurate), the standby/offer assign path, and the import open-slot fill. No schema change. node --check passes (2/2 non-empty script blocks); surgical diff — only fillPayload, the 3 assign/cancel reminder-clear blocks, and the one new helper changed; nothing else touched. -->
 <!-- Build patch: v66 (AI BATCH ACTIONS + TOLERANT PARSING) — Fixes the "❌ Action 1 failed: JSON Parse error" + 12-vs-13 miscount seen when the AI changed many shift rates at once. ROOT CAUSE: a bulk request made the model emit many JSON action objects (often newline-separated inside one ```action``` fence, sometimes with a trailing comma/smart quote); executeAIAction did a bare JSON.parse() which can only parse ONE value, so the block threw and aborted. THREE changes: (1) parseActionObjects() — tolerant parser that splits a block into multiple top-level {…} objects (brace-aware, ignores braces inside strings), strips trailing commas, normalises smart quotes, drops the odd 'json' label, and SKIPS any single unparseable object instead of failing the batch. executeAIAction now takes a pre-parsed object; renderAIReply flattens all blocks via parseActionObjects and iterates objects (batch counts are now correct). (2) New setShiftRateBatch action — bulk rate change by outlet (+ optional worker/date-range/status=upcoming) in ONE Supabase .in() update, country-scoped, non-cancelled only, with activity log; reports how many changed. The model is told to use it for "make all X rates $Y" instead of emitting a long list of single setShiftRate blocks (which is what triggered the parse error). (3) Prompt: rate guidance rewritten to prefer the batch action and never emit more than a couple of action objects per reply. Only executeAIAction's signature, the renderAIReply action loop, the new action case, and the rates prompt line changed; aiQueryShifts (v65 formatting), loadShifts, buildSystemContext, resolveAIShift and all other handlers untouched. node --check passes; 8/8 parser cases pass incl. the 13-objects-one-bad scenario. -->
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v73 (DELETE-STICKS FOR PORTAL SHIFTS — resurrection guard) — Fixes "I keep deleting this shift but it comes back over and over without being prompted." ROOT CAUSE: a portal-originated booking (e.g. Jonathan Herbsman) is still LIVE in the portal feed, so deleting only the panel copy can't remove it upstream. On the next load, tagExistingShifts (the import_handled self-cleaning step) finds the ledger entry pointing at a shiftId that no longer exists and PRUNES it "so this booking can be re-imported cleanly" — then the 5-min auto-importer re-surfaces it and any confirm re-creates it. So a plain hard-delete always loses the race against the importer. FIX (additive, single function): deleteCancelledShift() now, AFTER a successful hardDeleteShift, writes an import_ignored entry under the SAME stable importBookingKey() the importer reads (a shift-shaped object keys identically — worker_name/shift_date/scheduled_start/scheduled_end → the k| fuzzy key), so the booking lands in "Ignored — won't be imported" instead of resurrecting. GUARDS: only for portal-linked shifts (isShiftPortalSynced) so ops-only deletes don't pollute the ignore ledger, and never for open/available slots (isOpenSlot — no stable fuzzy key). The confirm dialog now states the booking will be marked ignored, and it's fully UNDOABLE from Import Bookings → Ignored (existing unignoreImportRow). Persisted via saveImportIgnored (localStorage + Supabase merge-union, team-wide). Exactly one function changed (~45 lines added, original delete/error/reload flow preserved); no schema change. node --check passes (2/2 inline script blocks). -->
 <!-- Build patch: v64.1 (AI PROMPT HARDENING) — Tightens the v64 cross-date rule after a live test showed the AI hedging ("I don't see any upcoming shifts in the visible schedule") and reaching for searchWorker (which returns a PROFILE, not shifts) instead of queryShifts. The cross-date RULE now: (a) forbids answering shift questions from SYSTEM CONTEXT or implying the on-screen window is the full DB, (b) forbids the "I don't see anything in the visible schedule / next 14 days" phrasing, (c) requires queryShifts as the FIRST action with no preamble for any upcoming/date/outlet/status shift question, (d) explicitly bars searchWorker for "does X have shifts" (searchWorker is profile-only). The searchWorker rule is scoped to profile/contact lookups. No JS logic changed — prompt text only; queryShifts/resolveAIShift/setShiftRate from v64 are intact and dispatched. node --check passes. -->
 <!-- Build patch: v64 (AI CROSS-VIEW + RATE) — Makes the AI chatbot operate on the FULL database, not just the date window currently on screen. ROOT CAUSE of "it can only see my current view": buildSystemContext() builds the AI's worldview from allShifts, but loadShifts() only fetches the viewed day/week from Supabase, so future/other-date shifts simply weren't in context, and any shiftId-keyed action (cancel/clockIn/clockOut/addNote/markPaid) did allShifts.find(...) which missed shifts outside that window. THREE additions, all additive: (1) New queryShifts action + aiQueryShifts(): live Supabase query the AI runs for any worker / outlet / date range / status (upcoming|cancelled|completed|open|all), country-scoped, returning matching shifts WITH ids — so "what are <worker>'s upcoming shifts" now pulls real future data. System prompt gains a top RULE forcing queryShifts for any cross-date/future question instead of guessing from the limited view. (2) resolveAIShift(id): checks allShifts + taskShiftCache, then falls back to a direct single-row Supabase fetch (country-scoped) so cancelShift/clockIn/clockOut/addNote/markPaid/setShiftRate work on ANY shift regardless of the viewed date. The 5 view-bound lookups were re-pointed to it. (3) New setShiftRate action: updates a specific shift's client rate (s.rate) by id with confirm-before-write + activity log; AI is told to queryShifts first to find the id and confirm old→new before applying. Exactly 6 original lines changed (5 lookups + default anchor), ~92 added, zero deletions of existing logic. node --check passes on the main script block. NOTE: the worker-facing Periskope "what shifts are available today/tomorrow" auto-reply is a SEPARATE server-side Edge Function (periskope-webhook) and is delivered as a standalone deployable handler, not in this file. -->
 
@@ -6546,19 +6546,15 @@ async function loadShifts() {
   });
   saveShiftComments();
   await loadOverpaymentCache();
-  // v72: resolve the cross-date pending-approval cache + the approval-status
-  // column probe BEFORE building the task cache, so loadTaskShiftCache can fold
-  // pending-approval and approval-ack shifts into the cross-date pool (those tasks
-  // were previously only visible while viewing their own date).
-  try { await checkApprovalColumn(); } catch (e) {}
-  try { await loadPendingApprovalAll(); } catch (e) {}
   await loadTaskShiftCache();
   await loadCancellationLogsForCurrentView();
   await loadRecentCancellations();
   await loadStandbyList();
   await loadAvailableSlots();
   await buildPortalSyncIndex();
+  try { await checkApprovalColumn(); } catch (e) {}
   try { await checkOtColumn(); } catch (e) {}
+  try { await loadPendingApprovalAll(); } catch (e) {}
   renderTable();
   renderMetrics();
   renderAttendanceActivityBanner();
@@ -6622,30 +6618,16 @@ async function loadOverpaymentCache() {
 // so a "late tomorrow" notice or a cancellation 3 days out still shows today.
 async function loadTaskShiftCache() {
   // Collect shift IDs that have any actionable reminder flag set
-  const idSet = new Set();
+  const ids = [];
   for (const [id, r] of Object.entries(shiftReminders || {})) {
     if (!r) continue;
-    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) idSet.add(String(id));
+    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) ids.push(String(id));
   }
-  // v72: approval-acknowledgement tasks are keyed by the approval_acks LEDGER, not
-  // by a reminder flag — so their shift wasn't being pulled into the cross-date
-  // pool unless it happened to be on the viewed day. That made the "✅ Booking
-  // approved" task (and therefore the Tasks card count) appear only while viewing
-  // that shift's date. Fold every un-acknowledged approval-ack shift id into the
-  // fetch so the task is visible on EVERY date, exactly like the dispute/late ones.
-  for (const [sid, entry] of Object.entries(approvalAcks || {})) {
-    if (entry && entry.approvedAt && !entry.acked) idSet.add(String(sid));
-  }
-  const ids = Array.from(idSet);
   taskShiftCache = {};
   // Always fold in the currently-loaded shifts (so same-day items work even
   // before/without the cross-date fetch resolving).
   (allShifts || []).forEach(s => { if (s && s.id != null) taskShiftCache[String(s.id)] = s; });
-  // v72: also fold in the cross-date pending-approval cache so any pending-approval
-  // shift is present in the pool regardless of the viewed date (keeps the Pending
-  // Approval surface consistent with the cross-date card count).
-  (Array.isArray(pendingApprovalAll) ? pendingApprovalAll : []).forEach(s => { if (s && s.id != null) taskShiftCache[String(s.id)] = s; });
-  if (!ids.length) { if (typeof updateTasksNavBadge === 'function') { try { updateTasksNavBadge(); } catch(e){} } return; }
+  if (!ids.length) return;
   try {
     // Supabase .in() — chunk to stay well under URL limits
     const chunk = 150;
@@ -10858,7 +10840,29 @@ async function deleteCancelledShift(id) {
   }
 
   const label = `${s.outlet || 'this outlet'} · ${s.worker_name || 'Cancelled'} · ${scheduledRange(s)}`;
-  const ok = confirm(`Delete this cancelled shift permanently?\n\n${label}`);
+
+  // v73 — RESURRECTION GUARD. If this shift came from the portal (it's still a
+  // live booking upstream), a plain hard-delete only removes the panel copy: the
+  // next portal load prunes the now-stale import_handled entry (its shiftId no
+  // longer exists) and re-offers the booking, and the 5-min auto-importer keeps
+  // surfacing it — so the deleted shift "keeps coming back". To make a delete
+  // actually stick for a portal-linked shift, we also write an import_ignored
+  // entry under the SAME stable importBookingKey() the importer reads, so the
+  // booking drops into "Ignored — won't be imported" instead of resurrecting.
+  // Guards: only for portal-linked shifts (an ops-only shift can't resurrect, so
+  // we don't pollute the ignore ledger), and never for open/available slots
+  // (no stable fuzzy key). Undoable from the Import Bookings "Ignored" section.
+  let willIgnore = false;
+  try {
+    willIgnore = !isOpenSlot(s) && isShiftPortalSynced(s);
+  } catch (e) { willIgnore = false; }
+
+  const ok = confirm(
+    `Delete this cancelled shift permanently?\n\n${label}` +
+    (willIgnore
+      ? `\n\nThis is a portal booking — deleting will also mark it "ignored" so the portal sync stops re-importing it. You can undo from Import Bookings → Ignored.`
+      : ``)
+  );
   if (!ok) return;
 
   const { error } = await hardDeleteShift(id);
@@ -10868,7 +10872,26 @@ async function deleteCancelledShift(id) {
     return;
   }
 
-  toast('Cancelled shift deleted');
+  // Persist the ignore AFTER the delete succeeded. importBookingKey() accepts a
+  // shift-shaped object directly (worker_name / shift_date / scheduled_start /
+  // scheduled_end line up with the import-row fields it keys on), producing the
+  // identical k| key the reconciler builds for this booking on the next load.
+  if (willIgnore) {
+    try {
+      const key = importBookingKey(s);
+      if (key && !importIgnored[key]) {
+        importIgnored[key] = {
+          when: new Date().toISOString(),
+          by: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : '',
+          label: label,
+          via: 'delete'   // provenance: ignored because the panel shift was deleted
+        };
+        await saveImportIgnored();
+      }
+    } catch (e) { console.warn('delete→ignore ledger write failed:', e); }
+  }
+
+  toast(willIgnore ? 'Cancelled shift deleted — won’t be re-imported' : 'Cancelled shift deleted');
   await loadShifts();
 }
 
@@ -16810,23 +16833,12 @@ function renderImportPreview() {
     // "Never import this" — adds the booking to the durable ignore ledger so it
     // drops into the "Ignored" section and never resurfaces on reload/refresh.
     const ignoreBtn = `<button style="margin-top:4px;margin-left:5px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--text3);border-radius:4px;color:var(--text3);cursor:pointer;" title="Never import this booking — it won't come back on refresh" onclick="ignoreImportRow(${idx})">🚫 Ignore</button>`;
-    // v72: a portal booking can be pending client approval regardless of HOW it
-    // reconciles into the panel (brand-new, fills an open slot, or merges into an
-    // existing booking). Previously the "⏳ Pending approval" chip only rendered in
-    // the brand-new branch, so a pending booking that fills an open slot showed no
-    // pending state in the import preview — even though it correctly imports as
-    // pending (fillPayload/merge both carry approval_status) and shows pending on
-    // the Pending Approval card once saved. Compute the chip once here and append
-    // it to every branch that produces a pending import.
-    const pendChip = (r.approval_status === 'pending')
-      ? '<div style="margin-top:3px;"><span class="badge badge-amber" title="Portal marks this booking as awaiting client approval. It imports as Pending approval and flips to Confirmed automatically once approved in the portal.">⏳ Pending approval</span></div>'
-      : '';
     let statusCell;
     if (r._forceMergeId) {
       // User manually tagged this row to merge into a specific existing booking.
       const tgt = (r._mergeCandidates || []).find(s => s.id === r._forceMergeId) || {};
       statusCell = `<td>
-        <span class="badge badge-blue">🔗 Merge (manual)</span>${pendChip}
+        <span class="badge badge-blue">🔗 Merge (manual)</span>
         <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
           Into <b>${escapeHtml(tgt.outlet||'?')}</b> ${escapeHtml(tgt.shift_date||'')} ${escapeHtml(tgt.scheduled_start||'')}–${escapeHtml(tgt.scheduled_end||'')}<br>
           Updates that booking instead of adding new
@@ -16850,7 +16862,7 @@ function renderImportPreview() {
       // role and times, keeping the slot's panel rate authoritative.
       const ex = r._existingShift || {};
       statusCell = `<td>
-        <span class="badge badge-green">🪑 Fills open slot</span>${pendChip}
+        <span class="badge badge-green">🪑 Fills open slot</span>
         <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
           Takes the open <b>${escapeHtml(ex.outlet||'?')}</b> slot<br>
           ${escapeHtml(ex.scheduled_start||'')}–${escapeHtml(ex.scheduled_end||'')} — updates it in place, no duplicate
@@ -16885,7 +16897,7 @@ function renderImportPreview() {
       // Merging updates the existing shift instead of creating a duplicate.
       const ex = r._existingShift || {};
       statusCell = `<td>
-        <span class="badge badge-blue">🔗 Merge into existing</span>${pendChip}
+        <span class="badge badge-blue">🔗 Merge into existing</span>
         <div class="sub-text" style="color:var(--text3);font-size:10px;margin-top:2px;line-height:1.35;">
           Updates the booking already in the panel<br>
           (${escapeHtml(ex.clock_in||'—')}–${escapeHtml(ex.clock_out||'—')} → ${escapeHtml(r.clock_in||'—')}–${escapeHtml(r.clock_out||'—')})
@@ -16906,6 +16918,9 @@ function renderImportPreview() {
       </td>`;
     } else {
       const st = (r.clock_in && r.clock_out) ? '<span class="badge badge-green">Completed</span>' : '<span class="badge badge-blue">Scheduled</span>';
+      const pendChip = r.approval_status === 'pending'
+        ? '<div style="margin-top:3px;"><span class="badge badge-amber" title="Portal marks this booking as awaiting client approval. It imports as Pending approval and flips to Confirmed automatically once approved in the portal.">⏳ Pending approval</span></div>'
+        : '';
       statusCell = `<td>
         ${st}${pendChip}
         <button style="margin-top:4px;font-size:11px;padding:2px 7px;background:none;border:1px solid var(--red);border-radius:4px;color:var(--red);cursor:pointer;" onclick="importRows[${idx}]._cancelled=true;renderImportPreview()">Cancel</button>${ignoreBtn}
