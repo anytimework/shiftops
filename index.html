@@ -6,6 +6,7 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v74 (SHIFT-CREATED AUTHOR IS NOW REAL, NOT THE VIEWER) — Fixes the glitch where the SAME shift's "Shift created" row in Shift History showed a DIFFERENT author depending on who opened it ("Jon" to Jon, "Jayden" to Jayden). ROOT CAUSE: the "Shift created" row was SYNTHESIZED at view time, not stored. The Add-Shift insert never wrote a created_by on the shift row, and its logActivity('…created') call passed refId='' (the insert didn't return the new id), so no creation entry was tied to the shift either. With both real sources empty, openAuditModal fell through to `currentInternalUser` — i.e. whoever was VIEWING — and printed them as the creator. FIX (additive, two functions): (1) saveShift insert now stamps created_by: currentInternalUser and captures the new id via .select('id'); the creation event is logged against that REAL shift id so the audit trail is correct going forward. Graceful-degrade retries strip created_by (and the existing approval_status path) if those columns don't exist yet, so adding a shift never hard-fails — the logged creation entry fixes the author even without the column. (2) openAuditModal no longer invents an author: it suppresses the synthetic "Shift created" row when a real creation log already exists (prevents a double row for new shifts), and for older shifts with no creation log it uses s.created_by → earliest real log author → "—", NEVER currentInternalUser. So a shift with an unknown creator now reads "—" instead of impersonating the viewer. OPTIONAL durable schema add (creator persists team-wide on the row): run once in Supabase — alter table shifts add column created_by text; — loadShifts already selects * so it flows through with no other change; the audit-log creation entry already makes the History author correct regardless. node --check passes (2/2 inline script blocks). -->
 <!-- Build patch: v73 (DELETE-STICKS FOR PORTAL SHIFTS — resurrection guard) — Fixes "I keep deleting this shift but it comes back over and over without being prompted." ROOT CAUSE: a portal-originated booking (e.g. Jonathan Herbsman) is still LIVE in the portal feed, so deleting only the panel copy can't remove it upstream. On the next load, tagExistingShifts (the import_handled self-cleaning step) finds the ledger entry pointing at a shiftId that no longer exists and PRUNES it "so this booking can be re-imported cleanly" — then the 5-min auto-importer re-surfaces it and any confirm re-creates it. So a plain hard-delete always loses the race against the importer. FIX (additive, single function): deleteCancelledShift() now, AFTER a successful hardDeleteShift, writes an import_ignored entry under the SAME stable importBookingKey() the importer reads (a shift-shaped object keys identically — worker_name/shift_date/scheduled_start/scheduled_end → the k| fuzzy key), so the booking lands in "Ignored — won't be imported" instead of resurrecting. GUARDS: only for portal-linked shifts (isShiftPortalSynced) so ops-only deletes don't pollute the ignore ledger, and never for open/available slots (isOpenSlot — no stable fuzzy key). The confirm dialog now states the booking will be marked ignored, and it's fully UNDOABLE from Import Bookings → Ignored (existing unignoreImportRow). Persisted via saveImportIgnored (localStorage + Supabase merge-union, team-wide). Exactly one function changed (~45 lines added, original delete/error/reload flow preserved); no schema change. node --check passes (2/2 inline script blocks). -->
 <!-- Build patch: v64.1 (AI PROMPT HARDENING) — Tightens the v64 cross-date rule after a live test showed the AI hedging ("I don't see any upcoming shifts in the visible schedule") and reaching for searchWorker (which returns a PROFILE, not shifts) instead of queryShifts. The cross-date RULE now: (a) forbids answering shift questions from SYSTEM CONTEXT or implying the on-screen window is the full DB, (b) forbids the "I don't see anything in the visible schedule / next 14 days" phrasing, (c) requires queryShifts as the FIRST action with no preamble for any upcoming/date/outlet/status shift question, (d) explicitly bars searchWorker for "does X have shifts" (searchWorker is profile-only). The searchWorker rule is scoped to profile/contact lookups. No JS logic changed — prompt text only; queryShifts/resolveAIShift/setShiftRate from v64 are intact and dispatched. node --check passes. -->
 <!-- Build patch: v64 (AI CROSS-VIEW + RATE) — Makes the AI chatbot operate on the FULL database, not just the date window currently on screen. ROOT CAUSE of "it can only see my current view": buildSystemContext() builds the AI's worldview from allShifts, but loadShifts() only fetches the viewed day/week from Supabase, so future/other-date shifts simply weren't in context, and any shiftId-keyed action (cancel/clockIn/clockOut/addNote/markPaid) did allShifts.find(...) which missed shifts outside that window. THREE additions, all additive: (1) New queryShifts action + aiQueryShifts(): live Supabase query the AI runs for any worker / outlet / date range / status (upcoming|cancelled|completed|open|all), country-scoped, returning matching shifts WITH ids — so "what are <worker>'s upcoming shifts" now pulls real future data. System prompt gains a top RULE forcing queryShifts for any cross-date/future question instead of guessing from the limited view. (2) resolveAIShift(id): checks allShifts + taskShiftCache, then falls back to a direct single-row Supabase fetch (country-scoped) so cancelShift/clockIn/clockOut/addNote/markPaid/setShiftRate work on ANY shift regardless of the viewed date. The 5 view-bound lookups were re-pointed to it. (3) New setShiftRate action: updates a specific shift's client rate (s.rate) by id with confirm-before-write + activity log; AI is told to queryShifts first to find the id and confirm old→new before applying. Exactly 6 original lines changed (5 lookups + default anchor), ~92 added, zero deletions of existing logic. node --check passes on the main script block. NOTE: the worker-facing Periskope "what shifts are available today/tomorrow" auto-reply is a SEPARATE server-side Edge Function (periskope-webhook) and is delivered as a standalone deployable handler, not in this file. -->
@@ -11382,19 +11383,35 @@ async function addShift() {
     sr_rate: isThirdParty ? rate : null,
     sr_hours: null,
     sr_absorbed: isThirdParty ? thirdPartyFee : null,
-    approval_status: isPendingApproval ? 'pending' : null
+    approval_status: isPendingApproval ? 'pending' : null,
+    // v74 — record WHO created this shift on the row itself, so the Shift History
+    // "Shift created" author is the real creator forever, not whoever happens to
+    // be viewing it. Without this the history modal had no stored creator and fell
+    // back to currentInternalUser (the viewer), so the same shift showed "Jon" to
+    // Jon and "Jayden" to Jayden. Graceful-degrade below if the column is absent.
+    created_by: currentInternalUser || 'Unknown'
   };
-  let { error } = await supabaseClient.from('shifts').insert(insertPayload);
-  // Graceful degrade: if the approval_status column hasn't been added to the DB
-  // yet, retry the insert without it so adding a shift never hard-fails. The
-  // pending state then can't persist team-wide until the column exists.
+  // Capture the new row's id so the creation event can be logged against THIS
+  // shift (previously refId was '' so no creation entry was tied to the shift).
+  let insertedShiftId = '';
+  let { data: _insRows, error } = await supabaseClient.from('shifts').insert(insertPayload).select('id');
+  // Graceful degrade: if an optional column (approval_status / created_by) hasn't
+  // been added to the DB yet, strip it and retry so adding a shift never hard-fails.
+  // The pending flag / creator then can't persist team-wide until the column exists,
+  // but the logged creation event (below) still fixes the audit author either way.
   if (error && approvalColumnMissing(error)) {
     _approvalColumnMissing = true;
     if (isPendingApproval) toast('Saved, but "Pending approval" can\'t sync yet — run: alter table shifts add column approval_status text;', 'info');
     delete insertPayload.approval_status;
-    ({ error } = await supabaseClient.from('shifts').insert(insertPayload));
+    ({ data: _insRows, error } = await supabaseClient.from('shifts').insert(insertPayload).select('id'));
+  }
+  if (error && /created_by/.test(error.message || '')) {
+    // created_by column not present yet — drop it and retry (audit log still records the creator).
+    delete insertPayload.created_by;
+    ({ data: _insRows, error } = await supabaseClient.from('shifts').insert(insertPayload).select('id'));
   }
   if (error) { toast('Failed to add shift: ' + error.message, 'error'); return; }
+  insertedShiftId = (Array.isArray(_insRows) && _insRows[0] && _insRows[0].id != null) ? String(_insRows[0].id) : '';
   if (!isThirdParty && name !== 'Available' && !allWorkers.find(x => x.name === name)) {
     await supabaseClient.from('workers').insert({ name, country: selectedCountry });
     await loadWorkers();
@@ -11406,7 +11423,7 @@ async function addShift() {
   await logActivity(
     _bookingType,
     `${name} at ${outletName} on ${_addDateFmt} ${sched}${schedEnd ? '–'+schedEnd : ''}${breakMins ? ' ('+breakMins+'m break)' : ''}${isPendingApproval ? ' — awaiting client approval in the portal' : ''}`,
-    'shift', '', { shift_date: formatDate(currentDate), worker_name: name, outlet: outletName }
+    'shift', insertedShiftId, { shift_date: formatDate(currentDate), worker_name: name, outlet: outletName }
   );
   toast(isPendingApproval ? 'Booking added — pending client approval' : 'Shift added!');
   closeAddModal();
@@ -11452,13 +11469,20 @@ async function openAuditModal(shiftId) {
   local.forEach(r => { if (!seen.has(r.id)) entries.push(r); });
   entries.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-  // If shift has created_at, prepend a synthetic "Created" entry.
-  // Use s.created_by if set; otherwise look for the earliest log entry's user as a best guess.
+  // If shift has created_at, prepend a synthetic "Created" entry — but ONLY when
+  // there isn't already a real logged creation event for this shift (v74 now logs
+  // one against the real shift id, so new shifts have a genuine entry and don't
+  // need a synthetic one). For older shifts with no creation log, we synthesize.
+  // AUTHOR RULE (v74): use the shift's own created_by, else the earliest real log
+  // entry's author. We deliberately do NOT fall back to currentInternalUser — that
+  // showed the VIEWER as the creator (the "Jon sees Jon, Jayden sees Jayden" bug).
+  // When the true creator is unknown, show "—" rather than inventing one.
   const syntheticEntries = [];
-  if (s.created_at) {
+  const hasRealCreationLog = entries.some(r => /creat/i.test(r.action || ''));
+  if (s.created_at && !hasRealCreationLog) {
     const creatorGuess = s.created_by ||
       (entries.length ? entries[0].created_by : null) ||
-      currentInternalUser || '—';
+      '—';
     syntheticEntries.push({
       _synthetic: true,
       action: 'Shift created',
