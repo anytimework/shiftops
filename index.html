@@ -124,6 +124,29 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); font
 .nav-badge.tasks { background: var(--red); color: #fff; }
 .nav-item-tasks .nav-icon { filter: saturate(1.4); }
 .nav-item-tasks.has-tasks { background: rgba(232,64,64,0.10); }
+/* ── Team Tasks ── */
+.tt-section-head { font-size: 12px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.05em; margin: 4px 0 10px; display: flex; align-items: center; gap: 8px; }
+.tt-count { background: var(--bg3); color: var(--text2); border-radius: 999px; padding: 1px 9px; font-size: 11px; font-weight: 600; }
+.tt-empty { color: var(--text3); font-size: 13px; padding: 18px 4px; }
+.tt-card { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 15px; margin-bottom: 10px; }
+.tt-card.tt-done { opacity: 0.72; }
+.tt-card.tt-done .tt-title { text-decoration: none; color: var(--text2); }
+.tt-card-main { flex: 1; min-width: 0; }
+.tt-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.tt-detail { font-size: 12.5px; color: var(--text2); margin-bottom: 6px; white-space: pre-wrap; }
+.tt-meta { font-size: 11.5px; color: var(--text3); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tt-meta strong { color: var(--text2); }
+.tt-done-by { color: var(--green); }
+.tt-wa { color: var(--green); }
+.tt-card-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.tt-pill { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px; vertical-align: middle; margin-left: 4px; }
+.tt-pill-high { background: rgba(232,64,64,0.16); color: var(--red); }
+.tt-pill-low { background: var(--bg3); color: var(--text3); }
+.tt-pill-due { background: rgba(245,166,35,0.14); color: var(--amber); }
+.tt-archive-head { display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 22px 0 10px; font-size: 12px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; user-select: none; }
+.tt-archive-head:hover { color: var(--text2); }
+.tt-archive-head #tt-archive-caret { font-size: 11px; }
+.tt-archive-note { font-size: 10px; font-weight: 500; color: var(--text3); text-transform: none; letter-spacing: 0; opacity: 0.8; }
 .nav-label { flex: 1; }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; }
 .sidebar-user { padding: 12px 14px; border-top: 1px solid var(--border); flex-shrink: 0; }
@@ -714,6 +737,13 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
   display: none; align-items: center; justify-content: center;
   box-shadow: 0 0 0 2px var(--bg2);
 }
+#tt-fab-badge {
+  position: absolute; top: -3px; right: -3px; min-width: 20px; height: 20px;
+  padding: 0 5px; border-radius: 999px; background: var(--red); color: #fff;
+  font-size: 11px; font-weight: 700; font-family: var(--mono);
+  display: none; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px var(--bg2);
+}
 .chat-day-divider { text-align: center; margin: 6px 0; position: relative; }
 .chat-day-divider span {
   font-size: 10px; color: var(--text3); background: var(--bg2);
@@ -881,6 +911,10 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <button class="nav-item" id="nav-leave" onclick="switchPage('leave',this)">
         <span class="nav-icon">🌴</span><span class="nav-label">Leave Calendar</span>
         <span class="nav-badge" id="leave-nav-badge" style="background:var(--amber);" title="Pending leave requests awaiting approval">0</span>
+      </button>
+      <button class="nav-item" id="nav-teamtasks" onclick="toggleTeamTasks()">
+        <span class="nav-icon">🗒️</span><span class="nav-label">Team Task / Notes</span><span class="nav-pill-new">NEW</span>
+        <span class="nav-badge" id="team-tasks-nav-badge" style="background:var(--accent);display:none;" title="Open team tasks / notes">0</span>
       </button>
       <button class="nav-item" id="nav-salary" onclick="switchPage('salary',this)" style="display:none;">
         <span class="nav-icon">💸</span><span class="nav-label">My Salary</span>
@@ -1470,6 +1504,33 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <button class="btn btn-ghost btn-sm" onclick="closeModal('leave-request-modal')">Cancel</button>
       <button class="btn btn-ghost btn-sm" id="leave-pick-other-btn" style="display:none;" onclick="document.getElementById('leave-from').focus()">Pick another date</button>
       <button class="btn btn-primary btn-sm" id="leave-submit-btn" onclick="submitLeaveRequest()">Submit request</button>
+    </div>
+  </div>
+</div>
+
+<!-- ASSIGN TASK MODAL -->
+<div class="modal-overlay" id="assign-task-modal">
+  <div class="modal" style="max-width:480px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;">Assign a task</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('assign-task-modal')">✕</button>
+    </div>
+    <div class="form-row"><label>Task</label><input type="text" id="tt-title" placeholder="e.g. Call ONE°15 to confirm Sat booking"></div>
+    <div class="form-row"><label>Details (optional)</label><textarea id="tt-detail" placeholder="Any context, links, or instructions"></textarea></div>
+    <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-row"><label>Assign to</label><select id="tt-assignee"></select></div>
+      <div class="form-row"><label>Priority</label>
+        <select id="tt-priority">
+          <option value="normal" selected>Normal</option>
+          <option value="high">🔴 High</option>
+          <option value="low">Low</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row"><label>Due date (optional)</label><input type="date" id="tt-due"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('assign-task-modal')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitAssignTask()">Assign &amp; notify</button>
     </div>
   </div>
 </div>
@@ -3537,6 +3598,9 @@ async function init() {
   // "No longer in portal" card so the desync is visible without opening Import
   // Bookings, and survives refresh / shows for teammates (no schema change).
   loadPortalDeletedRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
+  // Team-wide durable "team tasks" ledger — the assignable internal to-do list.
+  // Same app_settings merge-union pattern; no schema change.
+  loadTeamTasksRemote().then(()=>{ try { updateTeamTasksNavBadge(); } catch(e){} }).catch(()=>{});
   // Team-wide Periskope config so every device can send WhatsApp (not just the one
   // where the API key was first entered).
   loadPeriskopeConfigShared().catch(()=>{});
@@ -4296,6 +4360,10 @@ function reminderPanelHtml(s) {
   // ── Late-arrival banner — worker notified they will be late ──
   function lateBanner() {
     if (!r.lateNotified) return '';
+    // Once the worker has clocked in they're onsite — a "running late" banner is
+    // no longer relevant, so suppress it everywhere this helper is used (the
+    // fully-acked and past-shift summary branches below included).
+    if (s.clock_in) return '';
     const when = r.lateAt ? new Date(r.lateAt).toLocaleString('en-SG', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
     const reason = r.lateReason ? `<div class="dispute-reason">“${escapeHtml(r.lateReason)}”</div>` : '';
     const statusBits = [
@@ -4394,8 +4462,10 @@ function checkReminderAlerts() {
         : (r.disputeKind === 'cantmake' ? "can't make it" : 'flagged an issue');
       disputeAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', kindTxt, reason: r.disputeReason || '', start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
     }
-    // Late-arrival notice — show until both acknowledged and outlet informed
-    if (r.lateNotified && !(r.lateAck && r.outletInformed)) {
+    // Late-arrival notice — show until both acknowledged and outlet informed.
+    // Once the worker has CLOCKED IN they're onsite, so the "running late" alert
+    // is irrelevant and is dropped from the banner.
+    if (r.lateNotified && !s.clock_in && !(r.lateAck && r.outletInformed)) {
       lateAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '', acked: !!r.lateAck, informed: !!r.outletInformed });
     }
 
@@ -6102,7 +6172,9 @@ function getOpenTasks() {
     }
     // Late-arrival notice — needs acknowledge + inform outlet.
     // Like cancellations, only meaningful for today/upcoming shifts.
-    if (r.lateNotified && !s.cancelled && s.shift_date >= todayStr) {
+    // Once the worker has CLOCKED IN, a "running late" notice is moot — they're
+    // already onsite — so the late task is suppressed (no banner to acknowledge).
+    if (r.lateNotified && !s.clock_in && !s.cancelled && s.shift_date >= todayStr) {
       const done = !!r.lateAck && !!r.outletInformed;
       // A completed late task collapses to the bottom, then disappears from the
       // panel TASK_CARD_DONE_HIDE_HOURS (18h) after it was completed. It remains
@@ -24076,6 +24148,386 @@ async function initTeamChat() {
   markChatReceipts({ markRead: true }).catch(()=>{});
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// TEAM TASKS — assignable internal to-do list (additive, no schema change)
+// ════════════════════════════════════════════════════════════════════════════
+// A lightweight task list any user can ASSIGN to an internal team member. The
+// assignee — or anyone — can mark it complete; the panel records and shows WHO
+// marked it complete. On assignment the assignee gets a WhatsApp via Periskope
+// (TEAM_WHATSAPP + sendPeriskopeMessage), mirroring the announcement individual-
+// send path. Stored team-wide in app_settings (key='team_tasks'), exactly like
+// the approval_acks / import_handled ledgers — localStorage instant + Supabase
+// merge-union — so tasks survive refresh / new session / teammates with NO
+// database schema change.
+//
+// Shape:  teamTasks = { [taskId]: {
+//   id, title, detail, assignee, assignedBy, assignedAt, due, priority,
+//   completed, completedAt, completedBy, notifiedAt
+// } }
+
+let teamTasks = loadTeamTasks();
+let teamTasksLoaded = false;
+
+function loadTeamTasks() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('team_tasks_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch (e) { return {}; }
+}
+
+async function loadTeamTasksRemote() {
+  if (!supabaseClient) return;
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'team_tasks').maybeSingle();
+    if (error) { console.warn('teamTasks remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      teamTasks = mergeTeamTasks(teamTasks, data.value);
+      localStorage.setItem('team_tasks_v1', JSON.stringify(teamTasks));
+    } else {
+      const local = loadTeamTasks();
+      if (Object.keys(local).length) { teamTasks = local; await saveTeamTasks(); }
+    }
+    teamTasksLoaded = true;
+  } catch (e) { console.warn('teamTasks remote load error:', e); }
+}
+
+// Union two task maps; for a shared id the COMPLETED state wins (so a task one
+// teammate already ticked done can't be un-done by an older copy), and the more
+// recent field set is layered on top.
+function mergeTeamTasks(a, b) {
+  const out = { ...(a || {}) };
+  for (const [k, v] of Object.entries(b || {})) {
+    const prev = out[k];
+    if (!prev) { out[k] = v; continue; }
+    const completed = !!(prev.completed || v.completed);
+    const completer = prev.completed ? prev : (v.completed ? v : prev);
+    out[k] = {
+      ...prev, ...v,
+      completed,
+      completedAt: completer.completedAt || prev.completedAt || v.completedAt || '',
+      completedBy: completer.completedBy || prev.completedBy || v.completedBy || '',
+    };
+  }
+  return out;
+}
+
+async function saveTeamTasks() {
+  localStorage.setItem('team_tasks_v1', JSON.stringify(teamTasks));
+  if (!supabaseClient) return false;
+  try {
+    let merged = teamTasks;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'team_tasks').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        merged = mergeTeamTasks(data.value, teamTasks);
+        teamTasks = merged;
+        localStorage.setItem('team_tasks_v1', JSON.stringify(teamTasks));
+      }
+    } catch (e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'team_tasks', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('teamTasks remote save failed:', error.message); return false; }
+    return true;
+  } catch (e) { console.warn('teamTasks remote save error:', e); return false; }
+}
+
+function teamTaskList() {
+  return Object.values(teamTasks || {});
+}
+function openTeamTaskCount() {
+  return teamTaskList().filter(t => t && !t.deleted && !t.completed).length;
+}
+function teamTaskPriorityRank(p) {
+  return p === 'high' ? 0 : (p === 'low' ? 2 : 1);
+}
+// Completed tasks stay in the live "Completed" list for 48 hours, then drop into
+// the Archive section (still kept, just out of the way). Anchored to completedAt.
+const TEAM_TASK_ARCHIVE_AFTER_MS = 48 * 60 * 60 * 1000;
+function teamTaskIsArchived(t) {
+  if (!t || !t.completed) return false;
+  const ms = t.completedAt ? new Date(t.completedAt).getTime() : 0;
+  if (!ms || isNaN(ms)) return false; // no stamp → treat as recent, never auto-archive
+  return (Date.now() - ms) >= TEAM_TASK_ARCHIVE_AFTER_MS;
+}
+
+// ── Assign modal ─────────────────────────────────────────────────────────────
+function openAssignTaskModal() {
+  const sel = document.getElementById('tt-assignee');
+  if (sel) {
+    sel.innerHTML = (INTERNAL_USERS || [])
+      .map(u => `<option value="${escapeAttr(u)}">${escapeHtml(u)}${TEAM_WHATSAPP[u] ? '' : ' (no WhatsApp)'}</option>`)
+      .join('');
+  }
+  const t = document.getElementById('tt-title'); if (t) t.value = '';
+  const d = document.getElementById('tt-detail'); if (d) d.value = '';
+  const due = document.getElementById('tt-due'); if (due) due.value = '';
+  const pr = document.getElementById('tt-priority'); if (pr) pr.value = 'normal';
+  const m = document.getElementById('assign-task-modal');
+  if (m) m.classList.add('open');
+  if (t) setTimeout(() => t.focus(), 50);
+}
+
+async function submitAssignTask() {
+  const title = String(document.getElementById('tt-title')?.value || '').trim();
+  const detail = String(document.getElementById('tt-detail')?.value || '').trim();
+  const assignee = String(document.getElementById('tt-assignee')?.value || '').trim();
+  const due = String(document.getElementById('tt-due')?.value || '').trim();
+  const priority = String(document.getElementById('tt-priority')?.value || 'normal').trim();
+
+  if (!title) { toast('Give the task a title', 'error'); return; }
+  if (!assignee) { toast('Pick someone to assign it to', 'error'); return; }
+
+  const id = `tt-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const now = new Date().toISOString();
+  const task = {
+    id, title, detail, assignee,
+    assignedBy: currentInternalUser || '—',
+    assignedAt: now,
+    due, priority,
+    completed: false, completedAt: '', completedBy: '',
+    notifiedAt: '',
+  };
+  teamTasks[id] = task;
+  await saveTeamTasks();
+
+  try { logActivity('Task assigned', `${title} → ${assignee}`, 'team_task', id); } catch (e) {}
+
+  // WhatsApp the assignee (best-effort; never blocks the assignment).
+  let waNote = '';
+  try {
+    const phone = TEAM_WHATSAPP[assignee];
+    if (phone) {
+      const ok = await sendPeriskopeMessage(phone, buildTaskAssignedMessage(task));
+      if (ok) { task.notifiedAt = new Date().toISOString(); await saveTeamTasks(); waNote = ' · WhatsApp sent'; }
+      else { waNote = ' · WhatsApp not sent (check WhatsApp Alerts)'; }
+    } else {
+      waNote = ` · no WhatsApp number on file for ${assignee}`;
+    }
+  } catch (e) { waNote = ' · WhatsApp send error'; }
+
+  closeModal('assign-task-modal');
+  toast(`Task assigned to ${assignee}${waNote}`);
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+function buildTaskAssignedMessage(task) {
+  const by = task.assignedBy && task.assignedBy !== '—' ? task.assignedBy : 'The ops team';
+  const lines = [];
+  lines.push(`📋 *New task assigned to you*`);
+  lines.push('');
+  lines.push(`*${task.title}*`);
+  if (task.detail) lines.push(task.detail);
+  const meta = [];
+  if (task.priority === 'high') meta.push('Priority: 🔴 High');
+  else if (task.priority === 'low') meta.push('Priority: Low');
+  if (task.due) meta.push(`Due: ${task.due}`);
+  if (meta.length) { lines.push(''); lines.push(meta.join('  ·  ')); }
+  lines.push('');
+  lines.push(`Assigned by ${by}. Mark it done in ShiftOps → Team Task / Notes once completed 🙏`);
+  return lines.join('\n');
+}
+
+// ── Complete / reopen / delete ───────────────────────────────────────────────
+async function completeTeamTask(id) {
+  const t = teamTasks[id];
+  if (!t || t.completed) return;
+  t.completed = true;
+  t.completedAt = new Date().toISOString();
+  t.completedBy = currentInternalUser || '—';
+  await saveTeamTasks();
+  try { logActivity('Task completed', `${t.title} (by ${t.completedBy})`, 'team_task', id); } catch (e) {}
+
+  // Notify the person who ASSIGNED the task that it's now resolved (WhatsApp via
+  // Periskope). Best-effort; never blocks. Skipped when the assigner completed
+  // it themselves (no point pinging yourself) or has no number on file.
+  let waNote = '';
+  try {
+    const assigner = t.assignedBy;
+    const completer = t.completedBy;
+    if (assigner && assigner !== '—' && assigner !== completer) {
+      const phone = TEAM_WHATSAPP[assigner];
+      if (phone) {
+        const ok = await sendPeriskopeMessage(phone, buildTaskCompletedMessage(t));
+        if (ok) { t.resolvedNotifiedAt = new Date().toISOString(); await saveTeamTasks(); waNote = ` · ${assigner} notified`; }
+      }
+    }
+  } catch (e) { /* notification failure must not block completion */ }
+
+  toast(`Marked complete by ${t.completedBy}${waNote}`);
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+function buildTaskCompletedMessage(task) {
+  const lines = [];
+  lines.push(`✅ *Task resolved*`);
+  lines.push('');
+  lines.push(`*${task.title}*`);
+  lines.push('');
+  lines.push(`Completed by ${task.completedBy || 'a teammate'}${task.completedAt ? ' on ' + fmtTaskWhen(task.completedAt) : ''}.`);
+  lines.push(`This was the task you assigned to ${task.assignee || 'the team'} 🙏`);
+  return lines.join('\n');
+}
+
+async function reopenTeamTask(id) {
+  const t = teamTasks[id];
+  if (!t) return;
+  t.completed = false; t.completedAt = ''; t.completedBy = '';
+  await saveTeamTasks();
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+async function deleteTeamTask(id) {
+  const t = teamTasks[id];
+  if (!t) return;
+  if (!confirm(`Delete task "${t.title}"? This can't be undone.`)) return;
+  delete teamTasks[id];
+  // Tombstone so the delete propagates through the merge-union instead of a
+  // teammate's older copy resurrecting it.
+  teamTasks['__deleted__' + id] = { id: '__deleted__' + id, deleted: true, completed: true, title: '', assignedAt: new Date().toISOString() };
+  await saveTeamTasks();
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+function fmtTaskWhen(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString('en-SG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  } catch (e) { return ''; }
+}
+
+function teamTaskCardHtml(t) {
+  const pr = t.priority === 'high'
+    ? '<span class="tt-pill tt-pill-high">🔴 High</span>'
+    : (t.priority === 'low' ? '<span class="tt-pill tt-pill-low">Low</span>' : '');
+  const duePill = t.due ? `<span class="tt-pill tt-pill-due">📅 Due ${escapeHtml(t.due)}</span>` : '';
+  const idA = escapeAttr(t.id);
+  if (t.completed) {
+    return `<div class="tt-card tt-done">
+      <div class="tt-card-main">
+        <div class="tt-title">✅ ${escapeHtml(t.title)}</div>
+        ${t.detail ? `<div class="tt-detail">${escapeHtml(t.detail)}</div>` : ''}
+        <div class="tt-meta">
+          <span>👤 ${escapeHtml(t.assignee || '—')}</span>
+          <span class="tt-done-by">✓ Completed by <strong>${escapeHtml(t.completedBy || '—')}</strong>${t.completedAt ? ` · ${fmtTaskWhen(t.completedAt)}` : ''}</span>
+        </div>
+      </div>
+      <div class="tt-card-actions">
+        <button class="btn btn-ghost btn-sm" onclick="reopenTeamTask('${idA}')" title="Reopen this task">↩ Reopen</button>
+        <button class="btn btn-ghost btn-sm" onclick="deleteTeamTask('${idA}')" title="Delete">🗑</button>
+      </div>
+    </div>`;
+  }
+  return `<div class="tt-card">
+    <div class="tt-card-main">
+      <div class="tt-title">${escapeHtml(t.title)} ${pr} ${duePill}</div>
+      ${t.detail ? `<div class="tt-detail">${escapeHtml(t.detail)}</div>` : ''}
+      <div class="tt-meta">
+        <span>👤 Assigned to <strong>${escapeHtml(t.assignee || '—')}</strong></span>
+        <span>· by ${escapeHtml(t.assignedBy || '—')}${t.assignedAt ? ` · ${fmtTaskWhen(t.assignedAt)}` : ''}</span>
+        ${t.notifiedAt ? '<span class="tt-wa">· 💬 notified</span>' : ''}
+      </div>
+    </div>
+    <div class="tt-card-actions">
+      <button class="btn btn-primary btn-sm" onclick="completeTeamTask('${idA}')" title="Mark this task complete">✓ Mark complete</button>
+      <button class="btn btn-ghost btn-sm" onclick="deleteTeamTask('${idA}')" title="Delete">🗑</button>
+    </div>
+  </div>`;
+}
+
+function renderTeamTasksPage() {
+  // Renders into whichever task container is present — the floating panel body
+  // (#tt-float-body) is the primary surface; #team-tasks-body is kept for any
+  // legacy/full-page mount. Renders into all that exist.
+  const wraps = ['tt-float-body', 'team-tasks-body']
+    .map(id => document.getElementById(id)).filter(Boolean);
+  if (!wraps.length) return;
+
+  const all = teamTaskList().filter(t => t && !t.deleted);
+  const open = all.filter(t => !t.completed)
+    .sort((a, b) => teamTaskPriorityRank(a.priority) - teamTaskPriorityRank(b.priority)
+      || String(a.due || '~').localeCompare(String(b.due || '~'))
+      || String(b.assignedAt || '').localeCompare(String(a.assignedAt || '')));
+  const completed = all.filter(t => t.completed)
+    .sort((a, b) => String(b.completedAt || '').localeCompare(String(a.completedAt || '')));
+  const doneRecent = completed.filter(t => !teamTaskIsArchived(t));
+  const archived = completed.filter(t => teamTaskIsArchived(t));
+
+  const filter = document.getElementById('tt-filter')?.value || 'all';
+  const me = currentInternalUser || '';
+  const openShown = filter === 'mine' ? open.filter(t => t.assignee === me) : open;
+  const archShown = filter === 'mine' ? archived.filter(t => t.assignee === me) : archived;
+
+  let html = '';
+  html += `<div class="tt-section-head">Open tasks <span class="tt-count">${openShown.length}</span></div>`;
+  if (!openShown.length) {
+    html += `<div class="tt-empty">No open tasks${filter === 'mine' ? ' assigned to you' : ''}. Assign one with the button above.</div>`;
+  } else {
+    html += openShown.map(teamTaskCardHtml).join('');
+  }
+  if (doneRecent.length) {
+    html += `<div class="tt-section-head" style="margin-top:22px;">Completed · last 48h <span class="tt-count">${doneRecent.length}</span></div>`;
+    html += doneRecent.map(teamTaskCardHtml).join('');
+  }
+  if (archShown.length) {
+    html += `<div class="tt-archive-head" onclick="toggleTeamTaskArchive()">
+      <span id="tt-archive-caret">${teamTaskArchiveOpen ? '▾' : '▸'}</span>
+      <span>Archive <span class="tt-count">${archShown.length}</span></span>
+      <span class="tt-archive-note">completed over 48h ago</span>
+    </div>`;
+    html += `<div id="tt-archive-list" style="display:${teamTaskArchiveOpen ? 'block' : 'none'};">`;
+    html += archShown.slice(0, 100).map(teamTaskCardHtml).join('');
+    html += `</div>`;
+  }
+  wraps.forEach(w => { w.innerHTML = html; });
+}
+
+let teamTaskArchiveOpen = false;
+function toggleTeamTaskArchive() {
+  teamTaskArchiveOpen = !teamTaskArchiveOpen;
+  renderTeamTasksPage();
+}
+
+async function initTeamTasksPage() {
+  if (!teamTasksLoaded) { try { await loadTeamTasksRemote(); } catch (e) {} }
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+// ── Floating Team Tasks panel (collapsible, like the AI / chat FABs) ──────────
+let teamTasksOpen = false;
+async function toggleTeamTasks() {
+  const panel = document.getElementById('tt-panel');
+  if (!panel) return;
+  if (teamTasksOpen) {
+    teamTasksOpen = false;
+    panel.style.display = 'none';
+    return;
+  }
+  teamTasksOpen = true;
+  panel.style.display = 'flex';
+  if (!teamTasksLoaded) { try { await loadTeamTasksRemote(); } catch (e) {} }
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+function updateTeamTasksNavBadge() {
+  const n = openTeamTaskCount();
+  // Sidebar nav badge (if the legacy nav item is present).
+  const navB = document.getElementById('team-tasks-nav-badge');
+  if (navB) { navB.textContent = String(n); navB.style.display = n > 0 ? '' : 'none'; }
+  // Floating FAB notification badge — unresolved (open) task count.
+  const fabB = document.getElementById('tt-fab-badge');
+  if (fabB) { fabB.textContent = String(n); fabB.style.display = n > 0 ? 'flex' : 'none'; }
+}
+
 </script>
 
 <!-- Cancellation log modal -->
@@ -24323,6 +24775,50 @@ async function initTeamChat() {
     <button onclick="sendTeamChat()" style="background:#3a7bd5;border:none;border-radius:10px;
       padding:9px 14px;color:#fff;font-size:13px;cursor:pointer;font-weight:600;white-space:nowrap;">Send</button>
   </div>
+</div>
+
+<!-- Team Tasks (floating) -->
+<button id="tt-fab" onclick="toggleTeamTasks()"
+  style="position:fixed;bottom:24px;right:176px;width:60px;height:60px;border-radius:50%;
+  background:linear-gradient(135deg,#7b5cff,#5b3fd6);border:none;cursor:pointer;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:flex;
+  align-items:center;justify-content:center;transition:transform 0.2s;"
+  onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'"
+  title="Team Task / Notes">
+  🗒️
+  <span id="tt-fab-badge">0</span>
+</button>
+
+<div id="tt-panel" style="display:none;position:fixed;bottom:96px;right:24px;width:380px;height:540px;max-height:80vh;
+  background:var(--bg2);border:1px solid var(--border);border-radius:14px;box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  z-index:1001;flex-direction:column;overflow:hidden;">
+  <!-- Header -->
+  <div style="padding:13px 15px;background:linear-gradient(135deg,#7b5cff,#5b3fd6);
+    display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+    <div style="display:flex;align-items:center;gap:9px;">
+      <span style="font-size:22px;">🗒️</span>
+      <div>
+        <div style="font-weight:700;color:#fff;font-size:14px;">Team Task / Notes</div>
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.78);">Assign to your team · anyone can complete</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <select id="tt-filter" onchange="renderTeamTasksPage()"
+        style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);border-radius:6px;
+        color:#fff;font-size:11px;font-family:var(--font);padding:3px 6px;cursor:pointer;">
+        <option value="all">All</option>
+        <option value="mine">Mine</option>
+      </select>
+      <button onclick="toggleTeamTasks()" style="background:none;border:none;color:rgba(255,255,255,0.85);
+        font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;">✕</button>
+    </div>
+  </div>
+  <!-- Assign bar -->
+  <div style="padding:9px 14px;border-bottom:1px solid var(--border2);flex-shrink:0;">
+    <button class="btn btn-primary btn-sm" style="width:100%;justify-content:center;" onclick="openAssignTaskModal()">＋ Assign a task</button>
+  </div>
+  <!-- Task list -->
+  <div id="tt-float-body" style="flex:1;overflow-y:auto;padding:12px 14px;min-height:0;"></div>
 </div>
 
 <style>
