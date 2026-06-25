@@ -3593,11 +3593,27 @@ async function init() {
   loadImportCancelAckRemote().catch(()=>{});
   // Team-wide durable "booking approval acknowledged" ledger — drives the Tasks
   // acknowledgement card when a pending booking is approved (no schema change).
-  loadApprovalAcksRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
+  loadApprovalAcksRemote().then(()=>{
+    if (typeof loadTaskShiftCache === 'function') {
+      loadTaskShiftCache().then(()=>{
+        try { updateTasksNavBadge(); } catch(e){}
+        if (document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') { try { renderMetrics(); } catch(e){} }
+        if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+      }).catch(()=>{ try { updateTasksNavBadge(); } catch(e){} });
+    } else { try { updateTasksNavBadge(); } catch(e){} }
+  }).catch(()=>{});
   // v79: Team-wide durable "deleted in portal" ledger — drives the Tasks
   // "No longer in portal" card so the desync is visible without opening Import
   // Bookings, and survives refresh / shows for teammates (no schema change).
-  loadPortalDeletedRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
+  loadPortalDeletedRemote().then(()=>{
+    if (typeof loadTaskShiftCache === 'function') {
+      loadTaskShiftCache().then(()=>{
+        try { updateTasksNavBadge(); } catch(e){}
+        if (document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') { try { renderMetrics(); } catch(e){} }
+        if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
+      }).catch(()=>{ try { updateTasksNavBadge(); } catch(e){} });
+    } else { try { updateTasksNavBadge(); } catch(e){} }
+  }).catch(()=>{});
   // Team-wide durable "team tasks" ledger — the assignable internal to-do list.
   // Same app_settings merge-union pattern; no schema change.
   loadTeamTasksRemote().then(()=>{ try { updateTeamTasksNavBadge(); } catch(e){} }).catch(()=>{});
@@ -6813,11 +6829,26 @@ async function loadOverpaymentCache() {
 // so a "late tomorrow" notice or a cancellation 3 days out still shows today.
 async function loadTaskShiftCache() {
   // Collect shift IDs that have any actionable reminder flag set
-  const ids = [];
+  const idSet = new Set();
   for (const [id, r] of Object.entries(shiftReminders || {})) {
     if (!r) continue;
-    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) ids.push(String(id));
+    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) idSet.add(String(id));
   }
+  // Also fold in shift IDs that carry an open ledger-based task — booking-approval
+  // acknowledgements and "no longer in portal" deletions. These tasks aren't keyed
+  // off shift_reminders, so without this their shift row would only be in the pool
+  // on the exact date being viewed, making the task vanish on every other date.
+  try {
+    for (const [id, e] of Object.entries(approvalAcks || {})) {
+      if (e && e.approvedAt && !e.acked) idSet.add(String(id));
+    }
+  } catch (e) {}
+  try {
+    for (const [id, e] of Object.entries(portalDeleted || {})) {
+      if (e && !e.dismissed) idSet.add(String(id));
+    }
+  } catch (e) {}
+  const ids = Array.from(idSet);
   taskShiftCache = {};
   // Always fold in the currently-loaded shifts (so same-day items work even
   // before/without the cross-date fetch resolving).
