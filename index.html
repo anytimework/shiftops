@@ -6,6 +6,7 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v79 (DELETED-IN-PORTAL NOW RAISES A TASK) — Worked from the v78 (June25ndex) build. Ops report: when the portal/client deletes a booking, the panel still shows it active and nothing alerts us — it just sits in the Attendance log. The v78 signal existed but was easy to miss: a red "⚠ Not in portal" pill on the Attendance row + a row in the Import Bookings preview (only visible if you open that view), backed by an IN-MEMORY-ONLY set (portalDeletedShiftIds) that was rebuilt solely on a portal load and never read by the Tasks engine. FIX: the desync is now a first-class TASK on the always-visible Tasks badge. (1) New DURABLE, team-wide ledger portalDeleted (app_settings key 'portal_deleted', mirrors import_handled / import_ignored — localStorage instant + Supabase merge-union, loaded at boot; no schema change) keyed by panel shift id → {when,worker,outlet,date,start,end,dismissed}. (2) detectDeletedPortalBookings() now writes every detected deletion into this ledger and SELF-PRUNES entries that are no longer deleted-in-portal (booking returned to the feed) or whose panel shift is gone/cancelled — so the list stays accurate. It also refreshes the Tasks badge + panel (and the Attendance table) at the end of each pass. (3) getOpenTasks() builds a new 'portal_deleted' task from the ledger ∩ live task pool (skips dismissed entries, open/Available slots, and cancelled/missing shifts so a task auto-clears the moment the shift is removed). (4) renderOneTaskCard() renders an "⚠️ No longer in portal" card with Process cancellation (opens the cancellation modal → Outlet cancellation, which hard-deletes AND writes the resurrection-proof ignore so it won't come back), View shift, and Dismiss (tombstones the ledger entry so it won't re-nag). (5) writeDeleteIgnoreForShift() also clears the ledger entry on delete for instant feedback. node --check passes (2/2 inline script blocks); 10-case logic harness passes (detect→ledger+task, re-sync→prune+no task, cancelled-in-panel→prune, hard-deleted-from-panel→prune, dismissed→no task, open-slot→no task). Surgical diff: PURELY ADDITIVE — 234 lines added, 0 removed; only getOpenTasks(), renderOneTaskCard(), detectDeletedPortalBookings(), writeDeleteIgnoreForShift(), the boot ledger-load list, plus the new ledger + two task-action handlers changed; nothing else touched. -->
 <!-- Build patch: v78 (DELETE STICKS FROM EVERY PATH + "NO LONGER IN PORTAL" ON THE ATTENDANCE ROW) — Worked from the v77b build. TWO ops reports: (A) a deleted shift keeps resurrecting in the Attendance log no matter how many times it's deleted; (B) when the portal/client deletes a booking, the panel still shows it as plain "Scheduled" with no visible warning that it's no longer synced. ROOT CAUSE OF (A): the v74/v75 resurrection-proof ignore-write lived ONLY inside deleteCancelledShift() (the Attendance "Delete" button on already-cancelled rows). But a portal-linked booking is most often removed through the "Outlet/client cancellation" branch of confirmCancel() (cancel-type = Outlet cancellation), which hard-deletes the slot and wrote NOTHING to import_ignored — so its pb|<id> stayed in import_handled and the 5-min auto-importer re-created it on the next load. FIX (A): the entire reverse-ledger-lookup + ignore-write + import_handled-prune is extracted into ONE shared helper writeDeleteIgnoreForShift(s,label); deleteCancelledShift() now calls it, and the outlet_bypass delete in confirmCancel() now calls it too, so EVERY delete path is resurrection-proof and identical. The helper also no longer trusts only the live feed for "is this portal-linked" (a just-deleted booking is, by definition, gone from the feed) — an import_handled entry pointing at the shift id is durable proof of portal origin, so it writes the ignore even when isShiftPortalSynced() now reads false. It writes BOTH the real pb|<id> key (stops a booking still carrying its portal id) AND the fuzzy k|worker|date|start|end key WITH outletKey (stops a booking the portal later re-issues under a NEW id, while the v74 outlet-match guard keeps it from suppressing a different active booking at the same time → clock-sync stays safe). Still guarded to non-open-slot shifts; fully undoable from Import Bookings → Ignored. FIX (B): detectDeletedPortalBookings() (which already identifies every panel shift whose portal booking vanished from the live feed, via the pb| ledger and the feed-driven sweep) now records those shift ids into a new module-level portalDeletedShiftIds set, rebuilt from scratch each portal load so a re-added booking clears automatically. syncDot() gains a highest-priority branch that renders a red "⚠ Not in portal" pill DIRECTLY on the attendance row for any such shift — so the desync is visible in the schedule itself, not only inside Import Bookings. The detector also re-renders the Attendance table at the end of its pass so the pill appears/clears without a manual reload. node --check passes (2/2 inline script blocks); 8-case logic harness passes (outlet-bypass delete writes the pb| ignore + prunes the ledger, resurrecting pb| row suppressed, re-issued same-outlet booking suppressed by fuzzy key, different-outlet active booking NOT suppressed so clock-sync is safe, open-slot + ops-only deletes write no ignore). Surgical diff: only syncDot(), deleteCancelledShift(), the confirmCancel() outlet-bypass branch, detectDeletedPortalBookings(), autoSendShiftReminders() (one skip-guard line), and two new top-level declarations (the shared helper + the portalDeletedShiftIds set) changed; nothing else touched. THIRD FIX (reminders to deleted-shift workers): autoSendShiftReminders() iterates the in-memory allShifts and skipped only open/Available/cancelled rows — but a booking the portal DELETED while it still sits active in the panel (red "⚠ Not in portal" pill) is a normal active row with a real worker name and cancelled=false, so the sweep happily sent it night + clock-in reminders. Added one guard: skip any shift whose id is in portalDeletedShiftIds. 5-case reminder harness (TZ=Asia/Singapore) passes: active→remind, portal-deleted→skip, worker-cancelled(Available)→skip, hard-cancelled→skip, flag-cleared→remind again. -->
 <!-- Build patch: v77b (REMINDER TIMEZONE OFF-BY-ONE + DUPLICATE/CANCELLED SENDS) — Worked from the v75-topped June24_1ndex build per ops. THREE faults in autoSendShiftReminders(): (1) THE BIG ONE — a TODAY shift received a "tomorrow" night reminder at 9pm. ROOT CAUSE: the day strings were built with nowDate.setHours(0,0,0,0) then .toISOString().slice(0,10). setHours sets LOCAL midnight but toISOString() prints UTC, so in SG/MY/PH (UTC+8) local-midnight maps to the PREVIOUS calendar day in UTC. At 21:02 SGT on 24 Jun this yielded today="2026-06-23", tomorrow="2026-06-24", so a real 24-Jun (today) shift matched the tomorrow night-reminder window and fired. FIX: compute todayStr/tomorrowStr with the existing formatDate() helper, which uses LOCAL date parts (getFullYear/Month/Date) — today=24, tomorrow=25, correct in every UTC+ zone. (2) SENT TWICE — the !nightSent guard is keyed by ROW id, but a worker can have >1 row for one logical shift (a cancelled booking that left a duplicate row), so each row fired. Plus no in-flight guard, so the 15s tick / a second tab could re-enter the async sweep and double-send. FIX: module-level _reminderSweepInFlight guard + dedupe by logical key (worker|date|start|end) via a per-sweep Set and a siblingAlreadySent() scan + a freshness re-read before each send. (3) REMINDED A CANCELLED SHIFT — a WORKER cancellation sets worker_name='Available' (cancelled stays false), so the existing s.cancelled check missed it; the 'available' name-check is what skips it, and a suspended/on-hold worker is now skipped too via isWorkerSuspended(). Genuinely-different shifts for the same worker still both send. No schema change. node --check passes (2/2 inline script blocks); 5-case harness (run under TZ=Asia/Singapore at 21:02 SGT) passes: today shift→no reminder, real tomorrow→exactly one, duplicate tomorrow rows→one, hard-cancelled→none, suspended→none. Surgical diff: only autoSendShiftReminders() + its preceding flag changed; 852 functions unchanged, nothing else touched. -->
 <!-- Build patch: v75 (DELETE-STICKS — REAL FIX + CLOCK-SYNC RESTORED) — Fixes two linked regressions. PROBLEM A: a deleted portal shift (e.g. Jonathan Herbsman) STILL kept coming back after v73. PROBLEM B: worse, portal clock-ins/outs stopped syncing onto the ops panel entirely. SHARED ROOT CAUSE — a KEY-SHAPE MISMATCH in the v73 delete. importBookingKey() keys a live portal booking by its real id → "pb|<id>" (it reads row._portalBookingId). But a SHIFT object has no _portalBookingId, so v73's deleteCancelledShift() could only ever write the ignore under the fuzzy "k|worker|date|start|end" key. The importer then looked the booking up under "pb|<id>" and never found the "k|" ignore → it resurrected (Bug A). And because the "k|" key is OUTLET-BLIND, that stale delete-ignore ALSO matched any OTHER active booking for the same worker at the same date/time → tagExistingShifts flagged those rows _ignored and `continue`d with _existingShift=null, so syncPortalClockTimes (which requires _existingMatch==='exact') skipped them → portal clock-in/out stopped syncing (Bug B). FIX (additive, two functions, no schema change): (1) deleteCancelledShift() now REVERSE-LOOKS-UP the import_handled ledger by the deleted shiftId to recover the EXACT key the importer uses (the real "pb|<id>"), writes the ignore under THAT key, and prunes the stale import_handled entry. It falls back to the fuzzy "k|" key only when no ledger record exists, and now records the outletKey on every delete-ignore for disambiguation. (2) isImportIgnored() gains a guard: a delete-origin "k|" ignore only suppresses a row when the OUTLET also matches (pb|/os| unique-id ignores and manual "Ignore" choices are unchanged, key-only). Legacy v73 "k|" delete-ignores that carry no outletKey no longer suppress at all — restoring clock-sync immediately — while the corrected pb|-keyed ignore stops the resurrection going forward. NOTE: a shift already deleted under v73 must be deleted once more under v75 to write the durable pb| ignore; clock-sync is restored on load regardless. Exactly two functions changed (isImportIgnored + the delete ignore-write), ~85 lines added / 9 removed, nothing else touched. node --check passes (2/2 inline script blocks); 14-case logic harness passes (resurrection blocked, clock-sync unblocked, manual ignore unchanged, same/different-outlet disambiguation, ledger + fallback paths). -->
@@ -3532,6 +3533,10 @@ async function init() {
   // Team-wide durable "booking approval acknowledged" ledger — drives the Tasks
   // acknowledgement card when a pending booking is approved (no schema change).
   loadApprovalAcksRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
+  // v79: Team-wide durable "deleted in portal" ledger — drives the Tasks
+  // "No longer in portal" card so the desync is visible without opening Import
+  // Bookings, and survives refresh / shows for teammates (no schema change).
+  loadPortalDeletedRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
   // Team-wide Periskope config so every device can send WhatsApp (not just the one
   // where the API key was first entered).
   loadPeriskopeConfigShared().catch(()=>{});
@@ -6177,6 +6182,38 @@ function getOpenTasks() {
     }
   } catch (e) { /* ledger may be mid-load; skip silently */ }
 
+  // ── v79: "No longer in the portal" tasks ────────────────────────────────────
+  // A booking the portal/client deleted, but which is still sitting ACTIVE in the
+  // ops panel, needs an ops decision (cancel it here, or leave it). Previously this
+  // only showed as a red pill on the Attendance row + an Import Bookings preview
+  // row — easy to miss. Surface it as a first-class Task so it counts on the
+  // always-visible badge. Built from the durable portalDeleted ledger, matched to
+  // a live shift in the task pool so a shift that's since been cancelled/deleted in
+  // the panel drops the task automatically. Skips dismissed entries.
+  try {
+    const poolById = new Map(taskShiftPool().map(s => [String(s.id), s]));
+    for (const [sid, entry] of Object.entries(portalDeleted || {})) {
+      if (!entry || entry.dismissed) continue;
+      const s = poolById.get(String(sid));
+      if (!s || s.cancelled) continue;                       // gone/cancelled in panel → no task
+      const wn = String(s.worker_name || '').trim();
+      if (!wn || wn.toLowerCase() === 'available') continue; // open slot → nothing to action
+      tasks.push({
+        type: 'portal_deleted',
+        id: s.id,
+        worker: wn,
+        outlet: s.outlet || entry.outlet || '',
+        role: s.role || entry.role || '',
+        date: s.shift_date || entry.date || '',
+        start: s.scheduled_start ? s.scheduled_start.slice(0,5) : (entry.start || ''),
+        end: s.scheduled_end ? s.scheduled_end.slice(0,5) : (entry.end || ''),
+        isToday: (s.shift_date === todayStr),
+        at: entry.when || '',
+        done: false
+      });
+    }
+  } catch (e) { /* ledger may be mid-load; skip silently */ }
+
   // Sort:
   //  1) incomplete tasks always on top; completed (collapsed) tasks at the bottom.
   //  2) within incomplete: NEWEST first (most recently raised at the very top).
@@ -6428,6 +6465,26 @@ function renderTasksPanel() {
   }).join('');
 }
 function renderOneTaskCard(t, dLabel, tRange, shiftLine, when) {
+    if (t.type === 'portal_deleted') {
+      return `<div class="task-card task-dispute" style="border-color:rgba(232,64,64,0.55);">
+        <div class="task-head">
+          <span class="task-tag tag-dispute">⚠️ No longer in portal</span>
+          ${t.isToday ? '<span class="task-tag tag-today">TODAY</span>' : ''}
+          ${when}
+        </div>
+        <div class="task-body">
+          <div class="task-title">${escapeHtml(t.worker)}'s booking was deleted in the portal</div>
+          ${shiftLine}
+          <div class="task-meta">👤 <strong>${escapeHtml(t.worker)}</strong> · ${escapeHtml(t.outlet)}${t.role ? ' · '+escapeHtml(t.role) : ''}</div>
+          <div class="sub-text" style="margin-top:4px;color:var(--text3);">This shift is still active in the ops panel but no longer exists in the Anytime Work app. Cancel it here if the client really dropped it — it won't be re-imported.</div>
+        </div>
+        <div class="task-actions">
+          <button class="btn btn-danger btn-sm" onclick="processPortalDeletedTask('${escapeAttr(String(t.id))}')" title="Open the cancellation modal to remove this shift from the panel">✕ Process cancellation</button>
+          <button class="btn btn-ghost btn-sm" onclick="jumpToShiftFromTask('${escapeAttr(String(t.id))}','${escapeAttr(String(t.date||''))}')">View shift</button>
+          <button class="btn btn-ghost btn-sm" onclick="dismissPortalDeletedTask('${escapeAttr(String(t.id))}')" title="Keep the shift but stop showing this task">Dismiss</button>
+        </div>
+      </div>`;
+    }
     if (t.type === 'approval_ack') {
       return `<div class="task-card task-replacement" style="border-color:rgba(52,211,153,0.4);">
         <div class="task-head">
@@ -6554,6 +6611,41 @@ function jumpToShiftFromTask(shiftId, dateStr) {
   if (typeof jumpToShift === 'function' && dateStr) {
     jumpToShift(dateStr, shiftId);
   }
+}
+
+// v79 — "No longer in portal" task actions.
+// Process: open the cancellation modal for the shift (the Outlet-cancellation
+// path hard-deletes it AND writes the resurrection-proof ignore via the shared
+// writeDeleteIgnoreForShift, so it won't come back). The next portal-load
+// detection pass prunes the ledger entry once the panel shift is gone, so the
+// task clears itself; we also clear it eagerly here for immediate feedback.
+async function processPortalDeletedTask(shiftId) {
+  const id = String(shiftId);
+  const s = (allShifts || []).find(x => String(x.id) === id)
+        || (typeof taskShiftCache !== 'undefined' ? taskShiftCache[id] : null);
+  if (!s) {
+    // The shift isn't in the currently-loaded view. Jump to its date first so the
+    // cancellation modal has a live row to act on.
+    const entry = portalDeleted[id];
+    if (entry && entry.date && typeof jumpToShift === 'function') {
+      closeTasksPanel();
+      await jumpToShift(entry.date, id);
+      const s2 = (allShifts || []).find(x => String(x.id) === id);
+      if (s2) { openCancelModal(s2.id, s2.worker_name, s2.outlet, s2.scheduled_start); return; }
+    }
+    toast('Open the shift’s date, then process the cancellation from the row.', 'info');
+    return;
+  }
+  closeTasksPanel();
+  openCancelModal(s.id, s.worker_name, s.outlet, s.scheduled_start);
+}
+// Dismiss: keep the shift, but stop nagging. Tombstones the ledger entry so the
+// next detection pass doesn't re-raise it. Team-wide + durable.
+async function dismissPortalDeletedTask(shiftId) {
+  await clearPortalDeleted(shiftId, { dismiss: true });
+  try { if (typeof updateTasksNavBadge === 'function') updateTasksNavBadge(); } catch (e) {}
+  try { renderTasksPanel(); } catch (e) {}
+  toast('Dismissed — the shift stays in the panel; this task won’t show again.');
 }
 
 async function loadShifts() {
@@ -7076,6 +7168,83 @@ let portalWorkerTokensByDate = new Map();
 // in the Import Bookings "Cancelled / deleted in the portal" section. Cleared at
 // the start of each detection pass so it never goes stale.
 let portalDeletedShiftIds = new Set();
+
+// ── v79: DURABLE "deleted in portal" ledger ──────────────────────────────────
+// The v76/v78 portalDeletedShiftIds set is in-memory only and is rebuilt solely
+// when a portal load runs detectDeletedPortalBookings(). That had two gaps the
+// ops team hit: (1) the desync wasn't surfaced anywhere they actually look — it
+// sat in the Attendance row (easy to miss) and the Import Bookings preview (only
+// visible if you open it); (2) it didn't survive a refresh or show up for a
+// teammate until the next portal load. This ledger makes the signal DURABLE and
+// team-wide (mirrors import_handled / import_ignored, app_settings key
+// 'portal_deleted'), so the Tasks panel can raise a card for it on every device
+// without needing the Import Bookings view open. Keyed by panel shift id →
+// { when, by, label, worker, outlet, date, start, end, dismissed }. Self-cleaning:
+// detectDeletedPortalBookings() prunes any entry whose shift is no longer
+// deleted-in-portal (re-synced) or no longer an active panel shift. No schema change.
+let portalDeleted = loadPortalDeleted(); // { [shiftId]: {...} }
+let portalDeletedLoaded = false;
+function loadPortalDeleted() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('portal_deleted_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch(e) { return {}; }
+}
+async function loadPortalDeletedRemote() {
+  try {
+    if (!supabaseClient) return;
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'portal_deleted').maybeSingle();
+    if (error) { console.warn('portalDeleted remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      portalDeleted = { ...portalDeleted, ...data.value };
+      localStorage.setItem('portal_deleted_v1', JSON.stringify(portalDeleted));
+    } else {
+      const local = loadPortalDeleted();
+      if (Object.keys(local).length) { portalDeleted = local; await savePortalDeleted(); }
+    }
+    portalDeletedLoaded = true;
+  } catch(e) { console.warn('portalDeleted remote load error:', e); }
+}
+async function savePortalDeleted() {
+  localStorage.setItem('portal_deleted_v1', JSON.stringify(portalDeleted));
+  if (!supabaseClient) return false;
+  try {
+    let merged = portalDeleted;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'portal_deleted').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        merged = { ...data.value, ...portalDeleted };
+        portalDeleted = merged;
+        localStorage.setItem('portal_deleted_v1', JSON.stringify(portalDeleted));
+      }
+    } catch(e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'portal_deleted', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('portalDeleted remote save failed:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('portalDeleted remote save error:', e); return false; }
+}
+// Permanently remove a shift from the deleted-in-portal ledger (used when the
+// shift is deleted/cancelled in the panel, or when a teammate dismisses the task).
+async function clearPortalDeleted(shiftId, opts) {
+  const id = String(shiftId);
+  if (portalDeleted[id]) {
+    if (opts && opts.dismiss) {
+      // Keep a tombstone so the task doesn't re-raise on the next detection pass,
+      // but mark it dismissed so it no longer counts or renders.
+      portalDeleted[id] = { ...portalDeleted[id], dismissed: true, dismissedAt: new Date().toISOString(),
+        dismissedBy: (typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : '' };
+    } else {
+      delete portalDeleted[id];
+    }
+    try { await savePortalDeleted(); } catch(e){}
+  }
+  try { portalDeletedShiftIds.delete(id); } catch(e){}
+}
+
 
 // Split a name into normalised word tokens (lowercase, punctuation-stripped).
 function importNameTokens(name) {
@@ -11047,6 +11216,9 @@ async function writeDeleteIgnoreForShift(s, label) {
     // Also drop it from the live "deleted in portal" highlight set if present, so
     // the attendance badge doesn't linger after we've deleted + ignored it.
     try { portalDeletedShiftIds.delete(String(s.id)); } catch (e) {}
+    // v79: and from the durable Tasks ledger, so the "No longer in portal" task
+    // clears immediately on delete instead of waiting for the next portal load.
+    try { await clearPortalDeleted(String(s.id)); } catch (e) {}
 
     if (wroteIgnore) { try { await saveImportIgnored(); } catch (e) {} }
     return wroteIgnore;
@@ -16070,6 +16242,9 @@ async function detectDeletedPortalBookings(bookings, resolvedRows) {
   // scratch each pass so it never goes stale (a booking re-added in the portal
   // must clear its badge). Populated below as we synthesise each deletion row.
   portalDeletedShiftIds = new Set();
+  // v79: make sure the durable deleted-in-portal ledger is loaded team-wide so we
+  // can add new detections and prune resolved ones below.
+  try { if (!portalDeletedLoaded) await loadPortalDeletedRemote(); } catch (e) {}
   // Make sure the ledger is loaded team-wide before we read it.
   try { if (!importHandledLoaded) await loadImportHandledRemote(); } catch (e) {}
   if (!importHandled || typeof importHandled !== 'object') return;
@@ -16306,11 +16481,71 @@ async function detectDeletedPortalBookings(bookings, resolvedRows) {
     if (sid) portalDeletedShiftIds.add(sid);
   }
 
+  // v79 — DURABLE LEDGER SYNC. Persist newly-detected deletions and prune resolved
+  // ones so the Tasks panel (and any teammate / a fresh refresh) sees an accurate,
+  // up-to-date list WITHOUT having to open Import Bookings. This pass is
+  // authoritative for "currently deleted in portal": portalDeletedShiftIds holds
+  // exactly what's deleted right now.
+  try {
+    let ledgerChanged = false;
+    // (a) ADD / refresh an entry for every shift detected as deleted this pass.
+    for (const r of synthRows) {
+      const sid = String((r && (r._importedShiftId || (r._existingShift && r._existingShift.id))) || '');
+      if (!sid) continue;
+      const s = (r && r._existingShift) ||
+                (Array.isArray(allShifts) ? allShifts.find(x => String(x.id) === sid) : null) || r;
+      const existing = portalDeleted[sid];
+      // Preserve a prior dismissed flag (don't re-nag a card a teammate dismissed),
+      // and keep the original first-seen 'when' so the task age stays stable.
+      portalDeleted[sid] = {
+        when: (existing && existing.when) || new Date().toISOString(),
+        by: (existing && existing.by) || ((typeof currentInternalUser !== 'undefined' && currentInternalUser) ? currentInternalUser : ''),
+        worker: (s && s.worker_name) || (r && r.worker_name) || '',
+        outlet: (s && s.outlet) || (r && r.outlet) || '',
+        date: (s && s.shift_date) || (r && r.shift_date) || '',
+        start: ((s && s.scheduled_start) || (r && r.scheduled_start) || '').slice(0,5),
+        end: ((s && s.scheduled_end) || (r && r.scheduled_end) || '').slice(0,5),
+        role: (s && s.role) || (r && r.role) || '',
+        country: (s && s.country) || (r && r.country) || null,
+        label: `${(s && s.outlet) || ''} · ${(s && s.worker_name) || ''}`,
+        dismissed: existing ? !!existing.dismissed : false,
+        ...(existing && existing.dismissed ? { dismissedAt: existing.dismissedAt, dismissedBy: existing.dismissedBy } : {})
+      };
+      ledgerChanged = true;
+    }
+    // (b) PRUNE entries that are no longer deleted-in-portal: the booking came back
+    // in the feed (not in portalDeletedShiftIds this pass) OR its panel shift is
+    // gone / cancelled (deleted in the panel → nothing left to action). Because
+    // this detector only runs on a healthy, non-empty load, absence from
+    // portalDeletedShiftIds is trustworthy "no longer deleted".
+    for (const sid of Object.keys(portalDeleted)) {
+      const stillDeleted = portalDeletedShiftIds.has(sid);
+      const panelShift = (Array.isArray(allShifts) ? allShifts.find(x => String(x.id) === sid) : null);
+      const goneFromPanel = !panelShift;            // hard-deleted in the panel
+      const nowCancelled = panelShift && panelShift.cancelled === true;
+      if (!stillDeleted || goneFromPanel || nowCancelled) {
+        delete portalDeleted[sid];
+        ledgerChanged = true;
+      }
+    }
+    if (ledgerChanged) { try { await savePortalDeleted(); } catch (e) {} }
+  } catch (e) { console.warn('[portal deletions] durable ledger sync failed:', e); }
+
   if (synthRows.length) {
     importRows = (Array.isArray(importRows) ? importRows : []).concat(synthRows);
     console.log(`[portal deletions] detected ${synthRows.length} booking(s) deleted in the app (absent from the portal feed but still active in the panel).`);
     try { renderImportPreview(); } catch (e) {}
   }
+  // v79: refresh the Tasks badge + panel so the new "no longer in portal" task
+  // cards appear (or clear) immediately after a portal load, on any page.
+  try { if (typeof updateTasksNavBadge === 'function') updateTasksNavBadge(); } catch (e) {}
+  try {
+    if (typeof renderTasksPanel === 'function'
+        && document.getElementById('tasks-modal')
+        && document.getElementById('tasks-modal').classList.contains('open')) {
+      renderTasksPanel();
+    }
+  } catch (e) {}
   // Refresh the attendance table so the new "no longer in portal" badges render
   // (or clear) without waiting for the next manual reload. Guarded + cheap: it's
   // a pure re-render of already-loaded shifts, no DB round-trip. Only when the
