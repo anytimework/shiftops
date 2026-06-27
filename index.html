@@ -8815,6 +8815,63 @@ function buildPaidCancellationMessage(s, opts) {
   }
 }
 
+// ── Paid-shift EDIT alert message ────────────────────────────────────────────
+// v77: when a shift that's ALREADY MARKED PAID has its hours or breaks changed,
+// payroll must know so the payout can be re-checked / topped up / clawed back.
+// `before` is the shift snapshot taken BEFORE the edit write; `after` is the same
+// shift with the new clock/break/scheduled values applied. Only fields that
+// actually changed are listed, each as old → new, with the resulting net payout
+// before and after so the delta is obvious. Mirrors the other payroll alerts.
+function buildPaidEditMessage(before, after, opts) {
+  try {
+    const o = opts || {};
+    const workerName = String(after.worker_name || before.worker_name || '').trim() || 'Unknown';
+    const outlet     = String(after.outlet || before.outlet || '').trim();
+    const sym        = currencySymbolForOutlet(outlet) || '$';
+    const fmt = v => `${sym}${parseFloat(v || 0).toFixed(2)}`;
+    const dateStr = after.shift_date ? new Date(after.shift_date + 'T00:00:00').toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+    const editor = String(o.editor || '').trim();
+
+    const hhmm = v => String(v || '').slice(0,5) || '—';
+    let hoursBefore = '—', hoursAfter = '—', netBefore = 0, netAfter = 0;
+    try { hoursBefore = calcShiftHours(before) || '—'; } catch(e) {}
+    try { hoursAfter  = calcShiftHours(after)  || '—'; } catch(e) {}
+    try { netBefore   = parseFloat(netPaymentForShift(before) || 0); } catch(e) {}
+    try { netAfter    = parseFloat(netPaymentForShift(after)  || 0); } catch(e) {}
+
+    const worker = allWorkers.find(w => String(w.name||'').toLowerCase() === workerName.toLowerCase());
+    const payInfo = worker ? `${worker.bank_method || 'PayNow'} ${worker.bank_details || ''}`.trim() : '—';
+
+    const changeLines = Array.isArray(o.changes) ? o.changes : [];
+
+    let lines = [];
+    lines.push('*✏️ PAID SHIFT EDITED*');
+    lines.push('This shift was already marked *PAID* — payroll to re-check the payout.');
+    lines.push('---');
+    lines.push(`Worker: ${workerName}`);
+    lines.push(`Outlet: ${outlet}`);
+    lines.push(`Date: ${dateStr}`);
+    if (editor) lines.push(`Edited by: ${editor}`);
+    lines.push('---');
+    lines.push('*What changed:*');
+    changeLines.forEach(l => lines.push(`• ${l}`));
+    lines.push('---');
+    lines.push(`Hours: ${hoursBefore}h → ${hoursAfter}h`);
+    lines.push(`Net payout: ${fmt(netBefore)} → ${fmt(netAfter)}`);
+    const delta = netAfter - netBefore;
+    if (Math.abs(delta) >= 0.005) {
+      lines.push(`*${delta > 0 ? 'Top-up owed' : 'Over-paid (recover)'}: ${fmt(Math.abs(delta))}*`);
+    } else {
+      lines.push('*Net payout unchanged*');
+    }
+    lines.push(`Pay to: ${payInfo}`);
+    return lines.join('\n');
+  } catch(e) {
+    console.error('[WA] buildPaidEditMessage error:', e);
+    return `PAID SHIFT EDITED: ${String((after&&after.worker_name)||(before&&before.worker_name)||'').trim()} at ${String((after&&after.outlet)||(before&&before.outlet)||'').trim()} — already marked PAID, payroll to re-check.`;
+  }
+}
+
 // ── WhatsApp / Periskope Settings ────────────────────────────────────────────
 function switchWaTab(tab) {
   document.getElementById('wa-panel-periskope').style.display = tab === 'periskope' ? '' : 'none';
@@ -11047,6 +11104,10 @@ function cancelEditRow(id) {
 async function saveRow(id) {
   const s = allShifts.find(x => x.id === id);
   if (!s) return;
+  // v77: snapshot the shift BEFORE this edit so a paid-shift hours/break change can
+  // be diffed and alerted to payroll. Shallow copy is enough (we only read scalars).
+  const _beforeEdit = { ...s };
+  const _wasPaid = !!s.is_paid;
   // Read values — fall back to existing DB value if the input doesn't exist
   const ciInput = document.getElementById('edit-ci-' + id);
   const coInput = document.getElementById('edit-co-' + id);
@@ -11173,6 +11234,46 @@ async function saveRow(id) {
   if (co && !s.clock_out) {
     const _notifShift = { ...s, clock_out: co, break_mins: br, worker_name: resolvedWorker || s.worker_name };
     notifyPayrollClockOut(buildClockOutMessage(_notifShift, co));
+  }
+  // v77: PAID-SHIFT EDIT ALERT → payroll group. If this shift was ALREADY marked
+  // PAID and this edit changed any payroll-affecting field — clock-in, clock-out,
+  // scheduled start/end (hours), or break minutes — payroll must re-check the
+  // payout. Skip when the clock-out alert above already fired (a brand-new
+  // clock-out on a paid shift is covered by that message) to avoid double-sending.
+  if (_wasPaid && !(co && !s.clock_out)) {
+    const norm = v => String(v == null ? '' : v).slice(0,5);
+    const beforeBreak = breakMinsForShift(_beforeEdit);
+    const changes = [];
+    if (norm(_beforeEdit.clock_in)  !== norm(ci))            changes.push(`Clock-in: ${norm(_beforeEdit.clock_in)||'—'} → ${norm(ci)||'—'}`);
+    if (norm(_beforeEdit.clock_out) !== norm(co))            changes.push(`Clock-out: ${norm(_beforeEdit.clock_out)||'—'} → ${norm(co)||'—'}`);
+    if (norm(_beforeEdit.scheduled_start) !== norm(newSchedStart)) changes.push(`Scheduled start: ${norm(_beforeEdit.scheduled_start)||'—'} → ${norm(newSchedStart)||'—'}`);
+    if (norm(_beforeEdit.scheduled_end)   !== norm(newSchedEnd))   changes.push(`Scheduled end: ${norm(_beforeEdit.scheduled_end)||'—'} → ${norm(newSchedEnd)||'—'}`);
+    if (beforeBreak !== br) {
+      const dir = br > beforeBreak ? 'added' : 'reduced';
+      changes.push(`Break: ${beforeBreak}m → ${br}m (${dir} ${Math.abs(br - beforeBreak)}m)`);
+    }
+    if (changes.length) {
+      const afterShift = {
+        ...s,
+        clock_in: ci, clock_out: co, break_mins: br,
+        scheduled_start: newSchedStart ? newSchedStart + ':00' : s.scheduled_start,
+        scheduled_end: newSchedEnd ? newSchedEnd + ':00' : s.scheduled_end,
+        worker_name: resolvedWorker || s.worker_name,
+        late_penalty: lp,
+        ot_approved: wantOt
+      };
+      try {
+        notifyPayrollClockOut(buildPaidEditMessage(_beforeEdit, afterShift, {
+          editor: currentInternalUser || 'Unknown',
+          changes
+        }));
+      } catch(e) { console.warn('[Payroll] paid-edit alert failed', e); }
+      try {
+        await logActivity('Paid shift edited',
+          `${afterShift.worker_name || 'Available'} at ${s.outlet || '—'} on ${_dateFmt} — ${changes.join('; ')}`,
+          'shift', id, { shift_date: s.shift_date, worker_name: afterShift.worker_name, outlet: s.outlet });
+      } catch(e) {}
+    }
   }
   await loadShifts();
 }
@@ -12632,9 +12733,25 @@ function editWorker(id) {
 async function saveWorker() {
   const name = document.getElementById('wf-name').value.trim();
   if (!name) { toast('Please enter worker name', 'error'); return; }
+  const nowIso = new Date().toISOString();
+  const me = currentInternalUser || 'Unknown';
   const payload = { name, phone: document.getElementById('wf-phone').value.trim(), bank_method: document.getElementById('wf-method').value, bank_details: document.getElementById('wf-bank').value.trim(), country: document.getElementById('wf-country').value };
-  const query = editingWorkerId ? supabaseClient.from('workers').update(payload).eq('id', editingWorkerId) : supabaseClient.from('workers').insert(payload);
-  const { error } = await query;
+  // AUTHORSHIP (v77): stamp who created / last edited the worker profile. Optional
+  // columns — if they don't exist yet the insert/update gracefully retries without
+  // them (the activity log below still records the author either way).
+  if (editingWorkerId) { payload.updated_by = me; payload.updated_at = nowIso; }
+  else                 { payload.created_by = me; payload.created_at = nowIso; }
+  const runWorkerSave = (pl) => editingWorkerId
+    ? supabaseClient.from('workers').update(pl).eq('id', editingWorkerId)
+    : supabaseClient.from('workers').insert(pl);
+  let { error } = await runWorkerSave(payload);
+  // Graceful degrade: drop unknown authorship columns and retry so the save never
+  // hard-fails on a project whose `workers` table predates these columns.
+  if (error && /created_by|updated_by|created_at|updated_at/i.test(error.message || '')) {
+    const pl = { ...payload };
+    delete pl.created_by; delete pl.updated_by; delete pl.created_at; delete pl.updated_at;
+    ({ error } = await runWorkerSave(pl));
+  }
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldWorker = editingWorkerId ? allWorkers.find(x => x.id === editingWorkerId) : null;
   if (oldWorker && normProfileKey(oldWorker.name) !== normProfileKey(name)) delete profileMeta.workers[normProfileKey(oldWorker.name)];
@@ -12650,6 +12767,15 @@ async function saveWorker() {
       .map(r => ({ from: String(r.from).slice(0,10), to: String(r.to).slice(0,10), ...(r.note ? { note: r.note } : {}) }))
   };
   await saveProfileMeta();
+  // Audit trail: record who created / edited this worker profile (works even when
+  // the workers table has no created_by/updated_by columns).
+  try {
+    await logActivity(
+      editingWorkerId ? 'Worker profile edited' : 'Worker profile created',
+      `${name}${oldWorker && oldWorker.name !== name ? ` (renamed from ${oldWorker.name})` : ''}`,
+      'worker', editingWorkerId || '', { worker_name: name }
+    );
+  } catch(e) {}
   toast(editingWorkerId ? 'Worker updated!' : 'Worker added!');
   document.getElementById('add-worker-modal').classList.remove('open');
   editingWorkerId = null;
@@ -12660,6 +12786,46 @@ const addWorker = saveWorker;
 // ── Worker / Outlet detail + analytics ───────────────────────────────────────
 // These pull the FULL shift history from the DB (not the view-scoped `allShifts`)
 // so history and analytics are complete regardless of the current date view.
+
+// v77: render a "Created by … · Last edited by …" byline for a worker/outlet
+// profile. Prefers the row's own created_by/updated_by columns; falls back to the
+// activity log ("… profile created/edited" entries) so the author still shows on
+// projects whose tables don't yet have those columns.
+function _profileAuthorByline(row, kind, name) {
+  let createdBy = row && row.created_by ? String(row.created_by) : null;
+  let createdAt = row && row.created_at ? row.created_at : null;
+  let editedBy  = row && row.updated_by ? String(row.updated_by) : null;
+  let editedAt  = row && row.updated_at ? row.updated_at : null;
+  // Fall back to the activity log if the row carries no authorship.
+  if (!createdBy || !editedBy) {
+    const createdAction = kind === 'worker' ? 'Worker profile created' : 'Client profile created';
+    const editedAction  = kind === 'worker' ? 'Worker profile edited'  : 'Client profile edited';
+    const key = normProfileKey(name);
+    const matchName = (r) => {
+      const cand = kind === 'worker' ? (r.worker_name || r.details) : (r.outlet || r.details);
+      if (kind === 'worker' && r.worker_name) return normProfileKey(r.worker_name) === key;
+      if (kind === 'outlet' && r.outlet) return normProfileKey(r.outlet) === key;
+      return String(r.details || '').toLowerCase().startsWith(String(name || '').toLowerCase());
+    };
+    const logs = (allActivityLogs || []).filter(r => r && matchName(r))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    if (!createdBy) {
+      const c = logs.find(r => r.action === createdAction);
+      if (c) { createdBy = c.created_by; createdAt = createdAt || c.created_at; }
+    }
+    if (!editedBy) {
+      const edits = logs.filter(r => r.action === editedAction);
+      const last = edits.length ? edits[edits.length - 1] : null;
+      if (last) { editedBy = last.created_by; editedAt = editedAt || last.created_at; }
+    }
+  }
+  const fmt = (iso) => { try { return iso ? new Date(iso).toLocaleString('en-SG', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''; } catch(e) { return ''; } };
+  const parts = [];
+  if (createdBy) parts.push(`Created by <strong style="color:var(--teal);">${escapeHtml(createdBy)}</strong>${createdAt ? ` · ${fmt(createdAt)}` : ''}`);
+  if (editedBy)  parts.push(`Last edited by <strong style="color:var(--teal);">${escapeHtml(editedBy)}</strong>${editedAt ? ` · ${fmt(editedAt)}` : ''}`);
+  if (!parts.length) return '';
+  return `<div style="font-size:11.5px;color:var(--text2);margin:2px 0 14px;line-height:1.6;">${parts.join(' &nbsp;•&nbsp; ')}</div>`;
+}
 
 function _shiftPeriod(s) {
   const m = toMins((s.scheduled_start || '').slice(0,5));
@@ -12753,7 +12919,9 @@ async function openWorkerDetail(name) {
   const periodMax = Math.max(periods.Morning, periods.Lunch, periods.Dinner, periods.Midnight, 1);
   const dowBars = DOW.map((lbl,i)=>_miniBar(lbl, dowCounts[i], dowMax)).join('');
   const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
+  const _wRow = allWorkers.find(w => String(w.name||'').toLowerCase() === String(name||'').toLowerCase());
   document.getElementById('worker-detail-body').innerHTML = `
+    ${_profileAuthorByline(_wRow, 'worker', name)}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
       ${_statCard('Times worked', worked.length, 'var(--green)')}
       ${_statCard('Times late', lateCount, lateCount>0?'var(--amber)':'var(--text)')}
@@ -12782,7 +12950,9 @@ async function openOutletDetail(outletName) {
   worked.forEach(s => { periods[_shiftPeriod(s)]++; });
   const periodMax = Math.max(periods.Morning, periods.Lunch, periods.Dinner, periods.Midnight, 1);
   const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
+  const _oRow = allOutlets.find(o => String(o.name||'').toLowerCase() === String(outletName||'').toLowerCase());
   document.getElementById('outlet-detail-body').innerHTML = `
+    ${_profileAuthorByline(_oRow, 'outlet', outletName)}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
       ${_statCard('Shifts worked', worked.length, 'var(--green)')}
       ${_statCard('Unique workers', uniqueWorkers, 'var(--accent)')}
@@ -12862,9 +13032,23 @@ function editOutlet(id) {
 async function saveOutlet() {
   const name = document.getElementById('of-name').value.trim();
   if (!name) { toast('Enter an outlet name', 'error'); return; }
+  const nowIso = new Date().toISOString();
+  const me = currentInternalUser || 'Unknown';
   const payload = { name, location: document.getElementById('of-location').value.trim(), country: document.getElementById('of-country').value };
-  const query = editingOutletId ? supabaseClient.from('outlets').update(payload).eq('id', editingOutletId) : supabaseClient.from('outlets').insert(payload);
-  const { error } = await query;
+  // AUTHORSHIP (v77): stamp creator / last editor of the client (outlet) profile.
+  // Optional columns — gracefully dropped on retry if absent; the activity log
+  // below records the author regardless.
+  if (editingOutletId) { payload.updated_by = me; payload.updated_at = nowIso; }
+  else                 { payload.created_by = me; payload.created_at = nowIso; }
+  const runOutletSave = (pl) => editingOutletId
+    ? supabaseClient.from('outlets').update(pl).eq('id', editingOutletId)
+    : supabaseClient.from('outlets').insert(pl);
+  let { error } = await runOutletSave(payload);
+  if (error && /created_by|updated_by|created_at|updated_at/i.test(error.message || '')) {
+    const pl = { ...payload };
+    delete pl.created_by; delete pl.updated_by; delete pl.created_at; delete pl.updated_at;
+    ({ error } = await runOutletSave(pl));
+  }
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   const oldOutlet = editingOutletId ? allOutlets.find(x => x.id === editingOutletId) : null;
   if (oldOutlet && normProfileKey(oldOutlet.name) !== normProfileKey(name)) delete profileMeta.outlets[normProfileKey(oldOutlet.name)];
@@ -12880,6 +13064,13 @@ async function saveOutlet() {
     lng: (outletGeo.lat !== null && outletGeo.lng !== null) ? outletGeo.lng : (prevMeta.lng ?? null)
   };
   await saveProfileMeta();
+  try {
+    await logActivity(
+      editingOutletId ? 'Client profile edited' : 'Client profile created',
+      `${name}${oldOutlet && oldOutlet.name !== name ? ` (renamed from ${oldOutlet.name})` : ''}`,
+      'outlet', editingOutletId || '', { outlet: name }
+    );
+  } catch(e) {}
   toast(editingOutletId ? 'Outlet updated!' : 'Outlet added!');
   document.getElementById('add-outlet-modal').classList.remove('open');
   editingOutletId = null;
