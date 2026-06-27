@@ -3593,27 +3593,11 @@ async function init() {
   loadImportCancelAckRemote().catch(()=>{});
   // Team-wide durable "booking approval acknowledged" ledger — drives the Tasks
   // acknowledgement card when a pending booking is approved (no schema change).
-  loadApprovalAcksRemote().then(()=>{
-    if (typeof loadTaskShiftCache === 'function') {
-      loadTaskShiftCache().then(()=>{
-        try { updateTasksNavBadge(); } catch(e){}
-        if (document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') { try { renderMetrics(); } catch(e){} }
-        if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
-      }).catch(()=>{ try { updateTasksNavBadge(); } catch(e){} });
-    } else { try { updateTasksNavBadge(); } catch(e){} }
-  }).catch(()=>{});
+  loadApprovalAcksRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
   // v79: Team-wide durable "deleted in portal" ledger — drives the Tasks
   // "No longer in portal" card so the desync is visible without opening Import
   // Bookings, and survives refresh / shows for teammates (no schema change).
-  loadPortalDeletedRemote().then(()=>{
-    if (typeof loadTaskShiftCache === 'function') {
-      loadTaskShiftCache().then(()=>{
-        try { updateTasksNavBadge(); } catch(e){}
-        if (document.getElementById('metrics') && document.getElementById('page-attendance')?.style.display !== 'none') { try { renderMetrics(); } catch(e){} }
-        if (document.getElementById('tasks-modal')?.classList.contains('open')) { try { renderTasksPanel(); } catch(e){} }
-      }).catch(()=>{ try { updateTasksNavBadge(); } catch(e){} });
-    } else { try { updateTasksNavBadge(); } catch(e){} }
-  }).catch(()=>{});
+  loadPortalDeletedRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
   // Team-wide durable "team tasks" ledger — the assignable internal to-do list.
   // Same app_settings merge-union pattern; no schema change.
   loadTeamTasksRemote().then(()=>{ try { updateTeamTasksNavBadge(); } catch(e){} }).catch(()=>{});
@@ -6829,26 +6813,11 @@ async function loadOverpaymentCache() {
 // so a "late tomorrow" notice or a cancellation 3 days out still shows today.
 async function loadTaskShiftCache() {
   // Collect shift IDs that have any actionable reminder flag set
-  const idSet = new Set();
+  const ids = [];
   for (const [id, r] of Object.entries(shiftReminders || {})) {
     if (!r) continue;
-    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) idSet.add(String(id));
+    if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) ids.push(String(id));
   }
-  // Also fold in shift IDs that carry an open ledger-based task — booking-approval
-  // acknowledgements and "no longer in portal" deletions. These tasks aren't keyed
-  // off shift_reminders, so without this their shift row would only be in the pool
-  // on the exact date being viewed, making the task vanish on every other date.
-  try {
-    for (const [id, e] of Object.entries(approvalAcks || {})) {
-      if (e && e.approvedAt && !e.acked) idSet.add(String(id));
-    }
-  } catch (e) {}
-  try {
-    for (const [id, e] of Object.entries(portalDeleted || {})) {
-      if (e && !e.dismissed) idSet.add(String(id));
-    }
-  } catch (e) {}
-  const ids = Array.from(idSet);
   taskShiftCache = {};
   // Always fold in the currently-loaded shifts (so same-day items work even
   // before/without the cross-date fetch resolving).
@@ -13258,6 +13227,30 @@ function setLoggedInUserLabel() {
   if (msgLabel) msgLabel.textContent = currentInternalUser ? `Signed in: ${currentInternalUser}` : '';
   applyRoleVisibility();
 }
+// SECURITY: the floating widgets (AI assistant, Team Chat, Team Tasks) and their
+// panels are position:fixed siblings OUTSIDE #main-app, so hiding #main-app does
+// NOT hide them. Without this gate a logged-out user (esp. on mobile, where the
+// login card can be dismissed by tapping the backdrop) could still reach the
+// chatbot / chat / task widgets. This forces all three FABs + panels closed and
+// hidden whenever there is no valid session, and restores them on login.
+function setAuthGateUI(authed) {
+  const fabIds   = ['ai-fab', 'chat-fab', 'tt-fab'];
+  const panelIds = ['ai-panel', 'chat-panel', 'tt-panel'];
+  fabIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = authed ? 'flex' : 'none';
+  });
+  if (!authed) {
+    // Force every floating panel closed and reset their open-state flags.
+    panelIds.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    });
+    try { aiChatOpen = false; } catch (e) {}
+    try { teamChatOpen = false; } catch (e) {}
+    try { teamTasksOpen = false; } catch (e) {}
+  }
+}
 function getValidInternalSession() {
   try {
     const session = JSON.parse(localStorage.getItem('internal_session') || 'null');
@@ -13286,6 +13279,7 @@ function requireInternalLogin() {
     document.getElementById('main-app').style.display = 'flex';
     document.getElementById('internal-login-modal').classList.remove('open');
     setLoggedInUserLabel();
+    setAuthGateUI(true);
     startMessagePolling();
     return;
   }
@@ -13293,6 +13287,7 @@ function requireInternalLogin() {
   localStorage.removeItem('current_internal_user');
   localStorage.removeItem('internal_session');
   setLoggedInUserLabel();
+  setAuthGateUI(false);
   updateAnnouncementBadge(0);
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('internal-login-modal').classList.add('open');
@@ -13308,6 +13303,7 @@ function internalLogin() {
     currentInternalUser = null;
     document.getElementById('main-app').style.display = 'none';
     document.getElementById('internal-login-modal').classList.add('open');
+    setAuthGateUI(false);
     toast('Wrong passcode', 'error');
     return;
   }
@@ -13317,6 +13313,7 @@ function internalLogin() {
   document.getElementById('internal-login-modal').classList.remove('open');
   document.getElementById('login-pass').value = '';
   setLoggedInUserLabel();
+  setAuthGateUI(true);
   startMessagePolling();
   toast(`Welcome, ${user}`);
   if (users[user].mustChange) document.getElementById('change-pass-modal').classList.add('open');
@@ -13328,6 +13325,7 @@ function internalLogout() {
   localStorage.removeItem('current_internal_user');
   localStorage.removeItem('internal_session');
   setLoggedInUserLabel();
+  setAuthGateUI(false);
   updateAnnouncementBadge(0);
   document.getElementById('main-app').style.display = 'none';
   document.getElementById('internal-login-modal').classList.add('open');
@@ -19425,6 +19423,7 @@ let aiHistory  = []; // {role, content} for Claude API
 const AI_INFO_PREFIX = '\u2139\uFE0F\u200B'; // ℹ️ + zero-width space (unlikely to collide)
 
 function toggleAIChat() {
+  if (!getValidInternalSession()) { setAuthGateUI(false); return; }
   aiChatOpen = !aiChatOpen;
   const panel = document.getElementById('ai-panel');
   panel.style.display = aiChatOpen ? 'flex' : 'none';
@@ -21687,7 +21686,13 @@ async function initBillingNavBadge() {
 // ══════════════════════════════════════════════════════════════
 
 // ── Close modals on overlay click ─────────────────────────────
+// SECURITY: the login gate and the forced change-passcode modal must NOT be
+// dismissable by a backdrop click — on mobile (align-items:flex-end) the empty
+// area above the card is backdrop, so a tap there would otherwise close the
+// login modal and expose the app behind it. Skip these two from auto-close.
+const NON_DISMISSABLE_OVERLAYS = new Set(['internal-login-modal', 'change-pass-modal']);
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  if (NON_DISMISSABLE_OVERLAYS.has(overlay.id)) return;
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
 });
 
@@ -23472,6 +23477,16 @@ function updateChatUnreadBadge() {
   const fab = document.getElementById('chat-fab');
   const badge = document.getElementById('chat-unread-badge');
   if (!fab || !badge) return;
+  // SECURITY: never reveal the chat widget when there is no valid session.
+  // (currentInternalUser is null when logged out, but roleForUser(null) falls
+  // back to 'ops', so chatAllowedForCurrentUser() alone would wrongly allow it.)
+  if (!getValidInternalSession()) {
+    fab.style.display = 'none';
+    const panel = document.getElementById('chat-panel');
+    if (panel) { panel.style.display = 'none'; teamChatOpen = false; }
+    badge.style.display = 'none';
+    return;
+  }
   // Hide the whole widget for finance.
   if (!chatAllowedForCurrentUser()) {
     fab.style.display = 'none';
@@ -23783,6 +23798,7 @@ function teamChatHide() {
 }
 
 function toggleTeamChat() {
+  if (!getValidInternalSession()) { setAuthGateUI(false); return; }
   if (!chatAllowedForCurrentUser()) return;
   // Opening the chat is a user gesture — use it to unlock the audio context
   // so notification sounds can play even when the tab is later in the background.
@@ -24535,6 +24551,7 @@ async function initTeamTasksPage() {
 // ── Floating Team Tasks panel (collapsible, like the AI / chat FABs) ──────────
 let teamTasksOpen = false;
 async function toggleTeamTasks() {
+  if (!getValidInternalSession()) { setAuthGateUI(false); return; }
   const panel = document.getElementById('tt-panel');
   if (!panel) return;
   if (teamTasksOpen) {
@@ -24697,7 +24714,7 @@ function updateTeamTasksNavBadge() {
 <button id="ai-fab" onclick="toggleAIChat()"
   style="position:fixed;bottom:24px;right:24px;width:68px;height:68px;border-radius:50%;
   background:linear-gradient(135deg,var(--teal),var(--accent));border:none;cursor:pointer;
-  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:29px;display:flex;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:29px;display:none;
   align-items:center;justify-content:center;transition:transform 0.2s;"
   onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'">
   🧑‍💼
@@ -24755,7 +24772,7 @@ function updateTeamTasksNavBadge() {
 <button id="chat-fab" onclick="toggleTeamChat()"
   style="position:fixed;bottom:24px;right:104px;width:60px;height:60px;border-radius:50%;
   background:linear-gradient(135deg,#3a7bd5,#3a6073);border:none;cursor:pointer;
-  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:flex;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:none;
   align-items:center;justify-content:center;transition:transform 0.2s;"
   onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'"
   title="Team chat">
@@ -24812,7 +24829,7 @@ function updateTeamTasksNavBadge() {
 <button id="tt-fab" onclick="toggleTeamTasks()"
   style="position:fixed;bottom:24px;right:176px;width:60px;height:60px;border-radius:50%;
   background:linear-gradient(135deg,#7b5cff,#5b3fd6);border:none;cursor:pointer;
-  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:flex;
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);z-index:1000;font-size:25px;display:none;
   align-items:center;justify-content:center;transition:transform 0.2s;"
   onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'"
   title="Team Task / Notes">
