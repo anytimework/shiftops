@@ -6,6 +6,8 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v81 (FIRST-TIME-AT-OUTLET ATTIRE DISCLOSURE in the worker confirmation) — Worked from the v80 (June28index) build. Ops request: when a worker is NEW to an outlet (no prior history there), the booking confirmation should disclose the attire required; if no attire is on file for that outlet, it should instead say the attire will be sent separately for that outlet. IMPLEMENTATION (additive; no schema change — attire is a scalar on profileMeta.outlets[key].attire, which mergeProfileMeta already syncs team-wide via {...se,...pe}, like notes/commission). (1) OUTLET MODAL gains an "Attire / uniform required" textarea (#of-attire) above Client profile notes; wired into resetOutletModal (clear), editOutlet (populate from meta.attire), and saveOutlet (persist into profileMeta.outlets[key].attire). The old notes placeholder no longer says "Attire requirements" since attire now has its own field. Outlet rows show a green "👕 Attire on file" badge (hover = full text) when set. (2) NEW-TO-OUTLET DETECTION — workerIsNewToOutlet(worker,outlet,excludeShiftIds) queries the shifts table for any non-cancelled shift for that worker at that outlet, excluding the batch's own shift ids (they're in the DB by flush time); zero others ⇒ new. Best-effort: any query error returns false (treated as NOT new) so a transient failure never spams attire to a returning worker. (3) resolveBatchAttireInfo(entry) builds { [outlet]: { isNew, attire } } for every outlet in the batch, called in flushConfirmBatches() right before buildBatchConfirmMessage(), which now takes an optional attireInfo arg. For each outlet the worker is NEW to, the per-outlet block appends "👕 First time here — attire required: <attire>" or, when no attire is on file, "👕 First time here — attire information for <outlet> will be sent separately." Returning workers get no attire line; passing no attireInfo is backward-compatible (no line, no crash). This rides on the SAME single coalesced v80 message, so a worker new at outlet A and new at outlet B gets both attire disclosures in one confirmation. (4) AI: new setOutletAttire action (saves/clears profileMeta.outlets[key].attire) so ops can tell the assistant an outlet's dress code and have it auto-disclosed; an "OUTLET ATTIRE / UNIFORM ON FILE" context block + guidance line added so the AI can answer attire questions and knows which outlets have none on file. node --check passes (1/1 non-empty inline script block); 9-case message harness passes against the live-extracted builder (new+attire→discloses; new+no-attire→sent separately; returning→no line; mixed new/returning; no-attireInfo backward-compat; single-shift new no-attire). Surgical diff: 4 original lines changed, 117 added across 14 hunks — only the outlet modal + reset/edit/save, the outlet row, buildBatchConfirmMessage (+two new helpers + flush call site), and the AI context/schema/handler/guidance touched; nothing else disturbed. NOTE: like the rest of the confirmation flow, the "new to outlet" check + send run while a browser tab is open. -->
+<!-- Build patch: v80 (DELAYED, COALESCED WORKER BOOKING-CONFIRMATION — one summary, not spam) — Worked from the v79 (June27index) build. Ops request: when bookings are saved in Import Bookings, the WORKER should get ONE WhatsApp confirmation summarising all their shifts, not one message per booking; with a 10-min grace so a burst saved over a few minutes (e.g. 5 shifts at outlet A, then 5 more at outlet B) coalesces into a SINGLE message covering both outlets. AND: a "pending client approval" booking must NOT confirm to the worker on save — confirmation goes out (same 10-min coalesced summary) only once the client APPROVES, and only once ALL of that worker's pending bookings are approved. IMPLEMENTATION (additive; no schema change): (1) New team-synced durable ledger confirmBatches (app_settings key 'confirm_batches', mirrors approval_acks / import_handled — localStorage instant + Supabase merge-union, loaded at boot) keyed by '<track>|<workerKey>' → { track:'confirmed'|'approved', worker, shifts:{[shiftId]:{date,start,end,outlet,role}}, firstAddedAt, lastAddedAt, sentAt, sentShiftIds[] }. (2) enqueueConfirmBatch(track,shift) adds a shift into a worker's coalescing window (skips Available/open slots and any shiftId already summarised → idempotent across devices). (3) CONFIRMED TRACK — _confirmImportBookingsInner() now, after the save loop, enqueues every GENUINELY NEW saved row (_importedThisSession 'created' or 'filled') that is named and NOT pending-approval; a 'merged'/mark-synced row (already in the panel, worker already confirmed earlier) is deliberately NOT re-messaged. (4) PENDING/APPROVED TRACK — syncPortalApprovals() and approveBookingManually() no longer WhatsApp the worker immediately on each approval (which trickled one message per approval); they enqueue the approved shift into the 'approved' batch (notifiedAt guards double-enqueue). (5) flushConfirmBatches() (background, every 30s + ~12s after boot via startConfirmBatchFlusher()) sends ONE buildBatchConfirmMessage() summary per worker — grouped by outlet, sorted by date — once (a) 10 min have elapsed since that worker's LAST add (a new add re-extends the window so A-then-B coalesce) AND, for the 'approved' track, (b) workerHasPendingApproval() reports the worker has nothing pending left (reads the cross-date pendingApprovalAll cache + live allShifts). It re-reads the shared ledger first and marks sentAt + sentShiftIds, so two tabs/teammates can't double-send; a failed send leaves the window open to retry; sent batches self-prune after 24h (keeping the idempotency guard). A worker with no phone is marked sent (logged) so it doesn't spin. The send reuses sendPeriskopeMessage() + the worker phone book exactly like every other worker-facing alert. node --check passes (1/1 non-empty inline script block); 14-case logic harness passes (A-then-B within grace → one message both outlets; no send before grace elapses from last add; pending booking not on confirmed track; approved track held until last pending approved then one message; idempotent re-enqueue no double-send; fresh window after a prior send sends separately; open slot never queued; two workers → two messages). Surgical diff: 18 lines removed (the two old immediate-approval send blocks), 410 added across 10 hunks — only syncPortalApprovals(), approveBookingManually(), _confirmImportBookingsInner() (post-loop enqueue), the boot ledger-load + flusher-start, plus the new self-contained module changed; nothing else touched. buildApprovalWorkerMessage() is left intact (now unused) for safety. NOTE: like the auto-importer, the flusher runs while a browser tab is open; the durable ledger means a closed tab's pending window still flushes when any teammate's tab next ticks — a true 24/7 send would need a Supabase scheduled Edge Function. -->
 <!-- Build patch: v79 (DELETED-IN-PORTAL NOW RAISES A TASK) — Worked from the v78 (June25ndex) build. Ops report: when the portal/client deletes a booking, the panel still shows it active and nothing alerts us — it just sits in the Attendance log. The v78 signal existed but was easy to miss: a red "⚠ Not in portal" pill on the Attendance row + a row in the Import Bookings preview (only visible if you open that view), backed by an IN-MEMORY-ONLY set (portalDeletedShiftIds) that was rebuilt solely on a portal load and never read by the Tasks engine. FIX: the desync is now a first-class TASK on the always-visible Tasks badge. (1) New DURABLE, team-wide ledger portalDeleted (app_settings key 'portal_deleted', mirrors import_handled / import_ignored — localStorage instant + Supabase merge-union, loaded at boot; no schema change) keyed by panel shift id → {when,worker,outlet,date,start,end,dismissed}. (2) detectDeletedPortalBookings() now writes every detected deletion into this ledger and SELF-PRUNES entries that are no longer deleted-in-portal (booking returned to the feed) or whose panel shift is gone/cancelled — so the list stays accurate. It also refreshes the Tasks badge + panel (and the Attendance table) at the end of each pass. (3) getOpenTasks() builds a new 'portal_deleted' task from the ledger ∩ live task pool (skips dismissed entries, open/Available slots, and cancelled/missing shifts so a task auto-clears the moment the shift is removed). (4) renderOneTaskCard() renders an "⚠️ No longer in portal" card with Process cancellation (opens the cancellation modal → Outlet cancellation, which hard-deletes AND writes the resurrection-proof ignore so it won't come back), View shift, and Dismiss (tombstones the ledger entry so it won't re-nag). (5) writeDeleteIgnoreForShift() also clears the ledger entry on delete for instant feedback. node --check passes (2/2 inline script blocks); 10-case logic harness passes (detect→ledger+task, re-sync→prune+no task, cancelled-in-panel→prune, hard-deleted-from-panel→prune, dismissed→no task, open-slot→no task). Surgical diff: PURELY ADDITIVE — 234 lines added, 0 removed; only getOpenTasks(), renderOneTaskCard(), detectDeletedPortalBookings(), writeDeleteIgnoreForShift(), the boot ledger-load list, plus the new ledger + two task-action handlers changed; nothing else touched. -->
 <!-- Build patch: v78 (DELETE STICKS FROM EVERY PATH + "NO LONGER IN PORTAL" ON THE ATTENDANCE ROW) — Worked from the v77b build. TWO ops reports: (A) a deleted shift keeps resurrecting in the Attendance log no matter how many times it's deleted; (B) when the portal/client deletes a booking, the panel still shows it as plain "Scheduled" with no visible warning that it's no longer synced. ROOT CAUSE OF (A): the v74/v75 resurrection-proof ignore-write lived ONLY inside deleteCancelledShift() (the Attendance "Delete" button on already-cancelled rows). But a portal-linked booking is most often removed through the "Outlet/client cancellation" branch of confirmCancel() (cancel-type = Outlet cancellation), which hard-deletes the slot and wrote NOTHING to import_ignored — so its pb|<id> stayed in import_handled and the 5-min auto-importer re-created it on the next load. FIX (A): the entire reverse-ledger-lookup + ignore-write + import_handled-prune is extracted into ONE shared helper writeDeleteIgnoreForShift(s,label); deleteCancelledShift() now calls it, and the outlet_bypass delete in confirmCancel() now calls it too, so EVERY delete path is resurrection-proof and identical. The helper also no longer trusts only the live feed for "is this portal-linked" (a just-deleted booking is, by definition, gone from the feed) — an import_handled entry pointing at the shift id is durable proof of portal origin, so it writes the ignore even when isShiftPortalSynced() now reads false. It writes BOTH the real pb|<id> key (stops a booking still carrying its portal id) AND the fuzzy k|worker|date|start|end key WITH outletKey (stops a booking the portal later re-issues under a NEW id, while the v74 outlet-match guard keeps it from suppressing a different active booking at the same time → clock-sync stays safe). Still guarded to non-open-slot shifts; fully undoable from Import Bookings → Ignored. FIX (B): detectDeletedPortalBookings() (which already identifies every panel shift whose portal booking vanished from the live feed, via the pb| ledger and the feed-driven sweep) now records those shift ids into a new module-level portalDeletedShiftIds set, rebuilt from scratch each portal load so a re-added booking clears automatically. syncDot() gains a highest-priority branch that renders a red "⚠ Not in portal" pill DIRECTLY on the attendance row for any such shift — so the desync is visible in the schedule itself, not only inside Import Bookings. The detector also re-renders the Attendance table at the end of its pass so the pill appears/clears without a manual reload. node --check passes (2/2 inline script blocks); 8-case logic harness passes (outlet-bypass delete writes the pb| ignore + prunes the ledger, resurrecting pb| row suppressed, re-issued same-outlet booking suppressed by fuzzy key, different-outlet active booking NOT suppressed so clock-sync is safe, open-slot + ops-only deletes write no ignore). Surgical diff: only syncDot(), deleteCancelledShift(), the confirmCancel() outlet-bypass branch, detectDeletedPortalBookings(), autoSendShiftReminders() (one skip-guard line), and two new top-level declarations (the shared helper + the portalDeletedShiftIds set) changed; nothing else touched. THIRD FIX (reminders to deleted-shift workers): autoSendShiftReminders() iterates the in-memory allShifts and skipped only open/Available/cancelled rows — but a booking the portal DELETED while it still sits active in the panel (red "⚠ Not in portal" pill) is a normal active row with a real worker name and cancelled=false, so the sweep happily sent it night + clock-in reminders. Added one guard: skip any shift whose id is in portalDeletedShiftIds. 5-case reminder harness (TZ=Asia/Singapore) passes: active→remind, portal-deleted→skip, worker-cancelled(Available)→skip, hard-cancelled→skip, flag-cleared→remind again. -->
 <!-- Build patch: v77b (REMINDER TIMEZONE OFF-BY-ONE + DUPLICATE/CANCELLED SENDS) — Worked from the v75-topped June24_1ndex build per ops. THREE faults in autoSendShiftReminders(): (1) THE BIG ONE — a TODAY shift received a "tomorrow" night reminder at 9pm. ROOT CAUSE: the day strings were built with nowDate.setHours(0,0,0,0) then .toISOString().slice(0,10). setHours sets LOCAL midnight but toISOString() prints UTC, so in SG/MY/PH (UTC+8) local-midnight maps to the PREVIOUS calendar day in UTC. At 21:02 SGT on 24 Jun this yielded today="2026-06-23", tomorrow="2026-06-24", so a real 24-Jun (today) shift matched the tomorrow night-reminder window and fired. FIX: compute todayStr/tomorrowStr with the existing formatDate() helper, which uses LOCAL date parts (getFullYear/Month/Date) — today=24, tomorrow=25, correct in every UTC+ zone. (2) SENT TWICE — the !nightSent guard is keyed by ROW id, but a worker can have >1 row for one logical shift (a cancelled booking that left a duplicate row), so each row fired. Plus no in-flight guard, so the 15s tick / a second tab could re-enter the async sweep and double-send. FIX: module-level _reminderSweepInFlight guard + dedupe by logical key (worker|date|start|end) via a per-sweep Set and a siblingAlreadySent() scan + a freshness re-read before each send. (3) REMINDED A CANCELLED SHIFT — a WORKER cancellation sets worker_name='Available' (cancelled stays false), so the existing s.cancelled check missed it; the 'available' name-check is what skips it, and a suspended/on-hold worker is now skipped too via isWorkerSuspended(). Genuinely-different shifts for the same worker still both send. No schema change. node --check passes (2/2 inline script blocks); 5-case harness (run under TZ=Asia/Singapore at 21:02 SGT) passes: today shift→no reminder, real tomorrow→exactly one, duplicate tomorrow rows→one, hard-cancelled→none, suspended→none. Surgical diff: only autoSendShiftReminders() + its preceding flag changed; 852 functions unchanged, nothing else touched. -->
@@ -2246,7 +2248,8 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       </div>
       <div id="of-chat-group-status" style="font-size:11px;color:var(--text3);margin-top:4px;"></div>
     </div>
-    <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Attire requirements, exact reporting point, PIC contact"></textarea></div>
+    <div class="form-row"><label>Attire / uniform required <span style="font-weight:400;color:var(--text3);">— auto-sent to a worker the first time they're booked here</span></label><textarea id="of-attire" rows="3" placeholder="e.g. Black non-slip shoes, black long pants, white collared shirt. Apron provided on site."></textarea></div>
+    <div class="form-row"><label>Client profile notes</label><textarea id="of-notes" rows="4" placeholder="e.g. Exact reporting point, PIC contact"></textarea></div>
     <div class="form-row"><label>Banned workers</label><textarea id="of-banned-workers" rows="3" placeholder="One worker per line, e.g. Mark Tan"></textarea></div>
     <div class="form-row">
       <label>Booking requirements <span style="font-weight:400;color:var(--text3);">— ticked before a worker can be booked here</span></label>
@@ -3598,6 +3601,11 @@ async function init() {
   // "No longer in portal" card so the desync is visible without opening Import
   // Bookings, and survives refresh / shows for teammates (no schema change).
   loadPortalDeletedRemote().then(()=>{ try { updateTasksNavBadge(); } catch(e){} }).catch(()=>{});
+  // v80: Team-wide durable "confirm batches" ledger — the per-worker coalescing
+  // queue that turns a burst of saved/approved bookings into ONE WhatsApp summary
+  // per worker (no schema change). Loaded so the 10-min flush survives reload /
+  // works across teammates without double-sending.
+  loadConfirmBatchesRemote().catch(()=>{});
   // Team-wide durable "team tasks" ledger — the assignable internal to-do list.
   // Same app_settings merge-union pattern; no schema change.
   loadTeamTasksRemote().then(()=>{ try { updateTeamTasksNavBadge(); } catch(e){} }).catch(()=>{});
@@ -3619,6 +3627,12 @@ async function init() {
   // on a timer while the app is open, and keeps the Import Bookings nav badge
   // (unsaved count) current. Does NOT auto-save; user still clicks Confirm.
   startAutoImport();
+  // v80: background flusher for the per-worker confirmation batches — sends the
+  // one-message summary once a worker's 10-min coalescing window elapses (and,
+  // for approved bookings, once they have nothing pending left). Runs while the
+  // tab is open; the durable ledger means a closed tab's pending window still
+  // flushes when any teammate's tab next ticks.
+  startConfirmBatchFlusher();
   checkReminderAlerts();
   updateTasksNavBadge();
   setInterval(checkReminderAlerts, 60000); // recheck alert banners every minute
@@ -12979,7 +12993,10 @@ function loadOutletsList() {
       const chatLink = meta.chat_link ? `<div class="sub-text" style="margin-top:4px;"><a href="${escapeAttr(meta.chat_link)}" target="_blank" rel="noopener" style="color:var(--green);text-decoration:none;font-weight:600;" title="Open client chat">💬 Open chat</a></div>` : '';
       const reqs = outletRequirements(o.name);
       const reqLine = reqs.length ? `<div class="sub-text" style="color:var(--accent);margin-top:4px;" title="${escapeAttr(reqs.map(r=>r.label).join(' · '))}">📋 ${reqs.length} booking requirement${reqs.length!==1?'s':''}</div>` : '';
-      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${chatLink}${reqLine}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      const attireLine = String(meta.attire || '').trim()
+        ? `<div class="sub-text" style="color:var(--green);margin-top:4px;" title="${escapeAttr(meta.attire)}">👕 Attire on file</div>`
+        : '';
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${chatLink}${reqLine}${attireLine}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
 }
@@ -12994,6 +13011,7 @@ function resetOutletModal() {
   document.getElementById('of-commission').value = '20';
   document.getElementById('of-chat-link').value = '';
   resetOutletWhatsappGroupPicker();
+  document.getElementById('of-attire').value = '';
   document.getElementById('of-notes').value = '';
   document.getElementById('of-banned-workers').value = '';
   _outletReqEditing = [];
@@ -13016,6 +13034,7 @@ function editOutlet(id) {
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
   document.getElementById('of-chat-link').value = meta.chat_link || '';
   resetOutletWhatsappGroupPicker();
+  document.getElementById('of-attire').value = meta.attire || '';
   document.getElementById('of-notes').value = meta.notes || '';
   document.getElementById('of-banned-workers').value = (meta.banned_workers || []).join('\n');
   _outletReqEditing = (Array.isArray(meta.requirements) ? meta.requirements : []).map(r => ({ id: r.id, label: r.label }));
@@ -13057,6 +13076,7 @@ async function saveOutlet() {
     ...prevMeta,            // preserve any fields not edited here
     commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
     chat_link: document.getElementById('of-chat-link').value.trim(),
+    attire: document.getElementById('of-attire').value.trim(),
     notes: document.getElementById('of-notes').value.trim(),
     banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
     requirements: (_outletReqEditing || []).filter(r => r && r.id && r.label).map(r => ({ id: r.id, label: r.label })),
@@ -16403,23 +16423,24 @@ async function syncPortalApprovals(rows) {
           'shift', ex.id, { shift_date: ex.shift_date, worker_name: ex.worker_name, outlet: ex.outlet });
       } catch (e) { /* best-effort */ }
 
-      // WhatsApp the worker — once per shift (guarded by the ledger's notifiedAt).
+      // v80 — DELAYED, COALESCED CONFIRMATION: instead of WhatsApping the worker
+      // immediately on each approval (which would trickle 10 messages as 10
+      // pending bookings get signed off one by one), enqueue this approved shift
+      // into the per-worker 'approved' batch. The flusher sends ONE summary once
+      // (a) the 10-min grace window elapses AND (b) the worker has no pending-
+      // approval bookings left — so all of a worker's approvals arrive as a
+      // single confirmation. The notifiedAt guard is set here so a later sync
+      // pass over the same shift doesn't re-enqueue it.
       if (!approvalAcks[String(ex.id)].notifiedAt) {
         try {
-          const phone = (workerPhone(ex.worker_name) || '').replace(/\D/g, '');
-          if (phone) {
-            const ok = await sendPeriskopeMessage(phone, buildApprovalWorkerMessage(ex));
-            if (ok) {
-              approvalAcks[String(ex.id)].notifiedAt = new Date().toISOString();
-              notified++;
-            }
-          } else {
-            console.log('[portal approval sync] no phone for', ex.worker_name, '— worker not notified');
-          }
-        } catch (e) { console.warn('[portal approval sync] worker notify failed:', e); }
+          enqueueConfirmBatch('approved', ex);
+          approvalAcks[String(ex.id)].notifiedAt = new Date().toISOString();
+          notified++;
+        } catch (e) { console.warn('[portal approval sync] worker enqueue failed:', e); }
       }
     } catch (e) { console.warn('[portal approval sync] row error:', e); }
   }
+  if (notified) { try { await saveConfirmBatches(); } catch(e){} }
   if (ledgerDirty) { try { await saveApprovalAcks(); } catch(e){} }
   if (flipped) {
     try { await loadShifts(); } catch (e) {}
@@ -16457,6 +16478,419 @@ function buildApprovalWorkerMessage(s) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v80 — DELAYED, COALESCED WORKER BOOKING-CONFIRMATION (one summary, not spam)
+// -----------------------------------------------------------------------------
+// Goal (ops request): when bookings are saved in Import Bookings, the WORKER
+// should get ONE WhatsApp summary of their confirmed shifts — not one message
+// per shift. Two tracks, both with a 10-minute coalescing grace window keyed by
+// worker, both sending exactly ONE message per worker per window:
+//
+//   (A) CONFIRMED track — a normal (non-pending) booking saved via Import
+//       Bookings is enqueued on confirm. The window stays "hot" for 10 min; any
+//       further confirmed bookings for that same worker saved within the window
+//       (e.g. 5 at outlet A, then 5 more at outlet B) join the SAME batch. When
+//       the 10 min elapse with no new additions, ONE summary listing ALL their
+//       shifts across ALL outlets is sent.
+//
+//   (B) PENDING-APPROVAL track — a booking saved as "pending client approval"
+//       is NOT confirmed to the worker on save (nothing to confirm yet). When
+//       the client approves it (portal sync OR ops manual approve) the shift is
+//       enqueued here. The summary for a worker is held until BOTH (1) 10 min of
+//       grace pass AND (2) that worker has NO pending-approval bookings left in
+//       the panel — so a worker with 10 pending gets ONE confirmation once all
+//       10 are approved, not a trickle as each is signed off.
+//
+// Durable + team-safe: the batch queue lives in the team-synced app_settings
+// store (key='confirm_batches'), mirroring the approval_acks / import_handled
+// ledgers — so a closed/reopened tab, a refresh, or a different teammate's
+// device still flushes the window (no message lost, no double-send). A per-shift
+// "already summarised" guard (sentShiftIds union) makes the flush idempotent
+// across devices. No schema change.
+//
+// The send itself reuses sendPeriskopeMessage() and the worker phone book
+// exactly like every other worker-facing alert.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CONFIRM_BATCH_GRACE_MS = 10 * 60 * 1000; // 10-minute coalescing window
+const CONFIRM_BATCH_FLUSH_INTERVAL_MS = 30 * 1000; // re-check every 30s
+
+// In-memory mirror of the app_settings 'confirm_batches' ledger. Shape:
+//   confirmBatches = {
+//     '<track>|<workerKey>': {
+//       track: 'confirmed' | 'approved',
+//       worker: 'Farhan Bin Ali',
+//       country: 'SG',
+//       shifts: { '<shiftId>': { date, start, end, outlet, role } , ... },
+//       firstAddedAt: ISO, lastAddedAt: ISO,   // window timing
+//       sentAt: ISO | null,                    // set once the summary is sent
+//       sentShiftIds: ['id', ...]              // idempotency across devices
+//     }, ...
+//   }
+let confirmBatches = loadConfirmBatchesLocal();
+let confirmBatchesLoaded = false;
+let _confirmBatchFlushInFlight = false;
+let _confirmBatchFlushTimer = null;
+
+function loadConfirmBatchesLocal() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('confirm_batches_v1') || '{}');
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+  } catch (e) { return {}; }
+}
+function confirmBatchWorkerKey(workerName) {
+  return String(workerName || '').trim().toLowerCase();
+}
+function confirmBatchKey(track, workerName) {
+  return `${track}|${confirmBatchWorkerKey(workerName)}`;
+}
+
+// Union-merge two batch objects for the same key. Most-advanced state wins:
+// shifts are unioned, sentShiftIds are unioned, a real sentAt wins over null,
+// firstAddedAt keeps the earliest, lastAddedAt keeps the latest.
+function mergeConfirmBatchEntry(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const shifts = { ...(a.shifts || {}), ...(b.shifts || {}) };
+  const sentIds = Array.from(new Set([ ...(a.sentShiftIds || []), ...(b.sentShiftIds || []) ]));
+  const earliest = [a.firstAddedAt, b.firstAddedAt].filter(Boolean).sort()[0] || null;
+  const latest = [a.lastAddedAt, b.lastAddedAt].filter(Boolean).sort().slice(-1)[0] || null;
+  const sentAt = a.sentAt || b.sentAt || null;
+  return {
+    track: a.track || b.track,
+    worker: a.worker || b.worker,
+    country: a.country || b.country || '',
+    shifts,
+    firstAddedAt: earliest,
+    lastAddedAt: latest,
+    sentAt,
+    sentShiftIds: sentIds,
+  };
+}
+
+async function loadConfirmBatchesRemote() {
+  if (!supabaseClient) return;
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'confirm_batches').maybeSingle();
+    if (error) { console.warn('confirmBatches remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      const remote = data.value;
+      const merged = { ...confirmBatches };
+      for (const [k, v] of Object.entries(remote)) {
+        merged[k] = mergeConfirmBatchEntry(merged[k], v);
+      }
+      confirmBatches = merged;
+      localStorage.setItem('confirm_batches_v1', JSON.stringify(confirmBatches));
+    } else {
+      const local = loadConfirmBatchesLocal();
+      if (Object.keys(local).length) { confirmBatches = local; await saveConfirmBatches(); }
+    }
+    confirmBatchesLoaded = true;
+  } catch (e) { console.warn('confirmBatches remote load error:', e); }
+}
+
+async function saveConfirmBatches() {
+  localStorage.setItem('confirm_batches_v1', JSON.stringify(confirmBatches));
+  if (!supabaseClient) return false;
+  try {
+    let merged = confirmBatches;
+    try {
+      const { data, error } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'confirm_batches').maybeSingle();
+      if (!error && data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+        merged = { ...data.value };
+        for (const [k, v] of Object.entries(confirmBatches)) {
+          merged[k] = mergeConfirmBatchEntry(merged[k], v);
+        }
+        confirmBatches = merged;
+        localStorage.setItem('confirm_batches_v1', JSON.stringify(confirmBatches));
+      }
+    } catch (e) { /* fall back to writing our own copy */ }
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key: 'confirm_batches', value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn('confirmBatches remote save failed:', error.message); return false; }
+    return true;
+  } catch (e) { console.warn('confirmBatches remote save error:', e); return false; }
+}
+
+// Add (or refresh) a shift into a worker's coalescing batch. Re-adding a shift
+// already in an UNSENT window just refreshes lastAddedAt. A shift whose id is
+// already in sentShiftIds (already summarised) is never re-queued, so a
+// re-import / re-approve can't double-message the worker.
+function enqueueConfirmBatch(track, shift) {
+  try {
+    if (!shift || !shift.id) return;
+    const worker = String(shift.worker_name || '').trim();
+    if (!worker || worker.toLowerCase() === 'available') return;
+    const key = confirmBatchKey(track, worker);
+    const nowIso = new Date().toISOString();
+    let entry = confirmBatches[key];
+    if (entry && Array.isArray(entry.sentShiftIds) && entry.sentShiftIds.includes(String(shift.id))) {
+      return; // already summarised to the worker — don't re-queue
+    }
+    // If a previous window for this worker already sent, start a FRESH window so
+    // newly-saved shifts after the last summary get their own grouped message.
+    if (entry && entry.sentAt) {
+      entry = null;
+    }
+    if (!entry) {
+      entry = {
+        track,
+        worker,
+        country: shift.country || '',
+        shifts: {},
+        firstAddedAt: nowIso,
+        lastAddedAt: nowIso,
+        sentAt: null,
+        sentShiftIds: (confirmBatches[key] && confirmBatches[key].sentShiftIds) || [],
+      };
+    }
+    entry.shifts[String(shift.id)] = {
+      date: shift.shift_date || '',
+      start: (shift.scheduled_start || '').slice(0, 5),
+      end: (shift.scheduled_end || '').slice(0, 5),
+      outlet: shift.outlet || '',
+      role: shift.role || '',
+    };
+    entry.lastAddedAt = nowIso;
+    if (!entry.firstAddedAt) entry.firstAddedAt = nowIso;
+    if (!entry.country && shift.country) entry.country = shift.country;
+    confirmBatches[key] = entry;
+  } catch (e) { console.warn('[confirm-batch] enqueue error:', e); }
+}
+
+// Does this worker still have ANY pending-approval booking in the panel? Used to
+// gate the 'approved' track — we hold the summary until everything that was
+// pending for the worker has been approved. Reads the cross-date pending cache
+// (pendingApprovalAll) which the Pending-Approval metric already maintains, plus
+// the live viewed-day shifts, so it's accurate beyond the current window.
+function workerHasPendingApproval(workerName) {
+  const wk = confirmBatchWorkerKey(workerName);
+  const pools = [];
+  if (Array.isArray(pendingApprovalAll)) pools.push(pendingApprovalAll);
+  if (Array.isArray(allShifts)) pools.push(allShifts);
+  for (const pool of pools) {
+    for (const s of pool) {
+      if (!s) continue;
+      if (confirmBatchWorkerKey(s.worker_name) !== wk) continue;
+      if (s.cancelled) continue;
+      if (shiftIsPendingApproval(s)) return true;
+    }
+  }
+  return false;
+}
+
+// v81 — "NEW TO THE OUTLET" detection for the attire disclosure. A worker is new
+// to an outlet when they have NO prior (non-cancelled) shift there beyond the
+// booking(s) in this very batch. We query the shifts table directly so it's
+// accurate across all dates (not just the viewed window), case-insensitively on
+// the worker name and exact on the outlet, excluding the batch's own shift ids
+// (they're already in the DB by flush time). Best-effort: on any query error we
+// return false (treat as NOT new) so a transient failure never spams attire info
+// to a regular returning worker.
+async function workerIsNewToOutlet(workerName, outletName, excludeShiftIds) {
+  try {
+    if (!supabaseClient) return false;
+    const w = String(workerName || '').trim();
+    const o = String(outletName || '').trim();
+    if (!w || w.toLowerCase() === 'available' || !o) return false;
+    let q = supabaseClient
+      .from('shifts')
+      .select('id')
+      .eq('outlet', o)
+      .ilike('worker_name', w)
+      .not('cancelled', 'is', true)
+      .limit(50);
+    const { data, error } = await q;
+    if (error) { console.warn('[attire] new-to-outlet query failed:', error.message); return false; }
+    const exclude = new Set((excludeShiftIds || []).map(String));
+    const priorOthers = (data || []).filter(r => !exclude.has(String(r.id)));
+    return priorOthers.length === 0; // no shift here other than this batch's → new
+  } catch (e) {
+    console.warn('[attire] new-to-outlet error:', e);
+    return false;
+  }
+}
+
+// v81 — Resolve, per outlet in a batch, whether the worker is new there and what
+// attire line to include. Returns { [outletName]: { isNew, attire } } where
+// attire is the stored outlet attire text (or '' if none on file). Only outlets
+// the worker is NEW to get an entry that the message will act on; a returning
+// worker's outlets resolve isNew=false and are left untouched in the message.
+async function resolveBatchAttireInfo(entry) {
+  const info = {};
+  try {
+    const outlets = Array.from(new Set(Object.values(entry.shifts || {}).map(s => s.outlet).filter(Boolean)));
+    const batchShiftIds = Object.keys(entry.shifts || {});
+    for (const outlet of outlets) {
+      const isNew = await workerIsNewToOutlet(entry.worker, outlet, batchShiftIds);
+      let attire = '';
+      try { attire = String(outletProfile(outlet).attire || '').trim(); } catch (e) { attire = ''; }
+      info[outlet] = { isNew, attire };
+    }
+  } catch (e) { console.warn('[attire] resolveBatchAttireInfo error:', e); }
+  return info;
+}
+
+// Build the single WhatsApp summary message for a worker's batch of confirmed
+// shifts. Groups the lines by outlet so "5 at A + 5 at B" reads cleanly in one
+// message. Sorted by date then start time within each outlet.
+//
+// v81 — attireInfo (optional) = { [outletName]: { isNew, attire } }. For an
+// outlet the worker is NEW to, the message discloses the attire required; if no
+// attire is on file for that outlet, it states the attire will be sent separately
+// for that outlet. Returning workers (isNew=false) get no attire line.
+function buildBatchConfirmMessage(entry, attireInfo) {
+  const first = String(entry.worker || '').trim().split(/\s+/)[0] || 'there';
+  const rows = Object.values(entry.shifts || {});
+  const n = rows.length;
+  // Group by outlet.
+  const byOutlet = {};
+  for (const r of rows) {
+    const o = r.outlet || 'the outlet';
+    (byOutlet[o] = byOutlet[o] || []).push(r);
+  }
+  const fmtDate = (d) => {
+    if (!d) return '';
+    try {
+      return new Date(d + 'T00:00:00').toLocaleDateString('en-SG', { weekday: 'short', day: 'numeric', month: 'short' });
+    } catch (e) { return d; }
+  };
+  const lines = [];
+  lines.push(n === 1 ? '*Shift confirmed* ✅' : `*${n} shifts confirmed* ✅`);
+  lines.push(`Hi ${first}, your booking${n === 1 ? ' is' : 's are'} confirmed. Here ${n === 1 ? 'is the detail' : 'are the details'}:`);
+  lines.push('');
+  const outletNames = Object.keys(byOutlet).sort();
+  outletNames.forEach((outlet, idx) => {
+    const list = byOutlet[outlet].slice().sort((a, b) =>
+      (a.date || '').localeCompare(b.date || '') || (a.start || '').localeCompare(b.start || ''));
+    lines.push(`📍 *${outlet}*`);
+    for (const r of list) {
+      const dateStr = fmtDate(r.date);
+      const timeRange = r.start ? (r.end ? `${r.start}–${r.end}` : r.start) : '';
+      const rolePart = r.role ? ` · ${r.role}` : '';
+      lines.push(`   • ${[dateStr, timeRange].filter(Boolean).join(', ')}${rolePart}`);
+    }
+    // v81 — first-time-at-this-outlet attire disclosure. Only for a worker NEW to
+    // this outlet (no prior history): show the attire required, or — if none is on
+    // file for this outlet — say it will be sent separately for that outlet.
+    const ai = attireInfo && attireInfo[outlet];
+    if (ai && ai.isNew) {
+      if (ai.attire) {
+        lines.push(`   👕 First time here — attire required: ${ai.attire}`);
+      } else {
+        lines.push(`   👕 First time here — attire information for ${outlet} will be sent separately.`);
+      }
+    }
+    if (idx < outletNames.length - 1) lines.push('');
+  });
+  lines.push('');
+  lines.push('Please be on time. See you there!');
+  return lines.join('\n');
+}
+
+// Periodic flusher: sends the one-message summary for any batch whose 10-minute
+// coalescing window has elapsed. For the 'approved' track it additionally waits
+// until the worker has no pending-approval bookings left. Idempotent + team-safe:
+// re-reads the shared ledger first, marks sentAt + sentShiftIds, and persists, so
+// no two devices double-send. Best-effort: a failed send leaves the window open
+// to retry on the next tick.
+async function flushConfirmBatches() {
+  if (_confirmBatchFlushInFlight) return;
+  if (!supabaseClient) return;
+  _confirmBatchFlushInFlight = true;
+  try {
+    if (!confirmBatchesLoaded) { try { await loadConfirmBatchesRemote(); } catch (e) {} }
+    // Pull the freshest shared copy so another device's in-flight additions /
+    // sends are reflected before we decide what to flush.
+    try { await loadConfirmBatchesRemote(); } catch (e) {}
+
+    const now = Date.now();
+    let dirty = false;
+
+    for (const [key, entry] of Object.entries(confirmBatches)) {
+      try {
+        if (!entry || entry.sentAt) continue;
+        const shiftIds = Object.keys(entry.shifts || {});
+        if (!shiftIds.length) continue;
+
+        // Window must have elapsed since the LAST shift was added — a new add
+        // within the grace period keeps coalescing.
+        const lastAdded = entry.lastAddedAt ? Date.parse(entry.lastAddedAt) : 0;
+        if (!lastAdded || (now - lastAdded) < CONFIRM_BATCH_GRACE_MS) continue;
+
+        // Pending-approval track: hold until the worker has NOTHING pending left.
+        if (entry.track === 'approved' && workerHasPendingApproval(entry.worker)) continue;
+
+        const phone = (workerPhone(entry.worker) || '').replace(/\D/g, '');
+        if (!phone) {
+          // No phone — we can't message. Mark sent so it doesn't spin forever,
+          // but record nothing as a "send" (sentShiftIds still updated so a later
+          // re-queue of the same shifts doesn't retry endlessly).
+          entry.sentAt = new Date().toISOString();
+          entry.sentShiftIds = Array.from(new Set([ ...(entry.sentShiftIds || []), ...shiftIds ]));
+          dirty = true;
+          console.log('[confirm-batch] no phone for', entry.worker, '— summary skipped');
+          continue;
+        }
+
+        // v81 — resolve, per outlet, whether the worker is new there + the attire
+        // line to disclose (done here, not in enqueue, so "new to the outlet" is
+        // evaluated at send time against the full shift history).
+        let attireInfo = {};
+        try { attireInfo = await resolveBatchAttireInfo(entry); } catch (e) { attireInfo = {}; }
+
+        const msg = buildBatchConfirmMessage(entry, attireInfo);
+        let ok = false;
+        try { ok = await sendPeriskopeMessage(phone, msg); } catch (e) { ok = false; }
+        if (ok) {
+          entry.sentAt = new Date().toISOString();
+          entry.sentShiftIds = Array.from(new Set([ ...(entry.sentShiftIds || []), ...shiftIds ]));
+          dirty = true;
+          try {
+            await logActivity('Worker booking summary sent',
+              `Sent ${entry.worker} a single WhatsApp confirmation for ${shiftIds.length} ${entry.track === 'approved' ? 'approved' : 'confirmed'} shift${shiftIds.length !== 1 ? 's' : ''} across ${new Set(Object.values(entry.shifts).map(s => s.outlet)).size} outlet(s)`,
+              'shift', '', { worker_name: entry.worker });
+          } catch (e) { /* best-effort */ }
+          console.log(`[confirm-batch] summary sent to ${entry.worker} (${entry.track}) — ${shiftIds.length} shift(s).`);
+        } else {
+          console.warn('[confirm-batch] send failed for', entry.worker, '— will retry next tick');
+        }
+      } catch (e) { console.warn('[confirm-batch] flush row error:', e); }
+    }
+
+    // Prune sent batches older than 24h so the ledger doesn't grow unbounded;
+    // keep the sentShiftIds guard a while in case of a late re-import.
+    for (const [key, entry] of Object.entries(confirmBatches)) {
+      if (entry && entry.sentAt && (now - Date.parse(entry.sentAt)) > 24 * 60 * 60 * 1000) {
+        // Collapse to a tombstone that keeps only the idempotency guard.
+        confirmBatches[key] = {
+          track: entry.track, worker: entry.worker, country: entry.country || '',
+          shifts: {}, firstAddedAt: null, lastAddedAt: null,
+          sentAt: entry.sentAt, sentShiftIds: entry.sentShiftIds || [],
+        };
+        dirty = true;
+      }
+    }
+
+    if (dirty) { try { await saveConfirmBatches(); } catch (e) {} }
+  } finally {
+    _confirmBatchFlushInFlight = false;
+  }
+}
+
+function startConfirmBatchFlusher() {
+  if (_confirmBatchFlushTimer) return;
+  // First pass ~12s after boot (after ledgers + shifts have had a chance to
+  // load), then on the regular cadence.
+  setTimeout(() => { flushConfirmBatches().catch(e => console.warn('[confirm-batch]', e)); }, 12000);
+  _confirmBatchFlushTimer = setInterval(() => {
+    flushConfirmBatches().catch(e => console.warn('[confirm-batch]', e));
+  }, CONFIRM_BATCH_FLUSH_INTERVAL_MS);
+}
+
 // Manually mark a panel shift as approved (from the shift row / detail), running
 // the exact same worker-notify + ack-task flow the portal auto-flip uses. Used
 // when ops confirm an approval that hasn't come through the portal feed yet.
@@ -16486,17 +16920,20 @@ async function approveBookingManually(shiftId) {
       `${s.worker_name}'s booking at ${s.outlet} on ${s.shift_date} marked confirmed by ops`,
       'shift', s.id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
   } catch(e) {}
+  // v80 — DELAYED, COALESCED CONFIRMATION (same as the portal-sync path): enqueue
+  // this manually-approved shift into the per-worker 'approved' batch rather than
+  // messaging the worker immediately, so a worker whose several pending bookings
+  // are approved gets ONE summary once all are signed off and the grace window
+  // elapses. notifiedAt guards against double-enqueue.
   if (!approvalAcks[String(s.id)].notifiedAt) {
     try {
-      const phone = (workerPhone(s.worker_name) || '').replace(/\D/g, '');
-      if (phone) {
-        const ok = await sendPeriskopeMessage(phone, buildApprovalWorkerMessage(s));
-        if (ok) approvalAcks[String(s.id)].notifiedAt = new Date().toISOString();
-      }
+      enqueueConfirmBatch('approved', s);
+      approvalAcks[String(s.id)].notifiedAt = new Date().toISOString();
+      try { await saveConfirmBatches(); } catch(e){}
     } catch(e) {}
   }
   try { await saveApprovalAcks(); } catch(e){}
-  toast(`✅ ${String(s.worker_name||'Worker').split(' ')[0]}'s booking confirmed — worker notified`);
+  toast(`✅ ${String(s.worker_name||'Worker').split(' ')[0]}'s booking confirmed — worker will be notified in the next summary`);
   await loadShifts();
   try { if (typeof updateTasksNavBadge === 'function') updateTasksNavBadge(); } catch(e){}
 }
@@ -18800,6 +19237,44 @@ async function _confirmImportBookingsInner() {
   await loadWorkers();
   await loadOutlets();
 
+  // v80 — DELAYED WORKER CONFIRMATION (confirmed track): enqueue every booking
+  // SAVED/MERGED/FILLED this pass that is a real named, CONFIRMED shift (not
+  // pending client approval) into the per-worker coalescing batch. A 10-min
+  // grace window then sends ONE WhatsApp summary per worker covering all their
+  // shifts across all outlets saved in that window — instead of one message per
+  // booking. Pending-approval rows are deliberately NOT enqueued here; they're
+  // confirmed to the worker only once the client approves (the 'approved' track,
+  // hooked in syncPortalApprovals + approveBookingManually). Idempotent: the
+  // enqueue skips any shift id already summarised.
+  try {
+    let _queuedAny = false;
+    for (const r of importRows) {
+      if (!r || !r._importedShiftId) continue;
+      // Only message for a GENUINELY NEW booking saved this pass:
+      //   'created' — inserted as a brand-new shift, or
+      //   'filled'  — a worker took a previously-open slot.
+      // A 'merged' row was already in the ops panel (the worker was confirmed
+      // when it first landed), and a no-op "mark as synced" stamp is an old
+      // booking — neither should re-message the worker.
+      if (r._importedThisSession !== 'created' && r._importedThisSession !== 'filled') continue;
+      const w = String(r.worker_name || '').trim();
+      if (!w || w.toLowerCase() === 'available') continue;   // open slots never message a worker
+      if (r.approval_status === 'pending') continue;         // pending → wait for approval track
+      enqueueConfirmBatch('confirmed', {
+        id: r._importedShiftId,
+        worker_name: w,
+        outlet: r.outlet,
+        shift_date: r.shift_date,
+        scheduled_start: r.scheduled_start,
+        scheduled_end: r.scheduled_end,
+        role: r.role,
+        country: r.country,
+      });
+      _queuedAny = true;
+    }
+    if (_queuedAny) { try { await saveConfirmBatches(); } catch (e) {} }
+  } catch (e) { console.warn('[confirm-batch] import enqueue failed:', e); }
+
   // Persist the durable "import handled" ledger (team-wide, survives reloads) so
   // everything saved/merged/stamped this pass is recognised next time and never
   // resurfaces as a new import. Fire-and-forget; localStorage is already updated.
@@ -19717,6 +20192,19 @@ function buildSystemContext() {
   });
   const requirementsList = reqLines.length ? reqLines.join('\n') : 'None on record.';
 
+  // v81 — Outlet attire/uniform on file, so the assistant can answer "what's the
+  // attire for X" and knows which outlets have no attire recorded (worker would
+  // be told it's sent separately).
+  const attireLines = [];
+  Object.entries(profileMeta.outlets || {}).forEach(([key, meta]) => {
+    const a = String(meta.attire || '').trim();
+    if (a) {
+      const outletName = (allOutlets.find(o => normProfileKey(o.name) === key) || {}).name || key;
+      attireLines.push(`${outletName}: ${a}`);
+    }
+  });
+  const attireList = attireLines.length ? attireLines.join('\n') : 'None on record.';
+
   return `
 === SYSTEM CONTEXT (live data) ===
 Current user: ${currentInternalUser || 'Unknown'}
@@ -19746,6 +20234,9 @@ ${restrictionList}
 
 OUTLET BOOKING REQUIREMENTS (a worker must meet these before being booked at that outlet; if you createShift for someone who hasn't passed, the system blocks and lists them):
 ${requirementsList}
+
+OUTLET ATTIRE / UNIFORM ON FILE (a worker NEW to an outlet is auto-told the attire in their booking confirmation; if an outlet is not listed here, a new worker is told the attire will be sent separately for that outlet):
+${attireList}
 
 BUSINESS KNOWLEDGE (${allKnowledge.length} entries):
 ${allKnowledge.slice(0,40).map(e => `[${e.category||'General'}]${e.outlet?' ('+e.outlet+')':''} ${e.topic}: ${e.content}`).join('\n')||'No entries yet.'}
@@ -19789,6 +20280,7 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "addOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<requirement text, e.g. Is the worker 18 years old and above?>"}
 {"type": "removeOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<exact requirement text to remove>"}
 {"type": "listOutletRequirements", "outlet": "<exact outlet name from DB>"}
+{"type": "setOutletAttire", "outlet": "<exact outlet name from DB>", "attire": "<attire/uniform text, or empty string to clear>"}
 {"type": "queryShifts", "workerName": "<partial/full name or omit>", "outlet": "<partial/full outlet or omit>", "dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD", "status": "upcoming|cancelled|completed|open|all"}
 {"type": "setShiftRate", "shiftId": "<id>", "rate": 16.50}
 {"type": "setShiftRateBatch", "outlet": "<outlet, partial ok>", "workerName": "<optional, partial>", "dateFrom": "<optional YYYY-MM-DD>", "dateTo": "<optional YYYY-MM-DD>", "status": "<optional: upcoming>", "rate": 12.00}
@@ -19849,6 +20341,7 @@ RULES:
 - ENFORCING BANS: NEVER create or offer to create a shift (createShift, forceCreateShift, batchCreateSlots) that assigns a worker to an outlet they're banned from or marked do-not-assign for — check ASSIGNMENT RESTRICTIONS above first. If asked to do so, refuse and explain the worker is restricted there, and offer to lift the restriction if that's what they want. The system will also hard-block it, but you should catch it before proposing the booking.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - CLIENT BOOKING REQUIREMENTS: Some outlets require workers to meet conditions before booking (e.g. "Is the worker 18 years old and above?"). To add one, use addOutletRequirement; to remove, use removeOutletRequirement; to see an outlet's list, use listOutletRequirements. When you try to createShift for a worker who hasn't passed an outlet's requirements, the system returns a requirements list and blocks. You cannot tick the checklist yourself. If the user explicitly confirms the worker meets ALL listed requirements (e.g. replies "confirm requirements", "yes she's 18+", "they meet all"), use forceCreateShift — it records the worker as having passed and creates the shift. Otherwise tell them to book via the Add Shift form to use the checklist.
+- OUTLET ATTIRE: Each outlet can store the attire/uniform required (see OUTLET ATTIRE / UNIFORM ON FILE above). When a worker is booked at an outlet for the FIRST time (no prior history there), their booking confirmation automatically discloses that outlet's attire; if no attire is on file, they're told it will be sent separately for that outlet. If the user tells you an outlet's attire or dress code (e.g. "the attire for DOMO is black shirt and black pants"), save it with setOutletAttire so it's disclosed automatically — don't only put it in knowledge.
 - Speak naturally, like a helpful colleague.`;
 
   const response = await fetch('https://jpfnrsxnnbtcadsnjrpc.supabase.co/functions/v1/claude-proxy', {
@@ -20404,6 +20897,20 @@ async function executeAIAction(a) {
         outlet: a.outlet || null
       });
       return `✅ ${existing ? 'Updated' : 'Saved'} knowledge: **${a.topic}**`;
+    }
+
+    case 'setOutletAttire': {
+      const outlet = allOutlets.find(o => normProfileKey(o.name) === normProfileKey(a.outlet));
+      if (!outlet) return `❌ Outlet "${a.outlet}" not found. Try searching first.`;
+      const oKey = normProfileKey(outlet.name);
+      const existing = profileMeta.outlets[oKey] || {};
+      const attire = String(a.attire || '').trim();
+      profileMeta.outlets[oKey] = { ...existing, attire };
+      await saveProfileMeta();
+      try { loadOutletsList(); } catch(e) {}
+      return attire
+        ? `✅ Attire for **${outlet.name}** saved — a worker booked there for the first time will be told: "${attire}".`
+        : `✅ Cleared the attire on file for **${outlet.name}** — new workers will be told the attire is sent separately for that outlet.`;
     }
 
     case 'addOutletRequirement': {
