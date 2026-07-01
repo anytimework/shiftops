@@ -21949,6 +21949,7 @@ function _renderBillingSettingsModal() {
     <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
       <input id="new-billing-client-name" class="form-input" placeholder="Add new billing client name…" style="flex:1;">
       <button class="btn btn-primary btn-sm" onclick="addNewBillingClient()">+ Add Client</button>
+      ${clients.length ? `<button class="btn btn-danger btn-sm" onclick="clearAllBillingGroupings()" title="Remove all configured billing clients and their outlet groupings">🗑 Clear all groupings</button>` : ''}
     </div>
     <div id="billing-settings-rows">
     ${clients.map((client, idx) => {
@@ -22075,6 +22076,29 @@ function addNewBillingClient() {
   input.value = '';
   openBillingSettingsModal();
   toast(`Added: ${name}`);
+}
+
+// Wipe every configured billing client and its multi-outlet grouping so you can
+// start fresh. This clears billingClientSettings (client configs + outlet
+// assignments) and the hidden-outlet list (so previously-hidden outlets reappear
+// individually). It deliberately does NOT touch:
+//   • the sent-invoice log (billing_sent_log_v1) — keeps your record of what was invoiced
+//   • the Reports "saved outlet groups" (outletGroups / app_settings) — those are separate
+// billingClientSettings is localStorage-only (no Supabase sync), so nothing pulls it back.
+function clearAllBillingGroupings() {
+  const count = Object.keys(billingClientSettings).length;
+  if (!count) { toast('No billing groupings to clear', 'error'); return; }
+  if (!confirm(`Remove ALL ${count} configured billing client${count!==1?'s':''} and their outlet groupings?\n\nEvery outlet will go back to showing individually in the billing table so you can group them fresh. Your sent-invoice history and your Reports saved groups are NOT affected.\n\nThis cannot be undone.`)) return;
+  billingClientSettings = {};
+  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  // Also clear hidden-outlet state so nothing is silently missing after the reset.
+  billingHiddenOutlets = new Set();
+  localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([]));
+  try { logActivity('Billing: cleared all groupings', `${count} client config(s) removed`, 'billing', null, {}); } catch(e){}
+  clearBillingCache();
+  openBillingSettingsModal();
+  loadBillingPage();
+  toast(`✅ Cleared ${count} billing grouping${count!==1?'s':''} — outlets now show individually`);
 }
 
 // ── Send / Preview Modal ───────────────────────────────────────
