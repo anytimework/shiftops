@@ -6,6 +6,7 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v83 (USAGE EXCEL AUTO-ATTACHED TO THE XERO INVOICE) — Worked from the v82 (July2index) build. The existing per-client usage workbook (Summary + Shift Detail sheets, previously download-only via the "Download Attachment (Excel)" button) is now ALSO uploaded onto the draft invoice that "Create & Send via Xero" creates, so every invoice carries its own shift-level usage breakdown as an attachment. Implementation: downloadClientExcel refactored into buildClientUsageWorkbook() (single source of truth — the download button and the upload share it, so the attachment is always byte-identical to what the button downloads); new uploadUsageAttachmentToXero() writes the workbook to an ArrayBuffer via XLSX.write, base64-encodes it in 32KB chunks (String.fromCharCode on the whole buffer overflows the arg limit), and POSTs {action:'upload_attachment'} to the xero-proxy Edge Function, which PUTs it to Xero's Invoices/{id}/Attachments/{filename} API. Wired into confirmSendInvoice AFTER the invoice is created and ONLY for real proxy-created invoices (MANUAL- fallback ids skipped); upload failure is NON-FATAL — the invoice stands, a warning toast points at the Download button as the manual fallback. Requires xero-proxy redeploy (new accounting.attachments scope + upload action) and a one-time Xero re-consent via ?reconnect=1. node --check passes. Surgical diff: only the Excel-export block and one insertion in confirmSendInvoice changed; nothing else touched. -->
 <!-- Build patch: v82 (BILLING GOES TEAM-SYNCED + XERO HANDOFF ACTUALLY HELPS) — Worked from the v81 (July1index) build. Two ops complaints: (1) "if I use a different computer, billing has different information" — root cause: ALL THREE billing stores (billing_client_settings_v2 client configs/groupings/Xero contact IDs, billing_sent_log_v1 sent-invoice marks, billing_hidden_outlets_v1) were localStorage-ONLY; nothing ever synced them. FIX: all three now live in the shared app_settings store (keys billing_client_settings / billing_sent_log / billing_hidden_outlets), mirroring the outlet_groups + import_handled patterns — localStorage stays as the instant cache, Supabase is authoritative. Settings + hidden list are last-write-wins (admin-managed, same rationale as outlet_groups; Clear-all must stick); the SENT LOG is per-key newest-wins MERGE with tombstones (unmark writes {deleted,deletedAt} instead of deleting) so one device's "sent" mark can never be clobbered by another device's stale save — that's a double-invoice risk. Loaded at boot, re-pulled at the top of every loadBillingPage()/initBillingNavBadge(), pushed on every mutation (saveBillingSettingsAll() central save replaces the five scattered raw localStorage writes), AND live-synced via the existing app_settings realtime channel (billing page re-renders when a teammate edits groupings or marks sent). First device with existing local config seeds the shared row so nothing is lost on rollout. (2) "when I invoice someone it just opens a blank Xero page, I have to key everything myself" — FIXES: (a) the manual-handoff modal's "Copy Line Items" button was BROKEN (JSON.stringify inlined into the onclick attribute leaked quotes into the HTML — the button literally showed raw JS); clipboard payloads now live in _xeroManualCopy + named copyXeroLines(), (b) every line item in that modal gets its own "Copy description" (full multi-line desc, paste straight into Xero's Description cell) and "Copy amount" buttons, so filling Xero is copy-paste-copy-paste instead of re-typing, (c) createXeroInvoiceViaProxy now creates the invoice as a DRAFT (was AUTHORISED) and auto-opens it in Xero for review when the xero-proxy Edge Function is deployed, and surfaces the proxy's error instead of swallowing it. A ready-to-deploy xero-proxy Edge Function (Xero OAuth2 w/ stored refresh token in app_settings key xero_oauth, one-time browser consent at the function URL) ships alongside this build — once deployed, "Create & Send via Xero" fills contact+dates+reference+all line items in Xero automatically. node --check passes. Surgical diff: only the billing module (state/save/load fns, loadBillingPage head, initBillingNavBadge, _showXeroManualModal, createXeroInvoiceViaProxy, the 5 settings-write call sites), the boot loader list, and the app_settings realtime handler changed; nothing else touched. -->
 <!-- Build patch: v81 (FIRST-TIME-AT-OUTLET ATTIRE DISCLOSURE in the worker confirmation) — Worked from the v80 (June28index) build. Ops request: when a worker is NEW to an outlet (no prior history there), the booking confirmation should disclose the attire required; if no attire is on file for that outlet, it should instead say the attire will be sent separately for that outlet. IMPLEMENTATION (additive; no schema change — attire is a scalar on profileMeta.outlets[key].attire, which mergeProfileMeta already syncs team-wide via {...se,...pe}, like notes/commission). (1) OUTLET MODAL gains an "Attire / uniform required" textarea (#of-attire) above Client profile notes; wired into resetOutletModal (clear), editOutlet (populate from meta.attire), and saveOutlet (persist into profileMeta.outlets[key].attire). The old notes placeholder no longer says "Attire requirements" since attire now has its own field. Outlet rows show a green "👕 Attire on file" badge (hover = full text) when set. (2) NEW-TO-OUTLET DETECTION — workerIsNewToOutlet(worker,outlet,excludeShiftIds) queries the shifts table for any non-cancelled shift for that worker at that outlet, excluding the batch's own shift ids (they're in the DB by flush time); zero others ⇒ new. Best-effort: any query error returns false (treated as NOT new) so a transient failure never spams attire to a returning worker. (3) resolveBatchAttireInfo(entry) builds { [outlet]: { isNew, attire } } for every outlet in the batch, called in flushConfirmBatches() right before buildBatchConfirmMessage(), which now takes an optional attireInfo arg. For each outlet the worker is NEW to, the per-outlet block appends "👕 First time here — attire required: <attire>" or, when no attire is on file, "👕 First time here — attire information for <outlet> will be sent separately." Returning workers get no attire line; passing no attireInfo is backward-compatible (no line, no crash). This rides on the SAME single coalesced v80 message, so a worker new at outlet A and new at outlet B gets both attire disclosures in one confirmation. (4) AI: new setOutletAttire action (saves/clears profileMeta.outlets[key].attire) so ops can tell the assistant an outlet's dress code and have it auto-disclosed; an "OUTLET ATTIRE / UNIFORM ON FILE" context block + guidance line added so the AI can answer attire questions and knows which outlets have none on file. node --check passes (1/1 non-empty inline script block); 9-case message harness passes against the live-extracted builder (new+attire→discloses; new+no-attire→sent separately; returning→no line; mixed new/returning; no-attireInfo backward-compat; single-shift new no-attire). Surgical diff: 4 original lines changed, 117 added across 14 hunks — only the outlet modal + reset/edit/save, the outlet row, buildBatchConfirmMessage (+two new helpers + flush call site), and the AI context/schema/handler/guidance touched; nothing else disturbed. NOTE: like the rest of the confirmation flow, the "new to outlet" check + send run while a browser tab is open. -->
 <!-- Build patch: v80 (DELAYED, COALESCED WORKER BOOKING-CONFIRMATION — one summary, not spam) — Worked from the v79 (June27index) build. Ops request: when bookings are saved in Import Bookings, the WORKER should get ONE WhatsApp confirmation summarising all their shifts, not one message per booking; with a 10-min grace so a burst saved over a few minutes (e.g. 5 shifts at outlet A, then 5 more at outlet B) coalesces into a SINGLE message covering both outlets. AND: a "pending client approval" booking must NOT confirm to the worker on save — confirmation goes out (same 10-min coalesced summary) only once the client APPROVES, and only once ALL of that worker's pending bookings are approved. IMPLEMENTATION (additive; no schema change): (1) New team-synced durable ledger confirmBatches (app_settings key 'confirm_batches', mirrors approval_acks / import_handled — localStorage instant + Supabase merge-union, loaded at boot) keyed by '<track>|<workerKey>' → { track:'confirmed'|'approved', worker, shifts:{[shiftId]:{date,start,end,outlet,role}}, firstAddedAt, lastAddedAt, sentAt, sentShiftIds[] }. (2) enqueueConfirmBatch(track,shift) adds a shift into a worker's coalescing window (skips Available/open slots and any shiftId already summarised → idempotent across devices). (3) CONFIRMED TRACK — _confirmImportBookingsInner() now, after the save loop, enqueues every GENUINELY NEW saved row (_importedThisSession 'created' or 'filled') that is named and NOT pending-approval; a 'merged'/mark-synced row (already in the panel, worker already confirmed earlier) is deliberately NOT re-messaged. (4) PENDING/APPROVED TRACK — syncPortalApprovals() and approveBookingManually() no longer WhatsApp the worker immediately on each approval (which trickled one message per approval); they enqueue the approved shift into the 'approved' batch (notifiedAt guards double-enqueue). (5) flushConfirmBatches() (background, every 30s + ~12s after boot via startConfirmBatchFlusher()) sends ONE buildBatchConfirmMessage() summary per worker — grouped by outlet, sorted by date — once (a) 10 min have elapsed since that worker's LAST add (a new add re-extends the window so A-then-B coalesce) AND, for the 'approved' track, (b) workerHasPendingApproval() reports the worker has nothing pending left (reads the cross-date pendingApprovalAll cache + live allShifts). It re-reads the shared ledger first and marks sentAt + sentShiftIds, so two tabs/teammates can't double-send; a failed send leaves the window open to retry; sent batches self-prune after 24h (keeping the idempotency guard). A worker with no phone is marked sent (logged) so it doesn't spin. The send reuses sendPeriskopeMessage() + the worker phone book exactly like every other worker-facing alert. node --check passes (1/1 non-empty inline script block); 14-case logic harness passes (A-then-B within grace → one message both outlets; no send before grace elapses from last add; pending booking not on confirmed track; approved track held until last pending approved then one message; idempotent re-enqueue no double-send; fresh window after a prior send sends separately; open slot never queued; two workers → two messages). Surgical diff: 18 lines removed (the two old immediate-approval send blocks), 410 added across 10 hunks — only syncPortalApprovals(), approveBookingManually(), _confirmImportBookingsInner() (post-loop enqueue), the boot ledger-load + flusher-start, plus the new self-contained module changed; nothing else touched. buildApprovalWorkerMessage() is left intact (now unused) for safety. NOTE: like the auto-importer, the flusher runs while a browser tab is open; the durable ledger means a closed tab's pending window still flushes when any teammate's tab next ticks — a true 24/7 send would need a Supabase scheduled Edge Function. -->
@@ -22369,8 +22370,9 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
 
 // ── Excel export ───────────────────────────────────────────────
 
-async function downloadClientExcel(billingName, year, month) {
-  try {
+// v83: builder shared by the download button AND the Xero attachment upload —
+// one source of truth, so the attached file is byte-identical to the download.
+async function buildClientUsageWorkbook(billingName, year, month) {
     const periodShifts = await fetchPayableShiftsForPeriod(year, month);
     const d = computeClientBilling(billingName, periodShifts);
     const periodLabel = `${BILLING_MONTHS[month-1]} ${year}`;
@@ -22426,11 +22428,47 @@ async function downloadClientExcel(billingName, year, month) {
     XLSX.utils.book_append_sheet(wb, wsDetail, 'Shift Detail');
 
     const safe = billingName.replace(/[^a-zA-Z0-9]/g, '_');
-    XLSX.writeFile(wb, `UsageReport_${safe}_${periodLabel.replace(' ','_')}.xlsx`);
+    const filename = `UsageReport_${safe}_${periodLabel.replace(' ','_')}.xlsx`;
+    return { wb, filename };
+}
+
+async function downloadClientExcel(billingName, year, month) {
+  try {
+    const { wb, filename } = await buildClientUsageWorkbook(billingName, year, month);
+    XLSX.writeFile(wb, filename);
     toast(`Excel downloaded for ${billingName}`);
   } catch(e) {
     toast('Excel error: ' + e.message, 'error');
   }
+}
+
+// v83: upload the same usage workbook onto the freshly-created Xero invoice.
+// Base64 is built in 32KB chunks — String.fromCharCode on the whole buffer
+// blows the argument limit on large workbooks.
+async function uploadUsageAttachmentToXero(invoiceId, billingName, year, month) {
+  const { wb, filename } = await buildClientUsageWorkbook(billingName, year, month);
+  const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const bytes = new Uint8Array(ab);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  const resp = await fetch(`${SUPABASE_URL}/functions/v1/xero-proxy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
+    body: JSON.stringify({
+      action: 'upload_attachment',
+      invoice_id: invoiceId,
+      filename,
+      content_base64: btoa(binary),
+      content_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    })
+  });
+  if (!resp.ok) {
+    let msg = ''; try { const j = await resp.json(); msg = j?.error || ''; } catch(e){}
+    throw new Error(msg || ('HTTP ' + resp.status));
+  }
+  return true;
 }
 
 async function downloadBillingAttachment() {
@@ -22467,6 +22505,20 @@ async function confirmSendInvoice() {
 
   try {
     const invoiceId = await createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xeroContactId);
+    // v83: attach the usage report (Excel) to the invoice we just created in
+    // Xero, so the client gets the shift-level breakdown with the invoice.
+    // Non-fatal: the invoice stands even if the attachment upload fails.
+    // MANUAL- ids come from the copy-paste fallback — nothing in Xero to attach to.
+    if (invoiceId && !String(invoiceId).startsWith('MANUAL-')) {
+      if (sendBtn) sendBtn.textContent = '📎 Attaching usage report…';
+      try {
+        await uploadUsageAttachmentToXero(invoiceId, billingName, year, month);
+        toast('📎 Usage report attached to the Xero invoice');
+      } catch(e) {
+        console.warn('usage attachment upload failed:', e);
+        toast('⚠️ Invoice created, but the usage Excel could not be attached — use ⬇️ Download Attachment and add it in Xero manually', 'error');
+      }
+    }
     markBillingSent(billingName, year, month, invoiceId);
     try { await logActivity('Billing: Invoice sent', `${billingName} — ${BILLING_MONTHS[month-1]} ${year} — $${d.subtotal.toFixed(2)}`, 'billing', null, {}); } catch(e){}
     toast(`✅ Invoice created for ${billingName} — $${d.subtotal.toFixed(2)}`);
