@@ -6,6 +6,7 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v82 (BILLING GOES TEAM-SYNCED + XERO HANDOFF ACTUALLY HELPS) — Worked from the v81 (July1index) build. Two ops complaints: (1) "if I use a different computer, billing has different information" — root cause: ALL THREE billing stores (billing_client_settings_v2 client configs/groupings/Xero contact IDs, billing_sent_log_v1 sent-invoice marks, billing_hidden_outlets_v1) were localStorage-ONLY; nothing ever synced them. FIX: all three now live in the shared app_settings store (keys billing_client_settings / billing_sent_log / billing_hidden_outlets), mirroring the outlet_groups + import_handled patterns — localStorage stays as the instant cache, Supabase is authoritative. Settings + hidden list are last-write-wins (admin-managed, same rationale as outlet_groups; Clear-all must stick); the SENT LOG is per-key newest-wins MERGE with tombstones (unmark writes {deleted,deletedAt} instead of deleting) so one device's "sent" mark can never be clobbered by another device's stale save — that's a double-invoice risk. Loaded at boot, re-pulled at the top of every loadBillingPage()/initBillingNavBadge(), pushed on every mutation (saveBillingSettingsAll() central save replaces the five scattered raw localStorage writes), AND live-synced via the existing app_settings realtime channel (billing page re-renders when a teammate edits groupings or marks sent). First device with existing local config seeds the shared row so nothing is lost on rollout. (2) "when I invoice someone it just opens a blank Xero page, I have to key everything myself" — FIXES: (a) the manual-handoff modal's "Copy Line Items" button was BROKEN (JSON.stringify inlined into the onclick attribute leaked quotes into the HTML — the button literally showed raw JS); clipboard payloads now live in _xeroManualCopy + named copyXeroLines(), (b) every line item in that modal gets its own "Copy description" (full multi-line desc, paste straight into Xero's Description cell) and "Copy amount" buttons, so filling Xero is copy-paste-copy-paste instead of re-typing, (c) createXeroInvoiceViaProxy now creates the invoice as a DRAFT (was AUTHORISED) and auto-opens it in Xero for review when the xero-proxy Edge Function is deployed, and surfaces the proxy's error instead of swallowing it. A ready-to-deploy xero-proxy Edge Function (Xero OAuth2 w/ stored refresh token in app_settings key xero_oauth, one-time browser consent at the function URL) ships alongside this build — once deployed, "Create & Send via Xero" fills contact+dates+reference+all line items in Xero automatically. node --check passes. Surgical diff: only the billing module (state/save/load fns, loadBillingPage head, initBillingNavBadge, _showXeroManualModal, createXeroInvoiceViaProxy, the 5 settings-write call sites), the boot loader list, and the app_settings realtime handler changed; nothing else touched. -->
 <!-- Build patch: v81 (FIRST-TIME-AT-OUTLET ATTIRE DISCLOSURE in the worker confirmation) — Worked from the v80 (June28index) build. Ops request: when a worker is NEW to an outlet (no prior history there), the booking confirmation should disclose the attire required; if no attire is on file for that outlet, it should instead say the attire will be sent separately for that outlet. IMPLEMENTATION (additive; no schema change — attire is a scalar on profileMeta.outlets[key].attire, which mergeProfileMeta already syncs team-wide via {...se,...pe}, like notes/commission). (1) OUTLET MODAL gains an "Attire / uniform required" textarea (#of-attire) above Client profile notes; wired into resetOutletModal (clear), editOutlet (populate from meta.attire), and saveOutlet (persist into profileMeta.outlets[key].attire). The old notes placeholder no longer says "Attire requirements" since attire now has its own field. Outlet rows show a green "👕 Attire on file" badge (hover = full text) when set. (2) NEW-TO-OUTLET DETECTION — workerIsNewToOutlet(worker,outlet,excludeShiftIds) queries the shifts table for any non-cancelled shift for that worker at that outlet, excluding the batch's own shift ids (they're in the DB by flush time); zero others ⇒ new. Best-effort: any query error returns false (treated as NOT new) so a transient failure never spams attire to a returning worker. (3) resolveBatchAttireInfo(entry) builds { [outlet]: { isNew, attire } } for every outlet in the batch, called in flushConfirmBatches() right before buildBatchConfirmMessage(), which now takes an optional attireInfo arg. For each outlet the worker is NEW to, the per-outlet block appends "👕 First time here — attire required: <attire>" or, when no attire is on file, "👕 First time here — attire information for <outlet> will be sent separately." Returning workers get no attire line; passing no attireInfo is backward-compatible (no line, no crash). This rides on the SAME single coalesced v80 message, so a worker new at outlet A and new at outlet B gets both attire disclosures in one confirmation. (4) AI: new setOutletAttire action (saves/clears profileMeta.outlets[key].attire) so ops can tell the assistant an outlet's dress code and have it auto-disclosed; an "OUTLET ATTIRE / UNIFORM ON FILE" context block + guidance line added so the AI can answer attire questions and knows which outlets have none on file. node --check passes (1/1 non-empty inline script block); 9-case message harness passes against the live-extracted builder (new+attire→discloses; new+no-attire→sent separately; returning→no line; mixed new/returning; no-attireInfo backward-compat; single-shift new no-attire). Surgical diff: 4 original lines changed, 117 added across 14 hunks — only the outlet modal + reset/edit/save, the outlet row, buildBatchConfirmMessage (+two new helpers + flush call site), and the AI context/schema/handler/guidance touched; nothing else disturbed. NOTE: like the rest of the confirmation flow, the "new to outlet" check + send run while a browser tab is open. -->
 <!-- Build patch: v80 (DELAYED, COALESCED WORKER BOOKING-CONFIRMATION — one summary, not spam) — Worked from the v79 (June27index) build. Ops request: when bookings are saved in Import Bookings, the WORKER should get ONE WhatsApp confirmation summarising all their shifts, not one message per booking; with a 10-min grace so a burst saved over a few minutes (e.g. 5 shifts at outlet A, then 5 more at outlet B) coalesces into a SINGLE message covering both outlets. AND: a "pending client approval" booking must NOT confirm to the worker on save — confirmation goes out (same 10-min coalesced summary) only once the client APPROVES, and only once ALL of that worker's pending bookings are approved. IMPLEMENTATION (additive; no schema change): (1) New team-synced durable ledger confirmBatches (app_settings key 'confirm_batches', mirrors approval_acks / import_handled — localStorage instant + Supabase merge-union, loaded at boot) keyed by '<track>|<workerKey>' → { track:'confirmed'|'approved', worker, shifts:{[shiftId]:{date,start,end,outlet,role}}, firstAddedAt, lastAddedAt, sentAt, sentShiftIds[] }. (2) enqueueConfirmBatch(track,shift) adds a shift into a worker's coalescing window (skips Available/open slots and any shiftId already summarised → idempotent across devices). (3) CONFIRMED TRACK — _confirmImportBookingsInner() now, after the save loop, enqueues every GENUINELY NEW saved row (_importedThisSession 'created' or 'filled') that is named and NOT pending-approval; a 'merged'/mark-synced row (already in the panel, worker already confirmed earlier) is deliberately NOT re-messaged. (4) PENDING/APPROVED TRACK — syncPortalApprovals() and approveBookingManually() no longer WhatsApp the worker immediately on each approval (which trickled one message per approval); they enqueue the approved shift into the 'approved' batch (notifiedAt guards double-enqueue). (5) flushConfirmBatches() (background, every 30s + ~12s after boot via startConfirmBatchFlusher()) sends ONE buildBatchConfirmMessage() summary per worker — grouped by outlet, sorted by date — once (a) 10 min have elapsed since that worker's LAST add (a new add re-extends the window so A-then-B coalesce) AND, for the 'approved' track, (b) workerHasPendingApproval() reports the worker has nothing pending left (reads the cross-date pendingApprovalAll cache + live allShifts). It re-reads the shared ledger first and marks sentAt + sentShiftIds, so two tabs/teammates can't double-send; a failed send leaves the window open to retry; sent batches self-prune after 24h (keeping the idempotency guard). A worker with no phone is marked sent (logged) so it doesn't spin. The send reuses sendPeriskopeMessage() + the worker phone book exactly like every other worker-facing alert. node --check passes (1/1 non-empty inline script block); 14-case logic harness passes (A-then-B within grace → one message both outlets; no send before grace elapses from last add; pending booking not on confirmed track; approved track held until last pending approved then one message; idempotent re-enqueue no double-send; fresh window after a prior send sends separately; open slot never queued; two workers → two messages). Surgical diff: 18 lines removed (the two old immediate-approval send blocks), 410 added across 10 hunks — only syncPortalApprovals(), approveBookingManually(), _confirmImportBookingsInner() (post-loop enqueue), the boot ledger-load + flusher-start, plus the new self-contained module changed; nothing else touched. buildApprovalWorkerMessage() is left intact (now unused) for safety. NOTE: like the auto-importer, the flusher runs while a browser tab is open; the durable ledger means a closed tab's pending window still flushes when any teammate's tab next ticks — a true 24/7 send would need a Supabase scheduled Edge Function. -->
 <!-- Build patch: v79 (DELETED-IN-PORTAL NOW RAISES A TASK) — Worked from the v78 (June25ndex) build. Ops report: when the portal/client deletes a booking, the panel still shows it active and nothing alerts us — it just sits in the Attendance log. The v78 signal existed but was easy to miss: a red "⚠ Not in portal" pill on the Attendance row + a row in the Import Bookings preview (only visible if you open that view), backed by an IN-MEMORY-ONLY set (portalDeletedShiftIds) that was rebuilt solely on a portal load and never read by the Tasks engine. FIX: the desync is now a first-class TASK on the always-visible Tasks badge. (1) New DURABLE, team-wide ledger portalDeleted (app_settings key 'portal_deleted', mirrors import_handled / import_ignored — localStorage instant + Supabase merge-union, loaded at boot; no schema change) keyed by panel shift id → {when,worker,outlet,date,start,end,dismissed}. (2) detectDeletedPortalBookings() now writes every detected deletion into this ledger and SELF-PRUNES entries that are no longer deleted-in-portal (booking returned to the feed) or whose panel shift is gone/cancelled — so the list stays accurate. It also refreshes the Tasks badge + panel (and the Attendance table) at the end of each pass. (3) getOpenTasks() builds a new 'portal_deleted' task from the ledger ∩ live task pool (skips dismissed entries, open/Available slots, and cancelled/missing shifts so a task auto-clears the moment the shift is removed). (4) renderOneTaskCard() renders an "⚠️ No longer in portal" card with Process cancellation (opens the cancellation modal → Outlet cancellation, which hard-deletes AND writes the resurrection-proof ignore so it won't come back), View shift, and Dismiss (tombstones the ledger entry so it won't re-nag). (5) writeDeleteIgnoreForShift() also clears the ledger entry on delete for instant feedback. node --check passes (2/2 inline script blocks); 10-case logic harness passes (detect→ledger+task, re-sync→prune+no task, cancelled-in-panel→prune, hard-deleted-from-panel→prune, dismissed→no task, open-slot→no task). Surgical diff: PURELY ADDITIVE — 234 lines added, 0 removed; only getOpenTasks(), renderOneTaskCard(), detectDeletedPortalBookings(), writeDeleteIgnoreForShift(), the boot ledger-load list, plus the new ledger + two task-action handlers changed; nothing else touched. -->
@@ -3606,6 +3607,12 @@ async function init() {
   // per worker (no schema change). Loaded so the 10-min flush survives reload /
   // works across teammates without double-sending.
   loadConfirmBatchesRemote().catch(()=>{});
+  // v82: Team-wide billing stores (client settings / groupings / Xero contact
+  // IDs, sent-invoice log, hidden outlets) — previously localStorage-ONLY, so
+  // every device/browser saw different billing info. Now synced through
+  // app_settings (billing_client_settings / billing_sent_log /
+  // billing_hidden_outlets), exactly like outlet_groups + the import ledgers.
+  loadBillingRemote().catch(()=>{});
   // Team-wide durable "team tasks" ledger — the assignable internal to-do list.
   // Same app_settings merge-union pattern; no schema change.
   loadTeamTasksRemote().then(()=>{ try { updateTeamTasksNavBadge(); } catch(e){} }).catch(()=>{});
@@ -3859,6 +3866,35 @@ function subscribeToReminderChanges() {
           localStorage.setItem('outlet_groups_v1', JSON.stringify(outletGroups));
           try { if (document.getElementById('page-reports')?.style.display !== 'none') { populateReportOutletSelect(); renderGroupManager(); } } catch(e){}
           console.log('🔄 outlet groups synced from another device');
+          return;
+        }
+        // v82: Billing stores — sync live so a teammate's grouping edit or
+        // "sent" mark shows on this device without a reload.
+        if (row.key === 'billing_client_settings' || row.key === 'billing_sent_log' || row.key === 'billing_hidden_outlets') {
+          const bv = (payload.new && payload.new.value);
+          if (bv === undefined || bv === null) return;
+          if (row.key === 'billing_client_settings' && typeof bv === 'object' && !Array.isArray(bv)) {
+            if (canonicalJSON(bv) === canonicalJSON(billingClientSettings)) return;
+            billingClientSettings = bv;
+            localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+          } else if (row.key === 'billing_sent_log' && typeof bv === 'object' && !Array.isArray(bv)) {
+            const merged = _mergeBillingSentLogs(billingSentLog, bv);
+            if (canonicalJSON(merged) === canonicalJSON(billingSentLog)) return;
+            billingSentLog = merged;
+            localStorage.setItem(BILLING_SENT_KEY, JSON.stringify(billingSentLog));
+          } else if (row.key === 'billing_hidden_outlets' && Array.isArray(bv)) {
+            const next = new Set(bv.map(_outletKey).filter(Boolean));
+            if (canonicalJSON([...next].sort()) === canonicalJSON([...billingHiddenOutlets].sort())) return;
+            billingHiddenOutlets = next;
+            localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([...billingHiddenOutlets]));
+          } else return;
+          try {
+            if (document.getElementById('page-billing')?.style.display !== 'none') {
+              if (typeof clearBillingCache === 'function') clearBillingCache();
+              loadBillingPage();
+            }
+          } catch(e){}
+          console.log('🔄 billing state synced from another device:', row.key);
           return;
         }
         if (row.key !== 'profile_meta') return; // only care about profile_meta
@@ -21153,6 +21189,121 @@ let billingSentLog = {};
 let billingCurrentClient = null;
 let billingHiddenOutlets = new Set(); // outlet names permanently hidden from billing table
 
+// ── v82: Team sync (app_settings) ─────────────────────────────────────────────
+// All three billing stores used to be localStorage-ONLY — which is exactly why a
+// different computer showed different billing info. They now live in the shared
+// app_settings store (same pattern as outlet_groups / import_handled):
+//   billing_client_settings — client configs + outlet groupings + Xero contact
+//                             IDs (last-write-wins, admin-managed like groups)
+//   billing_sent_log        — per-key newest-wins MERGE with tombstones, so a
+//                             "sent" mark on one device can never be clobbered
+//                             by another device's stale save (double-invoice risk)
+//   billing_hidden_outlets  — last-write-wins list (Clear-all must stick)
+// localStorage stays as the instant local cache; Supabase is authoritative.
+
+async function _upsertBillingSetting(key, value) {
+  if (!supabaseClient) return false;
+  try {
+    const { error } = await supabaseClient
+      .from('app_settings')
+      .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) { console.warn(`${key} remote save failed:`, error.message); return false; }
+    return true;
+  } catch(e) { console.warn(`${key} remote save error:`, e); return false; }
+}
+
+function _billingEntryTime(e) {
+  if (!e || typeof e !== 'object') return 0;
+  const t = Date.parse(e.deletedAt || e.sentAt || 0);
+  return isNaN(t) ? 0 : t;
+}
+
+// Per-key newest-wins merge of two sent logs (tombstone-aware). Tombstones older
+// than 90 days are pruned so the shared row doesn't grow forever.
+function _mergeBillingSentLogs(a, b) {
+  const out = { ...(a || {}) };
+  Object.entries(b || {}).forEach(([k, v]) => {
+    if (!out[k] || _billingEntryTime(v) > _billingEntryTime(out[k])) out[k] = v;
+  });
+  const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+  Object.keys(out).forEach(k => {
+    if (out[k] && out[k].deleted && _billingEntryTime(out[k]) < cutoff) delete out[k];
+  });
+  return out;
+}
+
+async function loadBillingRemote() {
+  if (!supabaseClient) return;
+  await Promise.all([
+    _loadBillingSettingsRemote(),
+    _loadBillingSentLogRemote(),
+    _loadBillingHiddenRemote()
+  ]);
+}
+
+async function _loadBillingSettingsRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'billing_client_settings').maybeSingle();
+    if (error) { console.warn('billing settings remote load failed:', error.message); return; }
+    if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
+      billingClientSettings = data.value;                     // remote is authoritative
+      localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+    } else {
+      // No shared row yet — seed it from this device's local config (rollout
+      // path: the machine that HAS the groupings publishes them for everyone).
+      loadBillingSettings();
+      if (Object.keys(billingClientSettings).length) {
+        await _upsertBillingSetting('billing_client_settings', billingClientSettings);
+      }
+    }
+  } catch(e) { console.warn('billing settings remote load error:', e); }
+}
+
+async function _loadBillingSentLogRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'billing_sent_log').maybeSingle();
+    if (error) { console.warn('billing sent-log remote load failed:', error.message); return; }
+    loadBillingSentLog(); // local cache first
+    const remote = (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) ? data.value : {};
+    const merged = _mergeBillingSentLogs(billingSentLog, remote);
+    const remoteMissedSomething = canonicalJSON(merged) !== canonicalJSON(remote);
+    billingSentLog = merged;
+    localStorage.setItem(BILLING_SENT_KEY, JSON.stringify(billingSentLog));
+    // Push back only if this device knew something the shared row didn't.
+    if (remoteMissedSomething && Object.keys(merged).length) {
+      await _upsertBillingSetting('billing_sent_log', billingSentLog);
+    }
+  } catch(e) { console.warn('billing sent-log remote load error:', e); }
+}
+
+async function _loadBillingHiddenRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'billing_hidden_outlets').maybeSingle();
+    if (error) { console.warn('billing hidden-outlets remote load failed:', error.message); return; }
+    if (data && Array.isArray(data.value)) {
+      billingHiddenOutlets = new Set(data.value.map(_outletKey).filter(Boolean));
+      localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([...billingHiddenOutlets]));
+    } else {
+      loadBillingHiddenOutlets();
+      if (billingHiddenOutlets.size) {
+        await _upsertBillingSetting('billing_hidden_outlets', [...billingHiddenOutlets]);
+      }
+    }
+  } catch(e) { console.warn('billing hidden-outlets remote load error:', e); }
+}
+
+// Central save — EVERY mutation of billingClientSettings goes through here so
+// the shared row can never drift from what this device shows.
+function saveBillingSettingsAll() {
+  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  _upsertBillingSetting('billing_client_settings', billingClientSettings).then(ok => {
+    if (!ok) toast('⚠️ Billing settings saved on this device but NOT synced to your team', 'error');
+  });
+}
+
 function loadBillingHiddenOutlets() {
   try {
     const arr = JSON.parse(localStorage.getItem(BILLING_HIDDEN_KEY) || '[]');
@@ -21163,6 +21314,10 @@ function loadBillingHiddenOutlets() {
 }
 function saveBillingHiddenOutlets() {
   localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([...billingHiddenOutlets]));
+  // v82: push to the shared store so hides apply on every device.
+  _upsertBillingSetting('billing_hidden_outlets', [...billingHiddenOutlets]).then(ok => {
+    if (!ok) console.warn('billing hidden-outlets saved on this device only');
+  });
 }
 function hideBillingOutlet(name) {
   // Check if this looks like a corrupt outlet name (contains backslash-escaped apostrophe)
@@ -21239,12 +21394,28 @@ function loadBillingSentLog() {
   try { billingSentLog = JSON.parse(localStorage.getItem(BILLING_SENT_KEY) || '{}'); }
   catch(e) { billingSentLog = {}; }
 }
-function saveBillingSentLog() { localStorage.setItem(BILLING_SENT_KEY, JSON.stringify(billingSentLog)); }
+function saveBillingSentLog() {
+  localStorage.setItem(BILLING_SENT_KEY, JSON.stringify(billingSentLog));
+  // v82: merge-union into the shared row so concurrent devices can't clobber
+  // each other's "sent" marks (that's a double-invoice risk).
+  (async () => {
+    if (!supabaseClient) return;
+    try {
+      const { data } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'billing_sent_log').maybeSingle();
+      const remote = (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) ? data.value : {};
+      billingSentLog = _mergeBillingSentLogs(billingSentLog, remote);
+      localStorage.setItem(BILLING_SENT_KEY, JSON.stringify(billingSentLog));
+      await _upsertBillingSetting('billing_sent_log', billingSentLog);
+    } catch(e) { console.warn('billing sent-log sync error:', e); }
+  })();
+}
 function billingSentKey(clientName, year, month) {
   return `${clientName}__${year}-${String(month).padStart(2,'0')}`;
 }
 function isBillingSent(clientName, year, month) {
-  return !!billingSentLog[billingSentKey(clientName, year, month)];
+  const e = billingSentLog[billingSentKey(clientName, year, month)];
+  return !!(e && !e.deleted);
 }
 function markBillingSent(clientName, year, month, invoiceId) {
   const key = billingSentKey(clientName, year, month);
@@ -21252,7 +21423,10 @@ function markBillingSent(clientName, year, month, invoiceId) {
   saveBillingSentLog();
 }
 function unmarkBillingSent(clientName, year, month) {
-  delete billingSentLog[billingSentKey(clientName, year, month)];
+  // v82: tombstone (not delete) so the un-mark WINS the merge against any stale
+  // "sent" copy still sitting on another device.
+  billingSentLog[billingSentKey(clientName, year, month)] =
+    { deleted: true, deletedAt: new Date().toISOString(), by: currentInternalUser || 'System' };
   saveBillingSentLog();
 }
 
@@ -21593,6 +21767,9 @@ function getBillingClients(periodShifts) {
 async function loadBillingPage() {
   loadBillingSettings();
   loadBillingSentLog();
+  // v82: pull the shared billing stores so this device renders the SAME config,
+  // groupings and sent-marks as every other device (fixes per-computer drift).
+  try { await loadBillingRemote(); } catch(e) {}
   billingInitPeriodSelectors();
 
   const { year, month } = getBillingPeriod();
@@ -22038,7 +22215,7 @@ function saveBillingSettings() {
       outlets:   outlets
     };
   });
-  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  saveBillingSettingsAll();
   toast('✅ Client billing settings saved');
   document.getElementById('billing-settings-modal').classList.remove('open');
   clearBillingCache();
@@ -22055,7 +22232,7 @@ function _removeBillingClient(idx) {
     : `Remove billing config for "${name}"?\n\nThis will hide it from the billing table so it won't reappear.`;
   if (!confirm(msg)) return;
   delete billingClientSettings[name];
-  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  saveBillingSettingsAll();
   loadBillingHiddenOutlets();
   // Only hide the standalone client name itself (a name-based unclaimed row).
   // Do NOT hide its grouped outlets — those should reappear individually so
@@ -22072,7 +22249,7 @@ function addNewBillingClient() {
   if (!name) { toast('Enter a client name', 'error'); return; }
   if (billingClientSettings[name]) { toast('Client already exists', 'error'); return; }
   billingClientSettings[name] = { billingMode: 'pct', commissionPct: 20, flatPerShift: 0, paymentTermsDays: 30, emails: [], xeroContactId: '', outlets: [] };
-  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  saveBillingSettingsAll();
   input.value = '';
   openBillingSettingsModal();
   toast(`Added: ${name}`);
@@ -22084,16 +22261,17 @@ function addNewBillingClient() {
 // individually). It deliberately does NOT touch:
 //   • the sent-invoice log (billing_sent_log_v1) — keeps your record of what was invoiced
 //   • the Reports "saved outlet groups" (outletGroups / app_settings) — those are separate
-// billingClientSettings is localStorage-only (no Supabase sync), so nothing pulls it back.
+// v82: billingClientSettings is now team-synced through app_settings, so the
+// clear below is pushed to the shared store too — nothing pulls it back.
 function clearAllBillingGroupings() {
   const count = Object.keys(billingClientSettings).length;
   if (!count) { toast('No billing groupings to clear', 'error'); return; }
   if (!confirm(`Remove ALL ${count} configured billing client${count!==1?'s':''} and their outlet groupings?\n\nEvery outlet will go back to showing individually in the billing table so you can group them fresh. Your sent-invoice history and your Reports saved groups are NOT affected.\n\nThis cannot be undone.`)) return;
   billingClientSettings = {};
-  localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+  saveBillingSettingsAll();
   // Also clear hidden-outlet state so nothing is silently missing after the reset.
   billingHiddenOutlets = new Set();
-  localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([]));
+  saveBillingHiddenOutlets();
   try { logActivity('Billing: cleared all groupings', `${count} client config(s) removed`, 'billing', null, {}); } catch(e){}
   clearBillingCache();
   openBillingSettingsModal();
@@ -22281,7 +22459,7 @@ async function confirmSendInvoice() {
     loadBillingSettings();
     if (!billingClientSettings[billingName]) billingClientSettings[billingName] = {};
     billingClientSettings[billingName].xeroContactId = xeroContactId;
-    localStorage.setItem(BILLING_SETTINGS_KEY, JSON.stringify(billingClientSettings));
+    saveBillingSettingsAll();
   }
 
   const sendBtn = document.querySelector('#billing-send-modal .btn-primary');
@@ -22353,7 +22531,7 @@ async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xer
       Date: invoiceDate,
       DueDate: dueDate,
       Reference: reference || '',
-      Status: 'AUTHORISED',
+      Status: 'DRAFT',   // v82: draft so it can be reviewed & approved in Xero
       CurrencyCode: 'SGD',
       LineItems: lineItems
     };
@@ -22366,9 +22544,19 @@ async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xer
     if (resp.ok) {
       const data = await resp.json();
       const invId = data?.Invoices?.[0]?.InvoiceID;
-      if (invId) return invId;
+      if (invId) {
+        // v82: jump straight to the freshly-created draft in Xero for review.
+        try { window.open(`https://go.xero.com/AccountsReceivable/Edit.aspx?InvoiceID=${invId}`, '_blank'); } catch(e){}
+        toast('✅ Draft invoice created in Xero — review & approve it there');
+        return invId;
+      }
+    } else {
+      // v82: surface the proxy failure instead of silently swallowing it.
+      let errMsg = '';
+      try { const j = await resp.json(); errMsg = j?.error || j?.message || JSON.stringify(j).slice(0, 200); } catch(e){}
+      console.warn('xero-proxy responded', resp.status, errMsg);
     }
-  } catch(e) { /* proxy not available */ }
+  } catch(e) { /* proxy not deployed / unreachable — fall through to manual handoff */ }
 
   // Fallback: open Xero new invoice URL pre-filled, mark as MANUAL in our system
   // Build a Xero deep-link to the new invoice page
@@ -22382,11 +22570,30 @@ async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xer
   return 'MANUAL-' + Date.now();
 }
 
+// v82: clipboard payloads for the manual-Xero modal live HERE, not inlined into
+// the onclick attribute — JSON.stringify inside an HTML attribute leaks quotes
+// and breaks the button (that's the bug where the button label showed raw JS
+// like  toast('Line items copied!')) "> ).
+let _xeroManualCopy = { summary: '', items: [] };
+function copyXeroLines(kind, idx) {
+  let text = '';
+  if (kind === 'summary')     text = _xeroManualCopy.summary;
+  else if (kind === 'desc')   text = _xeroManualCopy.items[idx]?.Description || '';
+  else if (kind === 'amount') text = parseFloat(_xeroManualCopy.items[idx]?.UnitAmount || 0).toFixed(2);
+  if (!text) { toast('Nothing to copy', 'error'); return; }
+  navigator.clipboard.writeText(text)
+    .then(() => toast(kind === 'summary' ? '📋 All line items copied'
+                    : kind === 'desc'    ? '📋 Description copied — paste into the Xero Description cell'
+                    :                      '💲 Amount copied'))
+    .catch(() => toast('Copy failed — your browser blocked clipboard access', 'error'));
+}
+
 function _showXeroManualModal(d, invoiceDate, dueDate, reference, lineItems, xeroUrl) {
   // Build a formatted summary to copy into Xero
   const linesSummary = lineItems.map(li =>
     `${li.Description.split('\n')[0]} | Qty:1 | $${parseFloat(li.UnitAmount).toFixed(2)} | Acct:${li.AccountCode}`
   ).join('\n');
+  _xeroManualCopy = { summary: linesSummary, items: lineItems };
 
   const existing = document.getElementById('xero-manual-modal');
   if (existing) existing.remove();
@@ -22411,11 +22618,15 @@ function _showXeroManualModal(d, invoiceDate, dueDate, reference, lineItems, xer
           <div style="margin-bottom:6px;"><b>Reference:</b> ${escapeHtml(reference || '')}</div>
           <div style="margin-bottom:6px;"><b>Currency:</b> SGD</div>
           <div style="margin-bottom:4px;"><b>Line Items:</b></div>
-          ${lineItems.map(li => `
+          ${lineItems.map((li, i) => `
             <div style="margin-left:12px;margin-bottom:8px;padding:6px;background:var(--bg2);border-radius:4px;">
               <div style="color:var(--text);font-weight:600;">${escapeHtml(li.Description.split('\n')[0])}</div>
               <div style="color:var(--text2);font-size:11px;white-space:pre-wrap;">${escapeHtml(li.Description.split('\n').slice(1).join('\n'))}</div>
-              <div style="color:var(--accent);margin-top:2px;">$${parseFloat(li.UnitAmount).toFixed(2)} | Account: ${escapeHtml(li.AccountCode)}</div>
+              <div style="display:flex;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap;">
+                <span style="color:var(--accent);">$${parseFloat(li.UnitAmount).toFixed(2)} | Account: ${escapeHtml(li.AccountCode)}</span>
+                <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:10px;" onclick="copyXeroLines('desc', ${i})">📋 Copy description</button>
+                <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:10px;" onclick="copyXeroLines('amount', ${i})">💲 Copy amount</button>
+              </div>
             </div>`).join('')}
           <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;font-weight:700;color:var(--green);">
             TOTAL: SGD $${d.subtotal.toFixed(2)}
@@ -22425,9 +22636,7 @@ function _showXeroManualModal(d, invoiceDate, dueDate, reference, lineItems, xer
           <a href="${xeroUrl}" target="_blank" class="btn btn-primary btn-sm" style="text-decoration:none;">
             🔗 Open Xero New Invoice
           </a>
-          <button class="btn btn-ghost btn-sm" onclick="
-            navigator.clipboard.writeText(${JSON.stringify(linesSummary)}).then(()=>toast('Line items copied!'))
-          ">📋 Copy Line Items</button>
+          <button class="btn btn-ghost btn-sm" onclick="copyXeroLines('summary')">📋 Copy All Line Items</button>
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('xero-manual-modal').classList.remove('open')">Close</button>
         </div>
       </div>
@@ -22447,6 +22656,7 @@ async function initBillingNavBadge() {
   try {
     loadBillingSettings();
     loadBillingSentLog();
+    try { await loadBillingRemote(); } catch(e) {}
     const now = new Date();
     const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const y = prev.getFullYear(), m = prev.getMonth() + 1;
