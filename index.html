@@ -22371,6 +22371,26 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
 
 // ── Excel export ───────────────────────────────────────────────
 
+// v85: Excel sheet names are hard-constrained (31 chars max; no : \ / ? * [ ] ;
+// unique per workbook) and a bad name makes the whole workbook fail to open —
+// so outlet names are sanitised + truncated + deduped before becoming tabs.
+function _xlsxSheetName(name, used) {
+  let n = String(name || 'Outlet')
+    .replace(/[\\\/\?\*\[\]:]/g, ' ')
+    .replace(/^'+|'+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!n) n = 'Outlet';
+  n = n.slice(0, 31).trim();
+  let candidate = n, i = 2;
+  while (used.has(candidate.toLowerCase())) {
+    const suffix = ` (${i++})`;
+    candidate = n.slice(0, 31 - suffix.length).trim() + suffix;
+  }
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+
 // v83: builder shared by the download button AND the Xero attachment upload —
 // one source of truth, so the attached file is byte-identical to the download.
 async function buildClientUsageWorkbook(billingName, year, month) {
@@ -22408,11 +22428,12 @@ async function buildClientUsageWorkbook(billingName, year, month) {
     const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
     XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
 
-    // Shift detail sheet
+    // v85: ONE TAB PER OUTLET (A→Z after Summary) instead of a single bundled
+    // "Shift Detail" sheet — e.g. Five Guys gets an iON Mall tab AND a Plaza
+    // Singapura tab. Each tab keeps the Outlet column (rows stay self-contained
+    // when copied out) and ends with a TOTAL row.
     const detailHeaders = ['Date', 'Outlet', 'Worker', 'Role', 'Sched Start', 'Sched End', 'Clock In', 'Clock Out', 'Break (min)', 'Hours (excl. break)', 'Rate ($/hr)', 'Payout ($)', 'Transport ($)'];
-    const detailRows = d.shifts
-      .sort((a, b) => (a.outlet || '').localeCompare(b.outlet || '') || a.shift_date.localeCompare(b.shift_date))
-      .map(s => {
+    const shiftToRow = s => {
         const hrs  = parseFloat(calcShiftHours(s) || 0);
         const rate = parseFloat(s.rate || 0);
         const amt  = netPaymentForShift(s);
@@ -22427,9 +22448,27 @@ async function buildClientUsageWorkbook(billingName, year, month) {
           parseFloat(hrs.toFixed(2)), parseFloat(rate.toFixed(2)),
           parseFloat(amt.toFixed(2)), taxi > 0 ? parseFloat(taxi.toFixed(2)) : ''
         ];
-      });
-    const wsDetail = XLSX.utils.aoa_to_sheet([detailHeaders, ...detailRows]);
-    XLSX.utils.book_append_sheet(wb, wsDetail, 'Shift Detail');
+    };
+    const byOutlet = {};
+    d.shifts.forEach(s => {
+      const key = (s.outlet || '').trim() || 'Unspecified outlet';
+      (byOutlet[key] = byOutlet[key] || []).push(s);
+    });
+    const usedSheetNames = new Set(['summary']);
+    Object.keys(byOutlet).sort((a, b) => a.localeCompare(b)).forEach(outletName => {
+      const rows = byOutlet[outletName]
+        .sort((a, b) => a.shift_date.localeCompare(b.shift_date) || (a.scheduled_start || '').localeCompare(b.scheduled_start || ''))
+        .map(shiftToRow);
+      const totHours = rows.reduce((t, r) => t + (parseFloat(r[9])  || 0), 0);
+      const totPay   = rows.reduce((t, r) => t + (parseFloat(r[11]) || 0), 0);
+      const totTaxi  = rows.reduce((t, r) => t + (parseFloat(r[12]) || 0), 0);
+      rows.push(['TOTAL', '', '', '', '', '', '', '', '',
+        parseFloat(totHours.toFixed(2)), '',
+        parseFloat(totPay.toFixed(2)),
+        totTaxi > 0 ? parseFloat(totTaxi.toFixed(2)) : '']);
+      const ws = XLSX.utils.aoa_to_sheet([detailHeaders, ...rows]);
+      XLSX.utils.book_append_sheet(wb, ws, _xlsxSheetName(outletName, usedSheetNames));
+    });
 
     const safe = billingName.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `UsageReport_${safe}_${periodLabel.replace(' ','_')}.xlsx`;
