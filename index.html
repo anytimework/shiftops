@@ -6,6 +6,8 @@
 
 <!-- Build patch: v65 (AI QUERY RESULT FORMATTING + ID MEMORY) — Two fixes to how the chatbot's queryShifts output is shown and remembered, after a live test showed results dumped as one red error-styled block full of raw UUIDs. (1) aiQueryShifts now returns clean grouped HTML (by date: outlet, time, rate, with small cancelled/clocked-in/done tags) instead of a raw "[date time] worker @ outlet | rate CI CO id:UUID" blob. UUIDs no longer appear anywhere in the user-facing message or DOM. New .aiq-* CSS styles the block. (2) Results prefixed with an AI_INFO_PREFIX sentinel so renderAIReply styles them as a normal bot bubble (not the red error bubble that fired because the text didn't start with ✅) and excludes them from the success/error counters. (3) Action outcomes are now fed back into aiHistory (a hidden user-role note, incl. a compact "date time outlet = id" map parsed from a stripped HTML comment) so a follow-up like "change her 26 Jun Pasta Bar rate to 14" can resolve to the right shift id across turns — previously action results never entered history. (4) Restored the "Unknown action" default-case return that was dropped in v64. Prompt updated: AI told the list auto-renders, not to re-type shifts or paste ids, and how to do follow-up actions by date+outlet. Only aiQueryShifts, the renderAIReply action loop, the new CSS, and one prompt line changed; queryShifts/resolveAIShift/setShiftRate logic, loadShifts, buildSystemContext and all v64 cross-view behaviour untouched. node --check passes. -->
 
+<!-- Build patch: v86 (MALAYSIA BILLING: COUNTRY SWITCHER, MYR CURRENCY, SECOND XERO ORG) — Worked from the v85 (July3index_v85) build. Request: Malaysian clients (e.g. Five Guys (Pavillion)) must be billable — previously _billingFilterShifts hard-excluded everything but Singapore and SGD was hardcoded everywhere. CHANGES: (1) new billingCountry state ('Singapore' default) with a 🇸🇬/🇲🇾 selector in the Xero Billing header (setBillingCountry → clearBillingCache + reload); page subtitle no longer says "Singapore only". (2) _billingFilterShifts filters to the SELECTED billing country (still outlet-resolved via resolvedCountryForShift). (3) fetchPayableShiftsForPeriod cache key prefixed with the country so SG/MY month caches can't cross-contaminate. (4) Currency plumbed end-to-end via billingCurrencyCode()/billingCurrencySymbol()/billingRatePrefix(): shift lines (RM13/hr = RM58.50 for MY; SG output byte-identical to before), preview Total label, Excel Summary headers + TOTAL TO INVOICE label, and the Xero payload CurrencyCode (was hardcoded SGD). MY report filenames get an _MY suffix. (5) createXeroInvoiceViaProxy + uploadUsageAttachmentToXero send country:'SG'|'MY' to xero-proxy; proxy v6 (ships alongside) supports MULTIPLE Xero organisations with a per-country tenant map — add the MY org via ?reconnect=1 (pick it in Xero's org picker), then assign on the proxy status page. Nav badge still counts SG only (deliberate). node --check passes; surgical diff verified. -->
+<!-- Build patch: v85 (USAGE REPORT: ONE TAB PER OUTLET) — [changelog line restored in v86; the v85 CODE has been present since the v85 build] buildClientUsageWorkbook creates one tab per outlet (A→Z after Summary) instead of a single bundled Shift Detail sheet; each tab keeps the full column set incl. Outlet + Break (min) and ends with a TOTAL row; new _xlsxSheetName() sanitiser (strips : \\ / ? * [ ] and edge apostrophes, 31-char truncation, case-insensitive dedupe with (2)/(3) suffixes, "Summary" pre-seeded). 9-case sheet-name harness passed. -->
 <!-- Build patch: v84 (BREAK COLUMN IN THE USAGE REPORT) — Worked from the v83 (July2index_v83) build. Ops noticed the usage Excel's Shift Detail sheet doesn't show break times even though every shift carries break_mins and the Hours/Payout figures ALREADY deduct the unpaid break (calcShiftHours → calcHours subtracts break_mins/60). FIX: buildClientUsageWorkbook's Shift Detail sheet gains a numeric "Break (min)" column between Clock Out and Hours (breakMinsForShift(s), blank when 0 — numeric so it stays filterable/summable in Excel), and the Hours header is renamed "Hours (excl. break)" so the payout math is self-explanatory to clients. Affects BOTH the ⬇️ Download Attachment button and the auto-attached Xero invoice Excel (single shared builder from v83). node --check passes. Surgical diff: only the detail-sheet headers + row mapper inside buildClientUsageWorkbook changed; nothing else touched. -->
 <!-- Build patch: v83 (USAGE EXCEL AUTO-ATTACHED TO THE XERO INVOICE) — Worked from the v82 (July2index) build. The existing per-client usage workbook (Summary + Shift Detail sheets, previously download-only via the "Download Attachment (Excel)" button) is now ALSO uploaded onto the draft invoice that "Create & Send via Xero" creates, so every invoice carries its own shift-level usage breakdown as an attachment. Implementation: downloadClientExcel refactored into buildClientUsageWorkbook() (single source of truth — the download button and the upload share it, so the attachment is always byte-identical to what the button downloads); new uploadUsageAttachmentToXero() writes the workbook to an ArrayBuffer via XLSX.write, base64-encodes it in 32KB chunks (String.fromCharCode on the whole buffer overflows the arg limit), and POSTs {action:'upload_attachment'} to the xero-proxy Edge Function, which PUTs it to Xero's Invoices/{id}/Attachments/{filename} API. Wired into confirmSendInvoice AFTER the invoice is created and ONLY for real proxy-created invoices (MANUAL- fallback ids skipped); upload failure is NON-FATAL — the invoice stands, a warning toast points at the Download button as the manual fallback. Requires xero-proxy redeploy (new accounting.attachments scope + upload action) and a one-time Xero re-consent via ?reconnect=1. node --check passes. Surgical diff: only the Excel-export block and one insertion in confirmSendInvoice changed; nothing else touched. -->
 <!-- Build patch: v82 (BILLING GOES TEAM-SYNCED + XERO HANDOFF ACTUALLY HELPS) — Worked from the v81 (July1index) build. Two ops complaints: (1) "if I use a different computer, billing has different information" — root cause: ALL THREE billing stores (billing_client_settings_v2 client configs/groupings/Xero contact IDs, billing_sent_log_v1 sent-invoice marks, billing_hidden_outlets_v1) were localStorage-ONLY; nothing ever synced them. FIX: all three now live in the shared app_settings store (keys billing_client_settings / billing_sent_log / billing_hidden_outlets), mirroring the outlet_groups + import_handled patterns — localStorage stays as the instant cache, Supabase is authoritative. Settings + hidden list are last-write-wins (admin-managed, same rationale as outlet_groups; Clear-all must stick); the SENT LOG is per-key newest-wins MERGE with tombstones (unmark writes {deleted,deletedAt} instead of deleting) so one device's "sent" mark can never be clobbered by another device's stale save — that's a double-invoice risk. Loaded at boot, re-pulled at the top of every loadBillingPage()/initBillingNavBadge(), pushed on every mutation (saveBillingSettingsAll() central save replaces the five scattered raw localStorage writes), AND live-synced via the existing app_settings realtime channel (billing page re-renders when a teammate edits groupings or marks sent). First device with existing local config seeds the shared row so nothing is lost on rollout. (2) "when I invoice someone it just opens a blank Xero page, I have to key everything myself" — FIXES: (a) the manual-handoff modal's "Copy Line Items" button was BROKEN (JSON.stringify inlined into the onclick attribute leaked quotes into the HTML — the button literally showed raw JS); clipboard payloads now live in _xeroManualCopy + named copyXeroLines(), (b) every line item in that modal gets its own "Copy description" (full multi-line desc, paste straight into Xero's Description cell) and "Copy amount" buttons, so filling Xero is copy-paste-copy-paste instead of re-typing, (c) createXeroInvoiceViaProxy now creates the invoice as a DRAFT (was AUTHORISED) and auto-opens it in Xero for review when the xero-proxy Edge Function is deployed, and surfaces the proxy's error instead of swallowing it. A ready-to-deploy xero-proxy Edge Function (Xero OAuth2 w/ stored refresh token in app_settings key xero_oauth, one-time browser consent at the function URL) ships alongside this build — once deployed, "Create & Send via Xero" fills contact+dates+reference+all line items in Xero automatically. node --check passes. Surgical diff: only the billing module (state/save/load fns, loadBillingPage head, initBillingNavBadge, _showXeroManualModal, createXeroInvoiceViaProxy, the 5 settings-write call sites), the boot loader list, and the app_settings realtime handler changed; nothing else touched. -->
@@ -1341,9 +1343,13 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div class="topbar">
         <div class="topbar-left">
           <h2>Xero Billing</h2>
-          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period · 🇸🇬 Singapore only</p>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period &amp; country</p>
         </div>
         <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
+          <select id="billing-country" onchange="setBillingCountry(this.value)" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+            <option value="Singapore">🇸🇬 Singapore (SGD)</option>
+            <option value="Malaysia">🇲🇾 Malaysia (MYR)</option>
+          </select>
           <select id="billing-year" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
           <select id="billing-month" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--border2);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
           <button class="btn btn-ghost btn-sm" onclick="openBillingSettingsModal()">⚙️ Client Settings</button>
@@ -21531,8 +21537,23 @@ function shiftBelongsToClient(shift, billingName) {
 let billingPeriodShiftsCache = {};
 let _billingOutletOwnerMap = null;
 
+// ── v86: billing country (SG default) ────────────────────────────────────────
+// Drives the shift filter, every currency label, the invoice CurrencyCode and
+// which Xero organisation the proxy targets ('SG'|'MY' in the request body).
+let billingCountry = 'Singapore';
+function billingCurrencyCode()   { return billingCountry === 'Malaysia' ? 'MYR' : 'SGD'; }
+function billingCurrencySymbol() { return billingCountry === 'Malaysia' ? 'RM' : '$'; }
+function billingRatePrefix()     { return billingCountry === 'Malaysia' ? 'RM' : 'SG$'; }
+function billingCountryShort()   { return billingCountry === 'Malaysia' ? 'MY' : 'SG'; }
+function setBillingCountry(v) {
+  billingCountry = (v === 'Malaysia') ? 'Malaysia' : 'Singapore';
+  clearBillingCache();          // per-country cache keys — never mix currencies
+  loadBillingPage();
+}
+
 async function fetchPayableShiftsForPeriod(year, month) {
-  const cacheKey = `${year}-${String(month).padStart(2,'0')}`;
+  // v86: country-scoped cache key — an SG month cache must never serve MY.
+  const cacheKey = `${billingCountry}:${year}-${String(month).padStart(2,'0')}`;
   if (Array.isArray(billingPeriodShiftsCache[cacheKey])) {
     return billingPeriodShiftsCache[cacheKey];
   }
@@ -21619,12 +21640,12 @@ function _billingFilterShifts(rows) {
       const workerName = String(s.worker_name || '').trim().toLowerCase();
       if (!workerName || workerName === 'available') return false;
       if (!s.outlet) return false;
-      // Only SG shifts — billing is in SGD; MY (RM) and PH (₱) shifts use other
-      // currencies and would corrupt SGD invoice totals. Resolve via the outlet
-      // (source of truth) so a Malaysian-outlet shift left with a stale SG
-      // country at import time isn't wrongly pulled into an SGD invoice.
+      // v86: only shifts of the SELECTED billing country — currencies must
+      // never mix in one invoice run. Resolve via the outlet (source of truth)
+      // so a Malaysian-outlet shift left with a stale SG country at import time
+      // isn't wrongly pulled into an SGD invoice, and vice versa.
       const country = resolvedCountryForShift(s);
-      if (country !== 'Singapore') return false;
+      if (country !== billingCountry) return false;
       // A billable compensation amount must reach the invoice even though the
       // shift was never worked (no clock-in/out, e.g. outlet declined late).
       if (Math.min(parseFloat(s.compensation_billable || 0), parseFloat(s.compensation_paid || 0)) > 0) return true;
@@ -21668,7 +21689,7 @@ function computeClientBilling(billingName, periodShifts) {
       outletMap[outletName].compTotal += compBill;
       const cd  = new Date(s.shift_date + 'T00:00:00');
       const cday = `${cd.getDate()}/${cd.getMonth()+1}`;
-      outletMap[outletName].shiftLines.push(`${cday} - ${s.worker_name} compensation (booking not honoured) = $${compBill.toFixed(2)}`);
+      outletMap[outletName].shiftLines.push(`${cday} - ${s.worker_name} compensation (booking not honoured) = ${billingCurrencySymbol()}${compBill.toFixed(2)}`);
     }
     // A pure-compensation row (outlet declined, no hours worked) has no work line
     if (!(s.clock_in && s.clock_out)) return;
@@ -21677,7 +21698,7 @@ function computeClientBilling(billingName, periodShifts) {
     const day = `${d.getDate()}/${d.getMonth()+1}`;
     const hrs  = parseFloat(calcShiftHours(s) || 0);
     const rate = parseFloat(s.rate || 0);
-    outletMap[outletName].shiftLines.push(`${day} - ${s.worker_name} ${hrs.toFixed(2)}hrs at SG$${rate}/hr = $${clientAmt.toFixed(2)}`);
+    outletMap[outletName].shiftLines.push(`${day} - ${s.worker_name} ${hrs.toFixed(2)}hrs at ${billingRatePrefix()}${rate}/hr = ${billingCurrencySymbol()}${clientAmt.toFixed(2)}`);
   });
 
   const outletLineItems = Object.entries(outletMap)
@@ -22355,7 +22376,7 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
         </table>
       </div>
       <div style="border-top:1px solid var(--border2);padding-top:10px;margin-top:4px;display:flex;justify-content:space-between;font-weight:700;">
-        <span>Total (SGD)</span>
+        <span>Total (${billingCurrencyCode()})</span>
         <span style="font-family:var(--mono);color:var(--green);font-size:16px;">$${d.subtotal.toFixed(2)}</span>
       </div>
       <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--text3);">
@@ -22408,7 +22429,7 @@ async function buildClientUsageWorkbook(billingName, year, month) {
       ['Generated', new Date().toLocaleDateString('en-SG'), '', ''],
       ['', '', '', ''],
       ['OUTLET BREAKDOWN', '', '', ''],
-      ['Outlet', 'Shifts', 'Payout (SGD)', 'Taxi/PTC (SGD)'],
+      ['Outlet', 'Shifts', `Payout (${billingCurrencyCode()})`, `Taxi/PTC (${billingCurrencyCode()})`],
       ...d.outletLineItems.map(item => [
         item.outletName,
         item.shiftLines.length,
@@ -22421,7 +22442,7 @@ async function buildClientUsageWorkbook(billingName, year, month) {
       ...(d.taxiTotal > 0 ? [['Taxi / Pass-through Costs', '', d.taxiTotal, '']] : []),
       ...(d.compTotal > 0 ? [['Compensation (booking not honoured)', '', d.compTotal, '']] : []),
       [d.billingMode === 'flat' ? `Service Fee (${d.commissionLabel})` : `Commission (${d.commissionPct}%)`, '', d.commissionAmt, ''],
-      ['TOTAL TO INVOICE (SGD)', '', d.subtotal, ''],
+      [`TOTAL TO INVOICE (${billingCurrencyCode()})`, '', d.subtotal, ''],
       ['', '', '', ''],
       ['Payment Terms', `Net ${d.paymentTermsDays} days`, '', ''],
     ];
@@ -22471,7 +22492,8 @@ async function buildClientUsageWorkbook(billingName, year, month) {
     });
 
     const safe = billingName.replace(/[^a-zA-Z0-9]/g, '_');
-    const filename = `UsageReport_${safe}_${periodLabel.replace(' ','_')}.xlsx`;
+    // v86: _MY suffix so a Malaysian report can't overwrite a same-name SG file.
+    const filename = `UsageReport_${safe}_${periodLabel.replace(' ','_')}${billingCountry === 'Malaysia' ? '_MY' : ''}.xlsx`;
     return { wb, filename };
 }
 
@@ -22501,6 +22523,7 @@ async function uploadUsageAttachmentToXero(invoiceId, billingName, year, month) 
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
     body: JSON.stringify({
       action: 'upload_attachment',
+      country: billingCountryShort(),   // v86: route to the SG or MY Xero org
       invoice_id: invoiceId,
       filename,
       content_base64: btoa(binary),
@@ -22627,14 +22650,14 @@ async function createXeroInvoiceViaProxy(d, invoiceDate, dueDate, reference, xer
       DueDate: dueDate,
       Reference: reference || '',
       Status: 'DRAFT',   // v82: draft so it can be reviewed & approved in Xero
-      CurrencyCode: 'SGD',
+      CurrencyCode: billingCurrencyCode(),   // v86: SGD or MYR by selected country
       LineItems: lineItems
     };
 
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/xero-proxy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
-      body: JSON.stringify({ endpoint: 'invoices', method: 'POST', payload: { Invoices: [payload] } })
+      body: JSON.stringify({ endpoint: 'invoices', method: 'POST', country: billingCountryShort(), payload: { Invoices: [payload] } })
     });
     if (resp.ok) {
       const data = await resp.json();
