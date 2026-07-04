@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v89 (NIGHT REMINDERS NOT SENT AT 9PM + SENT-TICK VANISHES) — Worked from the v88 (July4_1index_v86) build. TWO ops reports: (A) night reminders don't reach workers at 9pm; (B) after a manual send the "Reminder sent" ✓ disappears a little later as if never sent. DIAGNOSIS — three interacting faults, one of them INTRODUCED BY v88: (1) v88 GHOST-CLAIM BUG (owned): when a device WON the app_settings claim but the Periskope send then FAILED, v88 released the claim with a DELETE — and if that delete was silently rejected (e.g. RLS that permits INSERT but not DELETE), the orphaned claim made every device's sweep read 'lost' → mark nightSent=true locally WITHOUT ANYONE EVER SENDING (ticks shown, worker got nothing — exactly the 4 Jul screenshot). FIX: a claim is now only PROOF OF INTENT; the winner records the OUTCOME on the row via upsert (sent:true / failed:true — upserts on app_settings are the app's proven write path), and a losing device resolves the claim instead of trusting it: sent→stand down + mark local; failed OR stale (>2 min, no outcome — winner died mid-send)→TAKE OVER and send; fresh pending (<2 min)→do nothing this sweep and re-check next minute. releaseReminderClaim now marks failed:true FIRST and keeps delete as best-effort cleanup only. (2) 5-MINUTE NIGHT WINDOW: 21:00–21:05 only fired if a tab was open, FOREGROUNDED and un-throttled in those exact minutes — browsers throttle background-tab timers, so a minimised tab misses the whole window and nothing sends (all sending is client-side). The narrowness was v77b's dupe protection, but dedup is now claim-based, so the window is WIDENED to 21:00–22:30 (1260–1350): still fires AT 9pm when a tab is live, and a tab opened later back-fills instead of silently skipping the night. THIS IS THE ONE BEHAVIOURAL CHANGE TO PRE-v88 CODE (one constant, 1265→1350). (3) SENT-TICK CLOBBER (why ✓ vanishes): persistReminder is still being REJECTED by a NON-column error (v87's retry only catches missing-column; the verbatim DB error — likely RLS on shift_reminders — was hidden behind a generic toast). The DB therefore never holds night_sent=true, and BOTH re-sync paths (silentSyncReminders' wholesale `shiftReminders = incoming` AND the realtime handler's per-row replace — which the WEBHOOK triggers with service-role writes whose night_sent is false) clobber the local ✓. FIX: STICKY SEND FLAGS — new applyStickySendFlags() refuses to let any DB read downgrade a nightSent/clockinSent this session set (keyed by the session Sets' logical worker|date|start|end key, so a refill to a NEW worker is untouched), restores records the DB has no row for at all, re-pushes once per shift so the DB heals when writes work again, and is applied in BOTH silentSyncReminders and the realtime handler. persistReminder additionally shows the VERBATIM database error once (new toast) so the real cause gets fixed at the source. (4) MANUAL PATHS JOIN THE SAME MACHINERY: manualSendReminder stamps the session Set + records a sent claim after success (auto sweep on every device stands down; a human pressing the button always sends). toggleReminder: hand-ticking "Reminder sent" = sticky + sent claim (ops WhatsApped the worker themselves — automation must not double-send); un-ticking removes both so a deliberate re-send works. New helpers: reminderLogicalKey, applyStickySendFlags, markReminderClaimOutcome, resolveLostClaim, markReminderClaimTakeover, _shiftopsDeviceId, _stickyRepushed. Webhook NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: night-window constant (the one pre-v88 behavioural change) + claim-lifecycle rework inside v88's own additions + sticky hooks at the two re-sync replace points + manualSendReminder/toggleReminder additions; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v88 (CLOCK-IN REMINDER STILL SENT 2–4× — CROSS-DEVICE/TAB/RELOAD DUPES) — Worked from the v87 (July4_1index_v86) build. After v87 the flood dropped from dozens (1/min) to 2–4 repeats to the SAME worker — the tell that v87 worked: its in-memory guards (_clockinSentSession / _clockinSentThisSweep / siblingAlreadySent / live.clockinSent) all dedupe within ONE page session, so 2–4 residual sends = 2–4 independent senders (open tabs / devices / a reloaded tab) that cannot see each other's in-memory flag. The ONLY thing gating two DIFFERENT devices was live.clockinSent, which is rebuilt wholesale by silentSyncReminders() from the shift_reminders table every 30s — so cross-device dedup requires the clockin_sent WRITE to land in that table AND replicate before the other device's next minute-sweep. The original clobber proved that write was not holding (DB sat at false), and v87's drop-and-retry only rescues a MISSING-COLUMN rejection — an RLS/permission/constraint rejection still leaves clockin_sent unwritten, so every session sends once. ROOT FIX (v88): stop trusting shift_reminders for send-coordination and use an ATOMIC CLAIM in app_settings — the table the app already writes to reliably team-wide (profile_meta, confirm_batches, import/approval ledgers, billing, team_tasks; every access is keyed .upsert(onConflict:'key'), so key is unique/PK, and nothing loads it wholesale). New claimReminderSend(type,phone,s) does a PLAIN INSERT (not upsert) on key `rsent:<type>:<phone-digits>:<date>:<start>:<end>`: the FIRST caller across ALL devices inserts ('won' → send); every other caller hits the unique-key violation ('lost' → stand down, mark local flags sent so it stops retrying). Keyed by PHONE not worker_name, so name variants ("Firdaus" vs "Sheikh Firdaus") for the same recipient can't slip a second message through; keyed by DATE so it self-resets daily. A send FAILURE after a 'won' claim releases the key (releaseReminderClaim) so a genuine retry can re-fire. A NON-duplicate write rejection returns 'error' → best-effort send (no regression to zero reminders) + a ONE-TIME loud toast/console error naming app_settings/RLS as the cause, so a truly unwritable DB is diagnosed instead of silently duplicating. Wired into BOTH the clock-in and night branches, AFTER all the cheap v87 local guards (so the DB is touched only when actually about to send — at most once per logical send per session). Best-effort ~hourly prune drops rsent: rows >2 days old (dated keys; housekeeping only). No schema change; the periskope-webhook is NOT touched (it never sends clock-in reminders). node --check passes (2/2 inline script blocks). Surgical diff: PURELY ADDITIVE except the two send-blocks being wrapped — autoSendShiftReminders() (claim wrap on both branches + prune) plus three new top-level helpers (reminderClaimKey / claimReminderSend / releaseReminderClaim) and one throttle var; zero function removals or renames; nothing else touched. NOTE: like every other reminder path this runs while a browser tab is open; the app_settings claim now makes ANY number of open tabs/devices converge on a single send. -->
 <!-- Build patch: v87 (CLOCK-IN REMINDER SENT EVERY MINUTE — PERSIST-FAIL → SYNC-CLOBBER LOOP) — Worked from the v86 (July3_1index_v86) build. Ops report (live, Firdaus @ Breadtalk Events 11:00): the clock-in reminder fired once every minute (9:31, 9:32, 9:33, 9:34…) instead of once. ROOT CAUSE: the send is client-side in autoSendShiftReminders() (15s poll, self-throttled to 1/min) and is deduped ONLY by shiftReminders[id].clockinSent, which has to survive a round-trip through the Supabase shift_reminders table. persistReminder() upserts the WHOLE reminder row in one shot, so a SINGLE column PostgREST doesn't recognise (e.g. pay_followup_sent_at, or an offer_* column never ALTERed into the deployed table) makes it reject the ENTIRE upsert — clockin_sent never lands in the DB. silentSyncReminders() (every 30s) then reads the stale row back (clockin_sent=false), detects a diff, and does `shiftReminders = incoming`, CLOBBERING the just-set in-memory true back to false. Next minute the !r.clockinSent guard is false again → it re-sends. Forever, until the send window (start−180min → start−15min) closes. The once-per-minute cadence in the screenshot is exactly the 1/min throttle. FIX 1 (root cause, persistReminder): DROP-AND-RETRY — the full upsert is attempted first (unchanged when every column exists); on a column/schema error it retries with ONLY the long-standing core columns {shift_id, night_sent, night_acked, clockin_sent, clockin_responded, last_reminder_at, updated_at}, so the dedup flags ALWAYS persist and the clobber can never recur even on a stale schema. This mirrors the v60/v71 approval_status graceful-degrade pattern. FIX 2 (belt-and-braces, autoSendShiftReminders): two module-level SESSION Sets (_clockinSentSession / _nightSentSession) keyed by the SAME logical key (worker|date|start|end) remember what this page session already sent, checked before each send and stamped after a successful one. They are never touched by any DB re-sync, so even a persist failure from RLS/network (which drop-and-retry can't fix) caps the damage at ONE message per open tab instead of one per minute. Keyed by worker, so a genuine open-slot refill to a DIFFERENT worker (new logical key) is still allowed to send, preserving the v71 refill-reset behaviour. The DB-backed guards, sibling-row dedupe, in-flight guard, TZ handling, portal-deleted / suspended / cancelled skips are all UNCHANGED. No schema change; the webhook (periskope-webhook v13.3) is NOT touched — it never sends clock-in reminders. To FULLY restore cross-device single-send + all newer persisted fields, run the shift_reminders column adds in Supabase (the console error names the exact missing column). node --check passes (2/2 inline script blocks). Surgical diff: 1 line changed (const→let error) + additive only — persistReminder() drop-and-retry, the two session Sets, two guard checks + two post-send stamps in autoSendShiftReminders(); zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v71 (OPEN-SLOT FILL: APPROVAL FLAG + STALE-REMINDER RESET) — Two real bugs surfaced on a slot that was filled in place after a previous worker took then cancelled it (same shift id reused). (1) PENDING-APPROVAL LOST ON FILL: resolvePortalApproval() correctly resolved the booking to 'pending', and the insert + merge paths wrote approval_status, but the OPEN-SLOT FILL path built its own fillPayload that omitted approval_status entirely — so a portal booking the app showed as ⏳ Pending Approval imported into the ops panel as a normal CONFIRMED shift. FIX: fillPayload now sets approval_status = (r.approval_status==='pending' ? 'pending' : null) when the column is known-present, with the same approvalColumnMissing()→drop-and-retry graceful degrade the insert path uses (so a pending fill keeps its orange state, an approved/undecided fill clears any stale pending flag the slot carried). (2) REMINDERS AUTO-MARKED SENT+ACKED ON A FRESH BOOKING: reminder send/ack state (shiftReminders) is keyed by shift.id, and an open slot is updated IN PLACE on fill — so when a slot went taken→cancelled→Available→re-filled, the previous occupant's nightSent/nightAcked/clockinSent/clockinResponded flags lingered on the reused id. The new worker therefore showed reminders already sent+acknowledged AND, worse, would be SILENTLY SKIPPED by autoSendShiftReminders() (whose !nightSent / !clockinSent guards read false). This was NOT the night-reminder auto-send (that's gated to a 21:00–21:05 window) and NOT the clock-in all-true stamp (worker hadn't clocked in) — it was stale state. FIX: new resetReminderLifecycleForRefill(shiftId) zeroes the per-occupant lifecycle (send/ack + dispute/late/offer + needsReplacement), called at every reuse-in-place point: confirmCancel (slot→Available; replacement state re-asserted right after), confirmAssignWorker (in-app assign; replacement snapshotted BEFORE reset so the completed-task log stays accurate), the standby/offer assign path, and the import open-slot fill. No schema change. node --check passes (2/2 non-empty script blocks); surgical diff — only fillPayload, the 3 assign/cancel reminder-clear blocks, and the one new helper changed; nothing else touched. -->
@@ -3815,6 +3816,15 @@ async function persistReminder(shiftId) {
           : '⚠ Saved locally only — Supabase sync failed. Run the shift_reminders SQL in Supabase to enable team sync.',
           'info');
       }
+      // v89: the generic toast above hid the ACTUAL cause for days (it isn't always a
+      // missing column — an RLS/permission rejection fails BOTH the full write and the
+      // core retry, and that is what makes sent-ticks vanish and reminders repeat).
+      // Show the verbatim database error once so it can be fixed at the source.
+      if (!window._reminderSyncRealErrorShown) {
+        window._reminderSyncRealErrorShown = true;
+        const raw = String(error.message || error.code || 'unknown error').slice(0, 140);
+        toast(`⚠ shift_reminders write rejected by Supabase: "${raw}". Until this is fixed, sent-ticks can't sync across devices.`, 'info');
+      }
     }
   } catch(e) {
     console.warn('Reminder sync exception:', e);
@@ -3864,6 +3874,11 @@ function subscribeToReminderChanges() {
             payFollowupSentAt: row.pay_followup_sent_at || '',
             appCheckState: (shiftReminders[row.shift_id] && shiftReminders[row.shift_id].appCheckState) || ''
           };
+          // v89: STICKY SEND FLAGS on the realtime path too — the webhook writes with
+          // the service role (bypasses RLS), so its late/dispute upsert can push a row
+          // whose night_sent/clockin_sent are still false straight over a ✓ this
+          // session just set. Same guard as silentSyncReminders.
+          applyStickySendFlags(shiftId, shiftReminders[shiftId]);
         }
         localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
         updateReminderPanelInPlace(shiftId);
@@ -4052,6 +4067,19 @@ async function silentSyncReminders() {
       }
     });
     if (changed.length > 0) {
+      // v89: STICKY SEND FLAGS — never let a stale DB read un-tick a send this
+      // session performed (auto, manual button, or hand-tick). See applyStickySendFlags.
+      Object.keys(incoming).forEach(id => applyStickySendFlags(id, incoming[id]));
+      // v89: and if the DB has NO row at all for a shift this session sent to (the
+      // whole upsert was rejected), the wholesale replace would erase the record —
+      // carry it over so the ✓ survives.
+      Object.keys(shiftReminders).forEach(id => {
+        if (incoming[id]) return;
+        const cur = shiftReminders[id] || {};
+        if (!cur.nightSent && !cur.clockinSent) return;
+        const probe = applyStickySendFlags(id, { nightSent:false, clockinSent:false });
+        if (probe.nightSent || probe.clockinSent) incoming[id] = cur;
+      });
       shiftReminders = incoming;
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
       changed.forEach(id => updateReminderPanelInPlace(id));
@@ -4075,6 +4103,30 @@ async function silentSyncReminders() {
 async function toggleReminder(shiftId, field, checked) {
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
   shiftReminders[shiftId][field] = !!checked;
+  // v89: a hand-ticked "Reminder sent" means ops handled it (e.g. WhatsApped the
+  // worker themselves) — treat it exactly like a send: sticky in this session (the
+  // ✓ can't be clobbered by a stale DB read) and claimed team-wide (the auto sweep
+  // on every device stands down). Un-ticking reverses both, so a deliberate
+  // "send it again tonight" works.
+  if (field === 'nightSent' || field === 'clockinSent') {
+    try {
+      const s = (allShifts||[]).find(x => String(x.id) === String(shiftId)) || (taskShiftCache||{})[String(shiftId)];
+      if (s) {
+        const lk = reminderLogicalKey(s);
+        const set = (field === 'nightSent') ? _nightSentSession : _clockinSentSession;
+        const type = (field === 'nightSent') ? 'night' : 'clockin';
+        const phone = workerPhone(s.worker_name);
+        if (checked) {
+          set.add(lk);
+          if (phone) markReminderClaimOutcome(reminderClaimKey(type, phone, s), true);
+        } else {
+          set.delete(lk);
+          _stickyRepushed.delete(String(shiftId));
+          if (phone) { try { supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey(type, phone, s)).then(()=>{}, ()=>{}); } catch(e) {} }
+        }
+      }
+    } catch(e) {}
+  }
   updateReminderPanelInPlace(shiftId); // instant local update, no scroll jump
   checkReminderAlerts();
   await persistReminder(shiftId);      // sync to Supabase for all other users
@@ -9458,6 +9510,42 @@ let _reminderSweepInFlight = false; // v77b: prevents overlapping async sweeps (
 const _clockinSentSession = new Set();
 const _nightSentSession = new Set();
 let _rsentPrunedAt = 0; // v88: throttles the best-effort daily prune of reminder-claim rows
+// v89: stable per-browser id so claim rows say WHO claimed (diagnosis only).
+const _shiftopsDeviceId = (function(){ try { let d = localStorage.getItem('shiftops_device_id'); if (!d) { d = 'd' + Math.random().toString(36).slice(2,10); localStorage.setItem('shiftops_device_id', d); } return d; } catch(e){ return 'd' + Math.random().toString(36).slice(2,10); } })();
+// v89: logical key available OUTSIDE the sweep too (sticky merge + manual paths use it).
+// Same shape as the sweep-local logicalKey: worker|date|start|end.
+function reminderLogicalKey(s) {
+  return [String(s.worker_name||'').trim().toLowerCase(), String(s.shift_date||'').slice(0,10),
+    String(s.scheduled_start||'').slice(0,5), String(s.scheduled_end||'').slice(0,5)].join('|');
+}
+// v89: STICKY SEND FLAGS — the fix for "the tick disappears like it never sent".
+// Both re-sync paths (silentSyncReminders' wholesale replace and the realtime
+// handler's per-row replace) copy nightSent/clockinSent straight from the DB. When
+// the shift_reminders write is being REJECTED (an RLS/permission error — which the
+// v87 missing-column retry does NOT catch), the DB stays false, so 30s after any
+// send or manual tick the flag is clobbered back to false and the ✓ vanishes. The
+// session Sets already record what THIS session sent (auto/manual/hand-tick), keyed
+// by worker — so at merge time we simply refuse to let a DB read downgrade a flag
+// this session set. A genuine refill to a NEW worker changes the logical key, so
+// its reminders are unaffected. Re-pushes the row once per shift per session so the
+// DB heals itself the moment writes start working again.
+const _stickyRepushed = new Set();
+function applyStickySendFlags(shiftId, rec) {
+  try {
+    const s = (allShifts||[]).find(x => String(x.id) === String(shiftId)) || (taskShiftCache||{})[String(shiftId)];
+    if (!s || !rec) return rec;
+    const lk = reminderLogicalKey(s);
+    let held = false;
+    if (_nightSentSession.has(lk) && !rec.nightSent) { rec.nightSent = true; held = true; }
+    if (_clockinSentSession.has(lk) && !rec.clockinSent) { rec.clockinSent = true; held = true; }
+    if (held && !_stickyRepushed.has(String(shiftId))) {
+      _stickyRepushed.add(String(shiftId));
+      try { persistReminder(shiftId); } catch(e) {}
+      console.warn('[sticky] DB tried to un-set a sent flag this session set on shift', shiftId, '— kept ✓ and re-pushed. If this repeats, the shift_reminders write is being rejected (check the persistReminder error in this console).');
+    }
+  } catch(e) {}
+  return rec;
+}
 // v88: CROSS-DEVICE / CROSS-TAB / CROSS-RELOAD single-send claim. v87's in-memory
 // guards only dedupe within ONE page session, so N open tabs/devices each still sent
 // once (the residual 2–4 dupes to the same worker). This is an ATOMIC claim written to
@@ -9483,7 +9571,7 @@ async function claimReminderSend(type, phone, s) {
   if (!String(phone||'').replace(/\D/g,'')) return { status:'won', key }; // no phone → upstream already skips; nothing to coordinate
   try {
     const { error } = await supabaseClient.from('app_settings')
-      .insert({ key, value: { at: new Date().toISOString() }, updated_at: new Date().toISOString() });
+      .insert({ key, value: { at: new Date().toISOString(), device: _shiftopsDeviceId }, updated_at: new Date().toISOString() });
     if (!error) return { status:'won', key };
     const m = (error.message || '').toLowerCase();
     if (error.code === '23505' || /duplicate key|already exists|unique/.test(m)) return { status:'lost', key };
@@ -9496,7 +9584,56 @@ async function claimReminderSend(type, phone, s) {
     return { status:'error', key };
   }
 }
+// v89: a claim row is only PROOF OF INTENT, not proof of delivery. The winner now
+// records the OUTCOME on the same row (upserts on app_settings are the app's
+// proven-reliable write path — every team ledger uses them):
+//   sent:true   → the WhatsApp send succeeded; every 'lost' device marks its local
+//                 flags and stands down for good.
+//   failed:true → the send failed; the claim is reclaimable immediately.
+// v88 instead DELETEd the claim on failure — and if that delete was silently
+// rejected (RLS that allows INSERT but not DELETE), the orphaned "ghost" claim made
+// every device report 'lost' and mark the reminder SENT WITHOUT ANYONE EVER
+// SENDING IT (ticks shown, worker got nothing — the July 4 night-reminder report).
+async function markReminderClaimOutcome(key, ok) {
+  try {
+    const cur = { at: new Date().toISOString(), device: _shiftopsDeviceId };
+    if (ok) cur.sent = true; else cur.failed = true;
+    await supabaseClient.from('app_settings').upsert(
+      { key, value: cur, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  } catch(e) { console.warn('[reminder-claim] outcome mark failed:', e); }
+}
+// v89: what a LOSING device should do, based on the claim's recorded outcome:
+//   'sent'  → genuinely delivered elsewhere; mark local flags, stand down for good.
+//   'retry' → claim is failed/stale-pending (winner died mid-send or its outcome
+//             write never landed; >2 min with no outcome = stale). Take the claim
+//             over (upsert a fresh stamp) and send.
+//   'wait'  → a fresh claim (<2 min) with no outcome yet — the winner is mid-send.
+//             Do NOTHING this sweep (no send, no local marks); the next minute's
+//             sweep re-reads it and resolves to 'sent' or 'retry'.
+async function resolveLostClaim(key) {
+  try {
+    const { data } = await supabaseClient.from('app_settings').select('value, updated_at').eq('key', key).maybeSingle();
+    if (!data) return 'retry'; // row vanished (deleted between insert-conflict and this read)
+    const v = data.value || {};
+    if (v.sent === true) return 'sent';
+    if (v.failed === true) { await markReminderClaimTakeover(key); return 'retry'; }
+    const at = new Date(v.at || data.updated_at || 0).getTime();
+    if (!at || (Date.now() - at) > 120000) { await markReminderClaimTakeover(key); return 'retry'; }
+    return 'wait';
+  } catch(e) { console.warn('[reminder-claim] lost-claim read failed:', e); return 'wait'; }
+}
+async function markReminderClaimTakeover(key) {
+  try {
+    await supabaseClient.from('app_settings').upsert(
+      { key, value: { at: new Date().toISOString(), device: _shiftopsDeviceId, retaken: true }, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  } catch(e) {}
+}
 async function releaseReminderClaim(key) {
+  // v89: DELETE proved unreliable as the failure signal (a rejected delete leaves a
+  // ghost claim that reads as 'sent elsewhere'). Failure is now recorded POSITIVELY
+  // via markReminderClaimOutcome(key,false); the delete remains as best-effort
+  // cleanup only and nothing depends on it succeeding.
+  await markReminderClaimOutcome(key, false);
   try { await supabaseClient.from('app_settings').delete().eq('key', key); } catch(e) {}
 }
 async function autoSendShiftReminders() {
@@ -9586,7 +9723,16 @@ async function autoSendShiftReminders() {
     // window so the once-per-minute sweep fires it right at 9pm; the !r.nightSent guard
     // (deduped team-wide via persistReminder) ensures it's sent once only, even if the
     // panel is open across several ticks. (Was previously the 7pm–10pm window 1140–1320.)
-    if (s.shift_date === tomorrowStr && !r.nightSent && nowMins >= 1260 && nowMins < 1265) {
+    // v89: WINDOW WIDENED 21:00–21:05 → 21:00–22:30 (1260–1350). The 5-minute
+    // window only worked if a ShiftOps tab was OPEN, FOREGROUNDED and un-throttled
+    // during those exact minutes — browsers throttle background-tab timers hard, so
+    // a minimised tab at 9pm could miss the whole window and NOTHING sends (all
+    // sending is client-side). The narrowness was v77b's dupe protection; dedup is
+    // now claim-based (app_settings atomic insert) + session Sets, so a wide
+    // catch-up window is safe: the reminder still goes out AT 9pm when a tab is
+    // live, and a tab opened later in the evening back-fills it instead of
+    // silently skipping the night.
+    if (s.shift_date === tomorrowStr && !r.nightSent && nowMins >= 1260 && nowMins < 1350) {
       if (_nightSentThisSweep.has(lk)) continue;                      // dupe row this sweep
       if (_nightSentSession.has(lk)) { _nightSentThisSweep.add(lk); continue; } // v87: already sent this session — a DB-sync clobber can't defeat this
       if (siblingAlreadySent(s, 'nightSent')) { _nightSentThisSweep.add(lk); continue; } // sibling row already sent
@@ -9594,17 +9740,32 @@ async function autoSendShiftReminders() {
       if (live.nightSent) { _nightSentThisSweep.add(lk); continue; } // freshness re-check
       _nightSentThisSweep.add(lk);                                    // claim before awaiting
       // v88: atomic cross-device/tab/reload claim BEFORE sending — only one sender wins.
+      // v89: 'lost' no longer blindly means 'sent elsewhere' — resolve the recorded outcome.
       const nClaim = await claimReminderSend('night', phone, s);
+      let nProceed = (nClaim.status !== 'lost');
       if (nClaim.status === 'lost') {
-        console.log('[reminder-claim] night reminder already sent elsewhere — standing down for', phone);
-        if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
-        shiftReminders[s.id].nightSent = true;
-        shiftReminders[s.id].lastReminderAt = new Date().toISOString();
-        _nightSentSession.add(lk);
-        persistReminder(s.id);
-        continue;
+        const verdict = await resolveLostClaim(nClaim.key);
+        if (verdict === 'sent') {
+          console.log('[reminder-claim] night reminder confirmed sent elsewhere — standing down for', phone);
+          if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
+          shiftReminders[s.id].nightSent = true;
+          shiftReminders[s.id].lastReminderAt = new Date().toISOString();
+          _nightSentSession.add(lk);
+          persistReminder(s.id);
+          continue;
+        } else if (verdict === 'wait') {
+          console.log('[reminder-claim] night claim pending on another device — will re-check next sweep for', phone);
+          _nightSentThisSweep.delete(lk); // not sent; let the next minute re-evaluate
+          continue;
+        } else {
+          console.warn('[reminder-claim] night claim was stale/failed (ghost) — taking over and sending for', phone);
+          nProceed = true;
+        }
       }
+      if (!nProceed) continue;
       const ok = await sendPeriskopeMessage(phone, buildNightReminderMessage(s));
+      // v89: record the OUTCOME on the claim so losers can trust it (see markReminderClaimOutcome).
+      markReminderClaimOutcome(nClaim.key, ok);
       if (ok) {
         if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
         shiftReminders[s.id].nightSent = true;
@@ -9614,7 +9775,9 @@ async function autoSendShiftReminders() {
         toast(`🌙 Night reminder sent to ${workerName}`);
       } else {
         _nightSentThisSweep.delete(lk);                               // failed → allow retry
-        if (nClaim.status === 'won') await releaseReminderClaim(nClaim.key); // v88: release so a real retry can re-send
+        // v89: failure is recorded on the claim (failed:true) by markReminderClaimOutcome
+        // above, so other devices can immediately take over; delete is best-effort cleanup.
+        if (nClaim.status === 'won') await releaseReminderClaim(nClaim.key);
       }
     }
 
@@ -9633,17 +9796,32 @@ async function autoSendShiftReminders() {
         if (live.clockinSent) { _clockinSentThisSweep.add(lk); continue; }
         _clockinSentThisSweep.add(lk);
         // v88: atomic cross-device/tab/reload claim BEFORE sending — only one sender wins.
+        // v89: 'lost' no longer blindly means 'sent elsewhere' — resolve the recorded outcome.
         const cClaim = await claimReminderSend('clockin', phone, s);
+        let cProceed = (cClaim.status !== 'lost');
         if (cClaim.status === 'lost') {
-          console.log('[reminder-claim] clock-in reminder already sent elsewhere — standing down for', phone);
-          if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
-          shiftReminders[s.id].clockinSent = true;
-          shiftReminders[s.id].lastReminderAt = new Date().toISOString();
-          _clockinSentSession.add(lk);
-          persistReminder(s.id);
-          continue;
+          const verdict = await resolveLostClaim(cClaim.key);
+          if (verdict === 'sent') {
+            console.log('[reminder-claim] clock-in reminder confirmed sent elsewhere — standing down for', phone);
+            if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
+            shiftReminders[s.id].clockinSent = true;
+            shiftReminders[s.id].lastReminderAt = new Date().toISOString();
+            _clockinSentSession.add(lk);
+            persistReminder(s.id);
+            continue;
+          } else if (verdict === 'wait') {
+            console.log('[reminder-claim] clock-in claim pending on another device — will re-check next sweep for', phone);
+            _clockinSentThisSweep.delete(lk);
+            continue;
+          } else {
+            console.warn('[reminder-claim] clock-in claim was stale/failed (ghost) — taking over and sending for', phone);
+            cProceed = true;
+          }
         }
+        if (!cProceed) continue;
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
+        // v89: record the OUTCOME on the claim so losers can trust it.
+        markReminderClaimOutcome(cClaim.key, ok);
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
           shiftReminders[s.id].clockinSent = true;
@@ -9653,7 +9831,8 @@ async function autoSendShiftReminders() {
           toast(`⏰ Clock-in reminder sent to ${workerName}`);
         } else {
           _clockinSentThisSweep.delete(lk);
-          if (cClaim.status === 'won') await releaseReminderClaim(cClaim.key); // v88: release so a real retry can re-send
+          // v89: failure recorded on the claim (failed:true) above; delete is best-effort cleanup.
+          if (cClaim.status === 'won') await releaseReminderClaim(cClaim.key);
         }
       }
     }
@@ -9771,6 +9950,16 @@ async function manualSendReminder(shiftId, type) {
     if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
     shiftReminders[shiftId][type === 'night' ? 'nightSent' : 'clockinSent'] = true;
     shiftReminders[shiftId].lastReminderAt = new Date().toISOString();
+    // v89: a manual send counts exactly like an auto send for de-dupe — stamp the
+    // session Set (keeps the ✓ sticky against DB clobbers) and record a sent claim
+    // (stops the 9pm/clock-in auto sweep on EVERY device from re-sending). A human
+    // pressing the button always sends (deliberate re-sends stay possible); only
+    // the automation defers to this record.
+    try {
+      const lk = reminderLogicalKey(s);
+      (type === 'night' ? _nightSentSession : _clockinSentSession).add(lk);
+      markReminderClaimOutcome(reminderClaimKey(type === 'night' ? 'night' : 'clockin', phone, s), true);
+    } catch(e) {}
     await persistReminder(shiftId);
     updateReminderPanelInPlace(shiftId);
     toast(`✓ Reminder sent to ${s.worker_name}`);
