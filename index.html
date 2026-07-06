@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v90 (REFRESH WIPES SENT-TICKS + ACKS; GREEN "FULLY ACKNOWLEDGED" GONE) — Worked from the v89 (July4_1index_v86) build. Ops report: sent-ticks AND worker-acknowledged ticks vanish on page refresh, and the green "✅ Fully acknowledged" banner no longer appears. DIAGNOSIS: (1) the green banner is not a separate bug — it renders when ALL FOUR flags hold (nightSent && nightAcked && clockinSent && clockinResponded, line ~4527), so the flag wipe kills it. (2) THE WIPE: v89's sticky guard lives in in-memory Sets that are EMPTY on a fresh page. loadReminders() loads localStorage first (the ticks WERE safe there), but if the Supabase read returns any rows it REPLACES shiftReminders wholesale with DB truth — whose writes are still being rejected, so its flags sit false — and then OVERWRITES the localStorage backup with the clobbered view. Every refresh therefore destroyed both the live flags and their only surviving copy. (3) ACK flags (nightAcked/clockinResponded) set by ops (hand-tick / banner button) die in the same rejected write; only webhook-set acks (service-role) survive in the DB. FIX: (A) DURABLE STICKY STORE — the two v89 Sets plus two NEW ack Sets (_nightAckedSticky/_clockinRespondedSticky) are persisted to localStorage ('reminder_sticky_v1'; same worker|date|start|end keys, worker-scoped; entries >3 days pruned at load) and reloaded at script start; _stickySave() is called at every mutation site (both sweep branches incl. lost-claim marks, manualSendReminder, toggleReminder, markWorkerAcknowledged). (B) BOOT-ORDER FIX — the sticky pass can't run inside loadReminders (logical keys need shift rows; loadReminders runs BEFORE loadShifts in init's Promise.all), so loadReminders now stashes the PRE-replace localStorage snapshot (_bootReminderSnapshot, captured BEFORE the backup is overwritten) and init() calls new applyBootReminderSticky() right AFTER loadShifts: shared applyStickyOverReminders() re-applies all four flags over the DB view, carries over records the DB has no row for at all, repairs the localStorage backup, and refreshes affected rows — so ticks and the green banner are correct on first paint. silentSyncReminders now uses the same shared pass (ack flags included). (C) applyStickySendFlags extended to nightAcked/clockinResponded. (D) CONSISTENCY GUARDS — undoFullAck clears all four sticky keys FIRST (else the next sync would resurrect the flags the undo removes) and best-effort deletes both send-claims; resetReminderLifecycleForRefill drops sticky keys for the OUTGOING occupancy so the SAME worker re-booked into the slot still gets fresh reminders (a different worker was never affected); toggleReminder handles all four fields with add/delete + save. Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (refresh-cycle restore, ack stickiness, green-banner predicate, undo non-resurrection, refill re-send, 3-day prune). Surgical diff: sticky-store block + helpers (top-level, v89 region), loadReminders snapshot hook, ONE line in init() (applyBootReminderSticky after loadShifts), silentSyncReminders pass swapped to the shared helper (v89's own lines), toggleReminder/manualSendReminder/markWorkerAcknowledged/undoFullAck/resetReminderLifecycleForRefill additive blocks, four one-line _stickySave() taps in the sweep (v88/v89's own lines); zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v89 (NIGHT REMINDERS NOT SENT AT 9PM + SENT-TICK VANISHES) — Worked from the v88 (July4_1index_v86) build. TWO ops reports: (A) night reminders don't reach workers at 9pm; (B) after a manual send the "Reminder sent" ✓ disappears a little later as if never sent. DIAGNOSIS — three interacting faults, one of them INTRODUCED BY v88: (1) v88 GHOST-CLAIM BUG (owned): when a device WON the app_settings claim but the Periskope send then FAILED, v88 released the claim with a DELETE — and if that delete was silently rejected (e.g. RLS that permits INSERT but not DELETE), the orphaned claim made every device's sweep read 'lost' → mark nightSent=true locally WITHOUT ANYONE EVER SENDING (ticks shown, worker got nothing — exactly the 4 Jul screenshot). FIX: a claim is now only PROOF OF INTENT; the winner records the OUTCOME on the row via upsert (sent:true / failed:true — upserts on app_settings are the app's proven write path), and a losing device resolves the claim instead of trusting it: sent→stand down + mark local; failed OR stale (>2 min, no outcome — winner died mid-send)→TAKE OVER and send; fresh pending (<2 min)→do nothing this sweep and re-check next minute. releaseReminderClaim now marks failed:true FIRST and keeps delete as best-effort cleanup only. (2) 5-MINUTE NIGHT WINDOW: 21:00–21:05 only fired if a tab was open, FOREGROUNDED and un-throttled in those exact minutes — browsers throttle background-tab timers, so a minimised tab misses the whole window and nothing sends (all sending is client-side). The narrowness was v77b's dupe protection, but dedup is now claim-based, so the window is WIDENED to 21:00–22:30 (1260–1350): still fires AT 9pm when a tab is live, and a tab opened later back-fills instead of silently skipping the night. THIS IS THE ONE BEHAVIOURAL CHANGE TO PRE-v88 CODE (one constant, 1265→1350). (3) SENT-TICK CLOBBER (why ✓ vanishes): persistReminder is still being REJECTED by a NON-column error (v87's retry only catches missing-column; the verbatim DB error — likely RLS on shift_reminders — was hidden behind a generic toast). The DB therefore never holds night_sent=true, and BOTH re-sync paths (silentSyncReminders' wholesale `shiftReminders = incoming` AND the realtime handler's per-row replace — which the WEBHOOK triggers with service-role writes whose night_sent is false) clobber the local ✓. FIX: STICKY SEND FLAGS — new applyStickySendFlags() refuses to let any DB read downgrade a nightSent/clockinSent this session set (keyed by the session Sets' logical worker|date|start|end key, so a refill to a NEW worker is untouched), restores records the DB has no row for at all, re-pushes once per shift so the DB heals when writes work again, and is applied in BOTH silentSyncReminders and the realtime handler. persistReminder additionally shows the VERBATIM database error once (new toast) so the real cause gets fixed at the source. (4) MANUAL PATHS JOIN THE SAME MACHINERY: manualSendReminder stamps the session Set + records a sent claim after success (auto sweep on every device stands down; a human pressing the button always sends). toggleReminder: hand-ticking "Reminder sent" = sticky + sent claim (ops WhatsApped the worker themselves — automation must not double-send); un-ticking removes both so a deliberate re-send works. New helpers: reminderLogicalKey, applyStickySendFlags, markReminderClaimOutcome, resolveLostClaim, markReminderClaimTakeover, _shiftopsDeviceId, _stickyRepushed. Webhook NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: night-window constant (the one pre-v88 behavioural change) + claim-lifecycle rework inside v88's own additions + sticky hooks at the two re-sync replace points + manualSendReminder/toggleReminder additions; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v88 (CLOCK-IN REMINDER STILL SENT 2–4× — CROSS-DEVICE/TAB/RELOAD DUPES) — Worked from the v87 (July4_1index_v86) build. After v87 the flood dropped from dozens (1/min) to 2–4 repeats to the SAME worker — the tell that v87 worked: its in-memory guards (_clockinSentSession / _clockinSentThisSweep / siblingAlreadySent / live.clockinSent) all dedupe within ONE page session, so 2–4 residual sends = 2–4 independent senders (open tabs / devices / a reloaded tab) that cannot see each other's in-memory flag. The ONLY thing gating two DIFFERENT devices was live.clockinSent, which is rebuilt wholesale by silentSyncReminders() from the shift_reminders table every 30s — so cross-device dedup requires the clockin_sent WRITE to land in that table AND replicate before the other device's next minute-sweep. The original clobber proved that write was not holding (DB sat at false), and v87's drop-and-retry only rescues a MISSING-COLUMN rejection — an RLS/permission/constraint rejection still leaves clockin_sent unwritten, so every session sends once. ROOT FIX (v88): stop trusting shift_reminders for send-coordination and use an ATOMIC CLAIM in app_settings — the table the app already writes to reliably team-wide (profile_meta, confirm_batches, import/approval ledgers, billing, team_tasks; every access is keyed .upsert(onConflict:'key'), so key is unique/PK, and nothing loads it wholesale). New claimReminderSend(type,phone,s) does a PLAIN INSERT (not upsert) on key `rsent:<type>:<phone-digits>:<date>:<start>:<end>`: the FIRST caller across ALL devices inserts ('won' → send); every other caller hits the unique-key violation ('lost' → stand down, mark local flags sent so it stops retrying). Keyed by PHONE not worker_name, so name variants ("Firdaus" vs "Sheikh Firdaus") for the same recipient can't slip a second message through; keyed by DATE so it self-resets daily. A send FAILURE after a 'won' claim releases the key (releaseReminderClaim) so a genuine retry can re-fire. A NON-duplicate write rejection returns 'error' → best-effort send (no regression to zero reminders) + a ONE-TIME loud toast/console error naming app_settings/RLS as the cause, so a truly unwritable DB is diagnosed instead of silently duplicating. Wired into BOTH the clock-in and night branches, AFTER all the cheap v87 local guards (so the DB is touched only when actually about to send — at most once per logical send per session). Best-effort ~hourly prune drops rsent: rows >2 days old (dated keys; housekeeping only). No schema change; the periskope-webhook is NOT touched (it never sends clock-in reminders). node --check passes (2/2 inline script blocks). Surgical diff: PURELY ADDITIVE except the two send-blocks being wrapped — autoSendShiftReminders() (claim wrap on both branches + prune) plus three new top-level helpers (reminderClaimKey / claimReminderSend / releaseReminderClaim) and one throttle var; zero function removals or renames; nothing else touched. NOTE: like every other reminder path this runs while a browser tab is open; the app_settings claim now makes ANY number of open tabs/devices converge on a single send. -->
 <!-- Build patch: v87 (CLOCK-IN REMINDER SENT EVERY MINUTE — PERSIST-FAIL → SYNC-CLOBBER LOOP) — Worked from the v86 (July3_1index_v86) build. Ops report (live, Firdaus @ Breadtalk Events 11:00): the clock-in reminder fired once every minute (9:31, 9:32, 9:33, 9:34…) instead of once. ROOT CAUSE: the send is client-side in autoSendShiftReminders() (15s poll, self-throttled to 1/min) and is deduped ONLY by shiftReminders[id].clockinSent, which has to survive a round-trip through the Supabase shift_reminders table. persistReminder() upserts the WHOLE reminder row in one shot, so a SINGLE column PostgREST doesn't recognise (e.g. pay_followup_sent_at, or an offer_* column never ALTERed into the deployed table) makes it reject the ENTIRE upsert — clockin_sent never lands in the DB. silentSyncReminders() (every 30s) then reads the stale row back (clockin_sent=false), detects a diff, and does `shiftReminders = incoming`, CLOBBERING the just-set in-memory true back to false. Next minute the !r.clockinSent guard is false again → it re-sends. Forever, until the send window (start−180min → start−15min) closes. The once-per-minute cadence in the screenshot is exactly the 1/min throttle. FIX 1 (root cause, persistReminder): DROP-AND-RETRY — the full upsert is attempted first (unchanged when every column exists); on a column/schema error it retries with ONLY the long-standing core columns {shift_id, night_sent, night_acked, clockin_sent, clockin_responded, last_reminder_at, updated_at}, so the dedup flags ALWAYS persist and the clobber can never recur even on a stale schema. This mirrors the v60/v71 approval_status graceful-degrade pattern. FIX 2 (belt-and-braces, autoSendShiftReminders): two module-level SESSION Sets (_clockinSentSession / _nightSentSession) keyed by the SAME logical key (worker|date|start|end) remember what this page session already sent, checked before each send and stamped after a successful one. They are never touched by any DB re-sync, so even a persist failure from RLS/network (which drop-and-retry can't fix) caps the damage at ONE message per open tab instead of one per minute. Keyed by worker, so a genuine open-slot refill to a DIFFERENT worker (new logical key) is still allowed to send, preserving the v71 refill-reset behaviour. The DB-backed guards, sibling-row dedupe, in-flight guard, TZ handling, portal-deleted / suspended / cancelled skips are all UNCHANGED. No schema change; the webhook (periskope-webhook v13.3) is NOT touched — it never sends clock-in reminders. To FULLY restore cross-device single-send + all newer persisted fields, run the shift_reminders column adds in Supabase (the console error names the exact missing column). node --check passes (2/2 inline script blocks). Surgical diff: 1 line changed (const→let error) + additive only — persistReminder() drop-and-retry, the two session Sets, two guard checks + two post-send stamps in autoSendShiftReminders(); zero function removals or renames; nothing else touched. -->
@@ -3574,6 +3575,9 @@ async function init() {
   // guarantees a PH-scoped partner never sees SG/MY standby rows.
   allStandby = scopeStandbyToCountry(allStandby);
   await loadShifts();
+  // v90: restore locally-held reminder ticks/acks the loadReminders DB-replace
+  // stripped — must run after loadShifts (logical keys need the shift rows).
+  applyBootReminderSticky();
   // Pull team-wide worker/outlet profile metadata (bans, restrictions, notes)
   // from Supabase, overlaying the localStorage bootstrap. Refresh dependent
   // views once it lands so synced bans/restrictions appear without a reload.
@@ -3734,6 +3738,20 @@ async function loadReminders() {
           appCheckState: (shiftReminders[r.shift_id] && shiftReminders[r.shift_id].appCheckState) || ''
         };
       });
+      // v90: THE REFRESH-WIPE FIX, part 1. This replace is what erased ticks on
+      // reload: the localStorage copy (which HAD the flags) was loaded above, then
+      // thrown away here in favour of DB truth — and the DB write is being
+      // rejected, so its flags sit false. The durable sticky store can't be applied
+      // right here: computing a logical key needs the shift rows, and loadReminders
+      // runs BEFORE loadShifts at boot. So: stash the pre-replace snapshot, apply a
+      // best-effort pass now (no-op while allShifts is empty; covers any later
+      // call), and let init() run the real pass right after loadShifts — see
+      // applyBootReminderSticky(). Critically, the snapshot is taken BEFORE this
+      // view overwrites the localStorage backup below.
+      try {
+        _bootReminderSnapshot = JSON.parse(localStorage.getItem('shift_reminders') || '{}');
+        applyStickyOverReminders(_bootReminderSnapshot);
+      } catch(e) {}
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
     }
     // If empty or error: keep the localStorage version already loaded above
@@ -4072,13 +4090,13 @@ async function silentSyncReminders() {
       Object.keys(incoming).forEach(id => applyStickySendFlags(id, incoming[id]));
       // v89: and if the DB has NO row at all for a shift this session sent to (the
       // whole upsert was rejected), the wholesale replace would erase the record —
-      // carry it over so the ✓ survives.
+      // carry it over so the ✓ survives. (v90: ack flags now sticky too.)
       Object.keys(shiftReminders).forEach(id => {
         if (incoming[id]) return;
         const cur = shiftReminders[id] || {};
-        if (!cur.nightSent && !cur.clockinSent) return;
-        const probe = applyStickySendFlags(id, { nightSent:false, clockinSent:false });
-        if (probe.nightSent || probe.clockinSent) incoming[id] = cur;
+        if (!cur.nightSent && !cur.clockinSent && !cur.nightAcked && !cur.clockinResponded) return;
+        const probe = applyStickySendFlags(id, { nightSent:false, clockinSent:false, nightAcked:false, clockinResponded:false });
+        if (probe.nightSent || probe.clockinSent || probe.nightAcked || probe.clockinResponded) incoming[id] = cur;
       });
       shiftReminders = incoming;
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
@@ -4107,22 +4125,27 @@ async function toggleReminder(shiftId, field, checked) {
   // worker themselves) — treat it exactly like a send: sticky in this session (the
   // ✓ can't be clobbered by a stale DB read) and claimed team-wide (the auto sweep
   // on every device stands down). Un-ticking reverses both, so a deliberate
-  // "send it again tonight" works.
-  if (field === 'nightSent' || field === 'clockinSent') {
+  // "send it again tonight" works. v90: acknowledgement ticks are sticky too, and
+  // all four survive refreshes via the durable store.
+  if (field === 'nightSent' || field === 'clockinSent' || field === 'nightAcked' || field === 'clockinResponded') {
     try {
       const s = (allShifts||[]).find(x => String(x.id) === String(shiftId)) || (taskShiftCache||{})[String(shiftId)];
       if (s) {
         const lk = reminderLogicalKey(s);
-        const set = (field === 'nightSent') ? _nightSentSession : _clockinSentSession;
+        const set = field === 'nightSent' ? _nightSentSession
+                  : field === 'clockinSent' ? _clockinSentSession
+                  : field === 'nightAcked' ? _nightAckedSticky
+                  : _clockinRespondedSticky;
+        const isSend = (field === 'nightSent' || field === 'clockinSent');
         const type = (field === 'nightSent') ? 'night' : 'clockin';
         const phone = workerPhone(s.worker_name);
         if (checked) {
-          set.add(lk);
-          if (phone) markReminderClaimOutcome(reminderClaimKey(type, phone, s), true);
+          set.add(lk); _stickySave();
+          if (isSend && phone) markReminderClaimOutcome(reminderClaimKey(type, phone, s), true);
         } else {
-          set.delete(lk);
+          set.delete(lk); _stickySave();
           _stickyRepushed.delete(String(shiftId));
-          if (phone) { try { supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey(type, phone, s)).then(()=>{}, ()=>{}); } catch(e) {} }
+          if (isSend && phone) { try { supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey(type, phone, s)).then(()=>{}, ()=>{}); } catch(e) {} }
         }
       }
     } catch(e) {}
@@ -4141,6 +4164,19 @@ async function toggleReminder(shiftId, field, checked) {
 // re-filled (import open-slot fill / in-app fill). Persists so teammates sync.
 async function resetReminderLifecycleForRefill(shiftId) {
   if (!shiftId) return;
+  // v90: drop durable sticky keys tied to this slot's OUTGOING occupancy — if the
+  // same worker is later re-booked into this slot, a leftover sticky key would
+  // suppress their fresh reminders. (A different worker has a different key and
+  // was never affected.)
+  try {
+    const s0 = (allShifts||[]).find(x => String(x.id) === String(shiftId)) || (taskShiftCache||{})[String(shiftId)];
+    if (s0) {
+      const lk0 = reminderLogicalKey(s0);
+      _nightSentSession.delete(lk0); _clockinSentSession.delete(lk0);
+      _nightAckedSticky.delete(lk0); _clockinRespondedSticky.delete(lk0);
+      _stickyRepushed.delete(String(shiftId)); _stickySave();
+    }
+  } catch(e) {}
   shiftReminders[shiftId] = {
     nightSent: false, nightAcked: false,
     clockinSent: false, clockinResponded: false,
@@ -4163,6 +4199,18 @@ async function markWorkerAcknowledged(shiftId) {
   const r = shiftReminders[shiftId];
   if (r.clockinSent) r.clockinResponded = true;
   if (r.nightSent || !r.clockinSent) r.nightAcked = true;
+  // v90: banner-button acknowledgements are durably sticky — they must survive the
+  // DB clobber AND a page refresh (they die in the same rejected shift_reminders
+  // write as the send-ticks).
+  try {
+    const s0 = (taskShiftCache||{})[String(shiftId)] || (allShifts||[]).find(x => String(x.id) === String(shiftId));
+    if (s0) {
+      const lk0 = reminderLogicalKey(s0);
+      if (r.clockinResponded) _clockinRespondedSticky.add(lk0);
+      if (r.nightAcked) _nightAckedSticky.add(lk0);
+      _stickySave();
+    }
+  } catch(e) {}
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
   await persistReminder(shiftId);
@@ -4170,6 +4218,22 @@ async function markWorkerAcknowledged(shiftId) {
   toast(`✓ ${s ? (String(s.worker_name||'Worker').split(' ')[0]) : 'Worker'} marked acknowledged`);
 }
 async function undoFullAck(shiftId) {
+  // v90: clear the durable sticky keys FIRST — otherwise the very next sync/boot
+  // pass would restore the flags this undo is trying to remove.
+  try {
+    const s0 = (taskShiftCache||{})[String(shiftId)] || (allShifts||[]).find(x => String(x.id) === String(shiftId));
+    if (s0) {
+      const lk0 = reminderLogicalKey(s0);
+      _nightSentSession.delete(lk0); _clockinSentSession.delete(lk0);
+      _nightAckedSticky.delete(lk0); _clockinRespondedSticky.delete(lk0);
+      _stickyRepushed.delete(String(shiftId)); _stickySave();
+      const ph0 = workerPhone(s0.worker_name);
+      if (ph0) { try {
+        supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey('night', ph0, s0)).then(()=>{}, ()=>{});
+        supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey('clockin', ph0, s0)).then(()=>{}, ()=>{});
+      } catch(e) {} }
+    }
+  } catch(e) {}
   shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '', offeredNames: [], offerSentAt: '', offerAccepted: false, offerAcceptedBy: '', offerAcceptedAt: '', offerOutletInformed: false };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
@@ -9509,6 +9573,39 @@ let _reminderSweepInFlight = false; // v77b: prevents overlapping async sweeps (
 // refill to a DIFFERENT worker (new logical key) is still allowed to send.
 const _clockinSentSession = new Set();
 const _nightSentSession = new Set();
+// v90: DURABLE STICKY STORE — the v89 Sets were in-memory only, so a page REFRESH
+// emptied them; loadReminders() then let the Supabase read (whose writes are still
+// being rejected, so its flags sit false) REPLACE shiftReminders AND overwrite the
+// localStorage backup — wiping every sent-tick and acknowledgement on refresh, and
+// with them the green "✅ Fully acknowledged" banner (it requires all four flags).
+// The four Sets (night/clock-in SENT + night acked / clock-in responded) are now
+// persisted to localStorage under 'reminder_sticky_v1' and reloaded at boot, so a
+// tick set on THIS device survives any number of refreshes regardless of the DB.
+// Keys are the same worker|date|start|end logical keys (worker-scoped: a refill to
+// a new worker is unaffected); entries older than 3 days are pruned at load.
+const _nightAckedSticky = new Set();
+const _clockinRespondedSticky = new Set();
+function _stickySave() {
+  try {
+    localStorage.setItem('reminder_sticky_v1', JSON.stringify({
+      ns: Array.from(_nightSentSession), cs: Array.from(_clockinSentSession),
+      na: Array.from(_nightAckedSticky), cr: Array.from(_clockinRespondedSticky)
+    }));
+  } catch(e) {}
+}
+(function _stickyLoad() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('reminder_sticky_v1') || '{}');
+    const cutoff = (function(){ const d = new Date(Date.now() - 3*86400000);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    const fresh = (k) => { const dt = String(k||'').split('|')[1] || ''; return dt >= cutoff; };
+    (raw.ns||[]).filter(fresh).forEach(k => _nightSentSession.add(k));
+    (raw.cs||[]).filter(fresh).forEach(k => _clockinSentSession.add(k));
+    (raw.na||[]).filter(fresh).forEach(k => _nightAckedSticky.add(k));
+    (raw.cr||[]).filter(fresh).forEach(k => _clockinRespondedSticky.add(k));
+    _stickySave(); // write back the pruned view
+  } catch(e) {}
+})();
 let _rsentPrunedAt = 0; // v88: throttles the best-effort daily prune of reminder-claim rows
 // v89: stable per-browser id so claim rows say WHO claimed (diagnosis only).
 const _shiftopsDeviceId = (function(){ try { let d = localStorage.getItem('shiftops_device_id'); if (!d) { d = 'd' + Math.random().toString(36).slice(2,10); localStorage.setItem('shiftops_device_id', d); } return d; } catch(e){ return 'd' + Math.random().toString(36).slice(2,10); } })();
@@ -9530,6 +9627,39 @@ function reminderLogicalKey(s) {
 // its reminders are unaffected. Re-pushes the row once per shift per session so the
 // DB heals itself the moment writes start working again.
 const _stickyRepushed = new Set();
+// v90: one shared pass — sticky over every known reminder record, plus carry-over of
+// snapshot records the DB view dropped entirely. Used by silentSyncReminders and by
+// the boot path (applyBootReminderSticky).
+let _bootReminderSnapshot = null;
+function applyStickyOverReminders(snapshot) {
+  try {
+    Object.keys(shiftReminders).forEach(id => applyStickySendFlags(id, shiftReminders[id]));
+    Object.keys(snapshot || {}).forEach(id => {
+      if (shiftReminders[id]) return;
+      const cur = snapshot[id] || {};
+      if (!cur.nightSent && !cur.clockinSent && !cur.nightAcked && !cur.clockinResponded) return;
+      const probe = applyStickySendFlags(id, { nightSent:false, clockinSent:false, nightAcked:false, clockinResponded:false });
+      if (probe.nightSent || probe.clockinSent || probe.nightAcked || probe.clockinResponded) shiftReminders[id] = cur;
+    });
+  } catch(e) {}
+}
+// v90: THE REFRESH-WIPE FIX, part 2 — runs in init() right AFTER loadShifts, the
+// earliest moment logical keys are computable. Restores the ticks the loadReminders
+// DB-replace stripped, repairs the localStorage backup, and refreshes the affected
+// rows so the ✓s and the green "Fully acknowledged" banner are correct on first paint.
+function applyBootReminderSticky() {
+  try {
+    const before = JSON.stringify(shiftReminders);
+    applyStickyOverReminders(_bootReminderSnapshot);
+    _bootReminderSnapshot = null;
+    if (JSON.stringify(shiftReminders) !== before) {
+      localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+      Object.keys(shiftReminders).forEach(id => { try { updateReminderPanelInPlace(id); } catch(e) {} });
+      try { checkReminderAlerts(); } catch(e) {}
+      console.log('[sticky] boot pass restored locally-held reminder flags after the DB replace.');
+    }
+  } catch(e) {}
+}
 function applyStickySendFlags(shiftId, rec) {
   try {
     const s = (allShifts||[]).find(x => String(x.id) === String(shiftId)) || (taskShiftCache||{})[String(shiftId)];
@@ -9538,6 +9668,12 @@ function applyStickySendFlags(shiftId, rec) {
     let held = false;
     if (_nightSentSession.has(lk) && !rec.nightSent) { rec.nightSent = true; held = true; }
     if (_clockinSentSession.has(lk) && !rec.clockinSent) { rec.clockinSent = true; held = true; }
+    // v90: acknowledgements are sticky too — ops-set acks (banner button / hand-tick)
+    // die in the same rejected DB write, wiping the ✓ and the green "Fully
+    // acknowledged" banner on refresh. Webhook-set acks (worker replies OK) are
+    // written with the service role and survive in the DB on their own.
+    if (_nightAckedSticky.has(lk) && !rec.nightAcked) { rec.nightAcked = true; held = true; }
+    if (_clockinRespondedSticky.has(lk) && !rec.clockinResponded) { rec.clockinResponded = true; held = true; }
     if (held && !_stickyRepushed.has(String(shiftId))) {
       _stickyRepushed.add(String(shiftId));
       try { persistReminder(shiftId); } catch(e) {}
@@ -9750,7 +9886,7 @@ async function autoSendShiftReminders() {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
           shiftReminders[s.id].nightSent = true;
           shiftReminders[s.id].lastReminderAt = new Date().toISOString();
-          _nightSentSession.add(lk);
+          _nightSentSession.add(lk); _stickySave();
           persistReminder(s.id);
           continue;
         } else if (verdict === 'wait') {
@@ -9771,7 +9907,7 @@ async function autoSendShiftReminders() {
         shiftReminders[s.id].nightSent = true;
         shiftReminders[s.id].lastReminderAt = new Date().toISOString();
         await persistReminder(s.id);
-        _nightSentSession.add(lk); // v87: remember for the whole session, independent of the DB round-trip
+        _nightSentSession.add(lk); _stickySave(); // v87/v90: remembered for the session AND durably across refreshes
         toast(`🌙 Night reminder sent to ${workerName}`);
       } else {
         _nightSentThisSweep.delete(lk);                               // failed → allow retry
@@ -9806,7 +9942,7 @@ async function autoSendShiftReminders() {
             if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
             shiftReminders[s.id].clockinSent = true;
             shiftReminders[s.id].lastReminderAt = new Date().toISOString();
-            _clockinSentSession.add(lk);
+            _clockinSentSession.add(lk); _stickySave();
             persistReminder(s.id);
             continue;
           } else if (verdict === 'wait') {
@@ -9827,7 +9963,7 @@ async function autoSendShiftReminders() {
           shiftReminders[s.id].clockinSent = true;
           shiftReminders[s.id].lastReminderAt = new Date().toISOString();
           await persistReminder(s.id);
-          _clockinSentSession.add(lk); // v87: remember for the whole session, independent of the DB round-trip
+          _clockinSentSession.add(lk); _stickySave(); // v87/v90: remembered for the session AND durably across refreshes
           toast(`⏰ Clock-in reminder sent to ${workerName}`);
         } else {
           _clockinSentThisSweep.delete(lk);
@@ -9957,7 +10093,7 @@ async function manualSendReminder(shiftId, type) {
     // the automation defers to this record.
     try {
       const lk = reminderLogicalKey(s);
-      (type === 'night' ? _nightSentSession : _clockinSentSession).add(lk);
+      (type === 'night' ? _nightSentSession : _clockinSentSession).add(lk); _stickySave();
       markReminderClaimOutcome(reminderClaimKey(type === 'night' ? 'night' : 'clockin', phone, s), true);
     } catch(e) {}
     await persistReminder(shiftId);
