@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v91 (TICKS NOW SURVIVE REFRESH ON EVERY DEVICE + MALAYSIA BILLING RM12.50 MISMATCH + CURRENCY SYMBOLS) — Worked from the v90 (July4_1index_v86) build. THREE ops reports. (1) TICKS STILL VANISH ON REFRESH (6 Jul screen recording, iPhone): v90's durable sticky store is per-device localStorage — only the device that SET a tick could restore it, so a phone that merely DISPLAYED ticks set elsewhere wiped them on pull-to-refresh. Working around per-device storage can never satisfy "the tick should remain regardless of whoever refreshes"; a working SHARED store is required, and one already exists: app_settings — every auto/manual send since v88 writes an rsent:* claim with sent:true (proven writable team-wide). FIX: new syncTicksFromClaims() reads all rsent:% claims (fetch cached/throttled 60s) and, for every loaded shift whose claim says sent && !undone, forces the matching flag true, stamps the local durable store, repaints, and repairs the localStorage backup — on EVERY device, after ANY refresh, with NO shift_reminders write needed. Wired at boot (init, right after applyBootReminderSticky, force-fetch) and on the 30s silentSyncReminders cadence (also covers date navigation). Ops ACKS now publish claims too: markWorkerAcknowledged and toggleReminder write 'nightack'/'clockinack' claims (webhook acks already survive via service-role DB writes). UNDO SAFETY: unticks and undoFullAck now write a POSITIVE undone:true marker via upsert (markReminderClaimUndone) BEFORE the best-effort delete — a silently RLS-blocked delete would otherwise leave a sent:true ghost re-ticking the box on every device; the restore engine skips undone claims, resolveLostClaim treats undone as reclaimable (deliberate re-send works), and the local claim cache is invalidated on untick/undo. Claim prune window 2d→7d since claims now back the visible ticks. (2) INVOICE $4506.00 vs EXCEL RM4493.50: traced to exactly two late-arrival rows (3/6 KHAIRUL sched 12:00 in 12:39: 63.75→56.25 = +7.50; 4/6 KHAIRUL sched 18:00 in 18:25: 52.50→47.50 = +5.00; Δ=12.50). The EXCEL was wrong: buildClientUsageWorkbook used netPaymentForShift — WORKER-side money (payout − late penalty − overpayment deduction + transport + compensation) — in a CLIENT usage report. That under-billed the client by the workers' late-penalty fines (penalties are the worker's fine to Anytime Work, NOT a client discount — counted hours already start from the late clock-in), would DOUBLE-COUNT transport (inside Payout AND the Transport column AND the invoice's separate taxi PTC line), and leaked SR worker-pay math into client documents. FIX: the Excel row amount is now payoutForShift — the same figure the invoice preview and Reports "Client billing" use — so attachment and invoice always agree by construction (both now RM4506.00 for this client). (3) CURRENCY SYMBOLS: the invoice-preview modal hardcoded "$" on five renders (per-outlet payout — the "$4506.00" on a Malaysia invoice — taxi, compensation, commission, subtotal) → all now billingCurrencySymbol(); the Excel detail headers hardcoded ($/hr)/($) → now built from billingCurrencySymbol() (RM/₱/$). Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (cross-device refresh restore from claims incl. the recorded phone scenario, undone-marker semantics with blocked deletes, undo non-resurrection, billing recompute: the uploaded June workbook re-totals to RM4506.00 = invoice, transport not double-counted). Surgical diff: syncTicksFromClaims + markReminderClaimUndone + cache (new top-level, v88/89 region), resolveLostClaim one added branch, init one added call, silentSyncReminders one added call, toggleReminder claim-type/undone rework (v90's own lines), markWorkerAcknowledged + undoFullAck additive claim publishing (v90's own lines), prune constant (v88's own line), buildClientUsageWorkbook amount fn + headers, invoice-preview 5 currency renders; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v90 (REFRESH WIPES SENT-TICKS + ACKS; GREEN "FULLY ACKNOWLEDGED" GONE) — Worked from the v89 (July4_1index_v86) build. Ops report: sent-ticks AND worker-acknowledged ticks vanish on page refresh, and the green "✅ Fully acknowledged" banner no longer appears. DIAGNOSIS: (1) the green banner is not a separate bug — it renders when ALL FOUR flags hold (nightSent && nightAcked && clockinSent && clockinResponded, line ~4527), so the flag wipe kills it. (2) THE WIPE: v89's sticky guard lives in in-memory Sets that are EMPTY on a fresh page. loadReminders() loads localStorage first (the ticks WERE safe there), but if the Supabase read returns any rows it REPLACES shiftReminders wholesale with DB truth — whose writes are still being rejected, so its flags sit false — and then OVERWRITES the localStorage backup with the clobbered view. Every refresh therefore destroyed both the live flags and their only surviving copy. (3) ACK flags (nightAcked/clockinResponded) set by ops (hand-tick / banner button) die in the same rejected write; only webhook-set acks (service-role) survive in the DB. FIX: (A) DURABLE STICKY STORE — the two v89 Sets plus two NEW ack Sets (_nightAckedSticky/_clockinRespondedSticky) are persisted to localStorage ('reminder_sticky_v1'; same worker|date|start|end keys, worker-scoped; entries >3 days pruned at load) and reloaded at script start; _stickySave() is called at every mutation site (both sweep branches incl. lost-claim marks, manualSendReminder, toggleReminder, markWorkerAcknowledged). (B) BOOT-ORDER FIX — the sticky pass can't run inside loadReminders (logical keys need shift rows; loadReminders runs BEFORE loadShifts in init's Promise.all), so loadReminders now stashes the PRE-replace localStorage snapshot (_bootReminderSnapshot, captured BEFORE the backup is overwritten) and init() calls new applyBootReminderSticky() right AFTER loadShifts: shared applyStickyOverReminders() re-applies all four flags over the DB view, carries over records the DB has no row for at all, repairs the localStorage backup, and refreshes affected rows — so ticks and the green banner are correct on first paint. silentSyncReminders now uses the same shared pass (ack flags included). (C) applyStickySendFlags extended to nightAcked/clockinResponded. (D) CONSISTENCY GUARDS — undoFullAck clears all four sticky keys FIRST (else the next sync would resurrect the flags the undo removes) and best-effort deletes both send-claims; resetReminderLifecycleForRefill drops sticky keys for the OUTGOING occupancy so the SAME worker re-booked into the slot still gets fresh reminders (a different worker was never affected); toggleReminder handles all four fields with add/delete + save. Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (refresh-cycle restore, ack stickiness, green-banner predicate, undo non-resurrection, refill re-send, 3-day prune). Surgical diff: sticky-store block + helpers (top-level, v89 region), loadReminders snapshot hook, ONE line in init() (applyBootReminderSticky after loadShifts), silentSyncReminders pass swapped to the shared helper (v89's own lines), toggleReminder/manualSendReminder/markWorkerAcknowledged/undoFullAck/resetReminderLifecycleForRefill additive blocks, four one-line _stickySave() taps in the sweep (v88/v89's own lines); zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v89 (NIGHT REMINDERS NOT SENT AT 9PM + SENT-TICK VANISHES) — Worked from the v88 (July4_1index_v86) build. TWO ops reports: (A) night reminders don't reach workers at 9pm; (B) after a manual send the "Reminder sent" ✓ disappears a little later as if never sent. DIAGNOSIS — three interacting faults, one of them INTRODUCED BY v88: (1) v88 GHOST-CLAIM BUG (owned): when a device WON the app_settings claim but the Periskope send then FAILED, v88 released the claim with a DELETE — and if that delete was silently rejected (e.g. RLS that permits INSERT but not DELETE), the orphaned claim made every device's sweep read 'lost' → mark nightSent=true locally WITHOUT ANYONE EVER SENDING (ticks shown, worker got nothing — exactly the 4 Jul screenshot). FIX: a claim is now only PROOF OF INTENT; the winner records the OUTCOME on the row via upsert (sent:true / failed:true — upserts on app_settings are the app's proven write path), and a losing device resolves the claim instead of trusting it: sent→stand down + mark local; failed OR stale (>2 min, no outcome — winner died mid-send)→TAKE OVER and send; fresh pending (<2 min)→do nothing this sweep and re-check next minute. releaseReminderClaim now marks failed:true FIRST and keeps delete as best-effort cleanup only. (2) 5-MINUTE NIGHT WINDOW: 21:00–21:05 only fired if a tab was open, FOREGROUNDED and un-throttled in those exact minutes — browsers throttle background-tab timers, so a minimised tab misses the whole window and nothing sends (all sending is client-side). The narrowness was v77b's dupe protection, but dedup is now claim-based, so the window is WIDENED to 21:00–22:30 (1260–1350): still fires AT 9pm when a tab is live, and a tab opened later back-fills instead of silently skipping the night. THIS IS THE ONE BEHAVIOURAL CHANGE TO PRE-v88 CODE (one constant, 1265→1350). (3) SENT-TICK CLOBBER (why ✓ vanishes): persistReminder is still being REJECTED by a NON-column error (v87's retry only catches missing-column; the verbatim DB error — likely RLS on shift_reminders — was hidden behind a generic toast). The DB therefore never holds night_sent=true, and BOTH re-sync paths (silentSyncReminders' wholesale `shiftReminders = incoming` AND the realtime handler's per-row replace — which the WEBHOOK triggers with service-role writes whose night_sent is false) clobber the local ✓. FIX: STICKY SEND FLAGS — new applyStickySendFlags() refuses to let any DB read downgrade a nightSent/clockinSent this session set (keyed by the session Sets' logical worker|date|start|end key, so a refill to a NEW worker is untouched), restores records the DB has no row for at all, re-pushes once per shift so the DB heals when writes work again, and is applied in BOTH silentSyncReminders and the realtime handler. persistReminder additionally shows the VERBATIM database error once (new toast) so the real cause gets fixed at the source. (4) MANUAL PATHS JOIN THE SAME MACHINERY: manualSendReminder stamps the session Set + records a sent claim after success (auto sweep on every device stands down; a human pressing the button always sends). toggleReminder: hand-ticking "Reminder sent" = sticky + sent claim (ops WhatsApped the worker themselves — automation must not double-send); un-ticking removes both so a deliberate re-send works. New helpers: reminderLogicalKey, applyStickySendFlags, markReminderClaimOutcome, resolveLostClaim, markReminderClaimTakeover, _shiftopsDeviceId, _stickyRepushed. Webhook NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: night-window constant (the one pre-v88 behavioural change) + claim-lifecycle rework inside v88's own additions + sticky hooks at the two re-sync replace points + manualSendReminder/toggleReminder additions; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v88 (CLOCK-IN REMINDER STILL SENT 2–4× — CROSS-DEVICE/TAB/RELOAD DUPES) — Worked from the v87 (July4_1index_v86) build. After v87 the flood dropped from dozens (1/min) to 2–4 repeats to the SAME worker — the tell that v87 worked: its in-memory guards (_clockinSentSession / _clockinSentThisSweep / siblingAlreadySent / live.clockinSent) all dedupe within ONE page session, so 2–4 residual sends = 2–4 independent senders (open tabs / devices / a reloaded tab) that cannot see each other's in-memory flag. The ONLY thing gating two DIFFERENT devices was live.clockinSent, which is rebuilt wholesale by silentSyncReminders() from the shift_reminders table every 30s — so cross-device dedup requires the clockin_sent WRITE to land in that table AND replicate before the other device's next minute-sweep. The original clobber proved that write was not holding (DB sat at false), and v87's drop-and-retry only rescues a MISSING-COLUMN rejection — an RLS/permission/constraint rejection still leaves clockin_sent unwritten, so every session sends once. ROOT FIX (v88): stop trusting shift_reminders for send-coordination and use an ATOMIC CLAIM in app_settings — the table the app already writes to reliably team-wide (profile_meta, confirm_batches, import/approval ledgers, billing, team_tasks; every access is keyed .upsert(onConflict:'key'), so key is unique/PK, and nothing loads it wholesale). New claimReminderSend(type,phone,s) does a PLAIN INSERT (not upsert) on key `rsent:<type>:<phone-digits>:<date>:<start>:<end>`: the FIRST caller across ALL devices inserts ('won' → send); every other caller hits the unique-key violation ('lost' → stand down, mark local flags sent so it stops retrying). Keyed by PHONE not worker_name, so name variants ("Firdaus" vs "Sheikh Firdaus") for the same recipient can't slip a second message through; keyed by DATE so it self-resets daily. A send FAILURE after a 'won' claim releases the key (releaseReminderClaim) so a genuine retry can re-fire. A NON-duplicate write rejection returns 'error' → best-effort send (no regression to zero reminders) + a ONE-TIME loud toast/console error naming app_settings/RLS as the cause, so a truly unwritable DB is diagnosed instead of silently duplicating. Wired into BOTH the clock-in and night branches, AFTER all the cheap v87 local guards (so the DB is touched only when actually about to send — at most once per logical send per session). Best-effort ~hourly prune drops rsent: rows >2 days old (dated keys; housekeeping only). No schema change; the periskope-webhook is NOT touched (it never sends clock-in reminders). node --check passes (2/2 inline script blocks). Surgical diff: PURELY ADDITIVE except the two send-blocks being wrapped — autoSendShiftReminders() (claim wrap on both branches + prune) plus three new top-level helpers (reminderClaimKey / claimReminderSend / releaseReminderClaim) and one throttle var; zero function removals or renames; nothing else touched. NOTE: like every other reminder path this runs while a browser tab is open; the app_settings claim now makes ANY number of open tabs/devices converge on a single send. -->
@@ -3578,6 +3579,9 @@ async function init() {
   // v90: restore locally-held reminder ticks/acks the loadReminders DB-replace
   // stripped — must run after loadShifts (logical keys need the shift rows).
   applyBootReminderSticky();
+  // v91: then restore team-wide from app_settings claims, so ticks set by ANY
+  // device survive a refresh on THIS device (fire-and-forget; repaints on arrival).
+  try { syncTicksFromClaims(true); } catch(e) {}
   // Pull team-wide worker/outlet profile metadata (bans, restrictions, notes)
   // from Supabase, overlaying the localStorage bootstrap. Refresh dependent
   // views once it lands so synced bans/restrictions appear without a reload.
@@ -4084,6 +4088,9 @@ async function silentSyncReminders() {
         changed.push(id);
       }
     });
+    // v91: team-wide claim restore rides the same 30s cadence (fetch self-throttled
+    // to 60s) — also covers date navigation, since allShifts is whatever is loaded.
+    try { syncTicksFromClaims(false); } catch(e) {}
     if (changed.length > 0) {
       // v89: STICKY SEND FLAGS — never let a stale DB read un-tick a send this
       // session performed (auto, manual button, or hand-tick). See applyStickySendFlags.
@@ -4136,16 +4143,25 @@ async function toggleReminder(shiftId, field, checked) {
                   : field === 'clockinSent' ? _clockinSentSession
                   : field === 'nightAcked' ? _nightAckedSticky
                   : _clockinRespondedSticky;
-        const isSend = (field === 'nightSent' || field === 'clockinSent');
-        const type = (field === 'nightSent') ? 'night' : 'clockin';
         const phone = workerPhone(s.worker_name);
+        // v91: ack ticks publish team-wide claims too, and EVERY untick writes a
+        // positive undone marker (delete alone can be silently RLS-blocked, which
+        // would leave a sent:true ghost re-ticking the box on every device).
+        const claimType = field === 'nightSent' ? 'night'
+                        : field === 'clockinSent' ? 'clockin'
+                        : field === 'nightAcked' ? 'nightack'
+                        : 'clockinack';
         if (checked) {
           set.add(lk); _stickySave();
-          if (isSend && phone) markReminderClaimOutcome(reminderClaimKey(type, phone, s), true);
+          if (phone) markReminderClaimOutcome(reminderClaimKey(claimType, phone, s), true);
         } else {
           set.delete(lk); _stickySave();
           _stickyRepushed.delete(String(shiftId));
-          if (isSend && phone) { try { supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey(type, phone, s)).then(()=>{}, ()=>{}); } catch(e) {} }
+          if (phone) {
+            markReminderClaimUndone(reminderClaimKey(claimType, phone, s));
+            try { supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey(claimType, phone, s)).then(()=>{}, ()=>{}); } catch(e) {}
+          }
+          if (_claimTickCache.map) delete _claimTickCache.map[reminderClaimKey(claimType, phone || '', s)];
         }
       }
     } catch(e) {}
@@ -4209,6 +4225,13 @@ async function markWorkerAcknowledged(shiftId) {
       if (r.clockinResponded) _clockinRespondedSticky.add(lk0);
       if (r.nightAcked) _nightAckedSticky.add(lk0);
       _stickySave();
+      // v91: publish the ack team-wide (claims are the working shared store) so
+      // every device restores it after any refresh.
+      const ph0 = workerPhone(s0.worker_name);
+      if (ph0) {
+        if (r.nightAcked) markReminderClaimOutcome(reminderClaimKey('nightack', ph0, s0), true);
+        if (r.clockinResponded) markReminderClaimOutcome(reminderClaimKey('clockinack', ph0, s0), true);
+      }
     }
   } catch(e) {}
   updateReminderPanelInPlace(shiftId);
@@ -4229,8 +4252,15 @@ async function undoFullAck(shiftId) {
       _stickyRepushed.delete(String(shiftId)); _stickySave();
       const ph0 = workerPhone(s0.worker_name);
       if (ph0) { try {
-        supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey('night', ph0, s0)).then(()=>{}, ()=>{});
-        supabaseClient.from('app_settings').delete().eq('key', reminderClaimKey('clockin', ph0, s0)).then(()=>{}, ()=>{});
+        // v91: positive undone markers first (deletes can be silently blocked —
+        // a surviving sent:true claim would resurrect the ticks on every device),
+        // then best-effort deletes, then drop them from this device's cache.
+        ['night','clockin','nightack','clockinack'].forEach(t => {
+          const k = reminderClaimKey(t, ph0, s0);
+          markReminderClaimUndone(k);
+          supabaseClient.from('app_settings').delete().eq('key', k).then(()=>{}, ()=>{});
+          if (_claimTickCache.map) delete _claimTickCache.map[k];
+        });
       } catch(e) {} }
     }
   } catch(e) {}
@@ -9751,6 +9781,7 @@ async function resolveLostClaim(key) {
     const { data } = await supabaseClient.from('app_settings').select('value, updated_at').eq('key', key).maybeSingle();
     if (!data) return 'retry'; // row vanished (deleted between insert-conflict and this read)
     const v = data.value || {};
+    if (v.undone === true) { await markReminderClaimTakeover(key); return 'retry'; } // v91: undo re-arms the claim
     if (v.sent === true) return 'sent';
     if (v.failed === true) { await markReminderClaimTakeover(key); return 'retry'; }
     const at = new Date(v.at || data.updated_at || 0).getTime();
@@ -9763,6 +9794,67 @@ async function markReminderClaimTakeover(key) {
     await supabaseClient.from('app_settings').upsert(
       { key, value: { at: new Date().toISOString(), device: _shiftopsDeviceId, retaken: true }, updated_at: new Date().toISOString() }, { onConflict: 'key' });
   } catch(e) {}
+}
+// v91: positive UNDO marker. Untick/undo can't rely on DELETE (an RLS-blocked
+// delete leaves a sent:true ghost that would resurrect the tick on every device);
+// instead the claim value is overwritten via upsert — the proven write path.
+// The claims→ticks restore skips undone claims and resolveLostClaim treats them
+// as reclaimable so a deliberate re-send works.
+async function markReminderClaimUndone(key) {
+  try {
+    await supabaseClient.from('app_settings').upsert(
+      { key, value: { at: new Date().toISOString(), device: _shiftopsDeviceId, undone: true }, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  } catch(e) {}
+}
+// v91: TEAM-WIDE TICK RESTORE FROM CLAIMS — the fix for "ticks vanish when ANY
+// device refreshes". v90's durable sticky store is per-device localStorage: only
+// the device that SET a tick could restore it, so a phone that merely displayed
+// ticks set elsewhere wiped them on pull-to-refresh (the 6 Jul screen recording).
+// The team-wide record that provably works is app_settings: every auto/manual
+// send since v88 writes a claim with sent:true, and ops acks now write
+// nightack/clockinack claims. This engine reads all rsent:% rows (throttled,
+// cached 60s), and for every loaded shift whose claim says sent && !undone,
+// forces the matching flag true, stamps the local durable store, and repaints —
+// on EVERY device, after ANY refresh, with no shift_reminders write needed.
+const _claimTickCache = { map: null, at: 0 };
+async function syncTicksFromClaims(forceFetch) {
+  try {
+    const now = Date.now();
+    if (forceFetch || !_claimTickCache.map || (now - _claimTickCache.at) > 60000) {
+      const { data, error } = await supabaseClient.from('app_settings').select('key, value').like('key', 'rsent:%');
+      if (error) { console.warn('[claim-restore] read failed:', error); if (!_claimTickCache.map) return; }
+      else { const m = {}; (data || []).forEach(r => { m[r.key] = r.value || {}; }); _claimTickCache.map = m; _claimTickCache.at = now; }
+    }
+    const map = _claimTickCache.map; if (!map) return;
+    const isOn = v => v && v.sent === true && v.undone !== true;
+    let changedIds = [];
+    for (const s of (allShifts || [])) {
+      if (!s || !s.worker_name || s.cancelled) continue;
+      const phone = workerPhone(s.worker_name); if (!phone) continue;
+      const lk = reminderLogicalKey(s);
+      const marks = [
+        ['night',      'nightSent',        _nightSentSession],
+        ['clockin',    'clockinSent',      _clockinSentSession],
+        ['nightack',   'nightAcked',       _nightAckedSticky],
+        ['clockinack', 'clockinResponded', _clockinRespondedSticky],
+      ];
+      let touched = false;
+      for (const [type, field, set] of marks) {
+        if (!isOn(map[reminderClaimKey(type, phone, s)])) continue;
+        if (!set.has(lk)) { set.add(lk); }
+        if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
+        if (!shiftReminders[s.id][field]) { shiftReminders[s.id][field] = true; touched = true; }
+      }
+      if (touched) changedIds.push(String(s.id));
+    }
+    if (changedIds.length) {
+      _stickySave();
+      localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
+      changedIds.forEach(id => { try { updateReminderPanelInPlace(id); } catch(e) {} });
+      try { checkReminderAlerts(); } catch(e) {}
+      console.log('[claim-restore] restored ticks on', changedIds.length, 'shift(s) from team-wide claims');
+    }
+  } catch(e) { console.warn('[claim-restore] error:', e); }
 }
 async function releaseReminderClaim(key) {
   // v89: DELETE proved unreliable as the failure signal (a rejected delete leaves a
@@ -9789,8 +9881,9 @@ async function autoSendShiftReminders() {
   // stop the table growing; runs at most ~once/hour and never blocks the sweep.
   if (now - _rsentPrunedAt > 3600000) {
     _rsentPrunedAt = now;
+    // v91: 2d → 7d — claims now also back the team-wide tick restore, so keep a week.
     try { supabaseClient.from('app_settings').delete().like('key', 'rsent:%')
-      .lt('updated_at', new Date(now - 2*86400000).toISOString()).then(()=>{}, ()=>{}); } catch(e) {}
+      .lt('updated_at', new Date(now - 7*86400000).toISOString()).then(()=>{}, ()=>{}); } catch(e) {}
   }
 
   try {
@@ -22782,17 +22875,17 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
         <div style="color:var(--text3);font-size:11px;margin-top:4px;white-space:pre-wrap;font-family:var(--mono);line-height:1.5;">${escapeHtml(item.shiftLines.join('\n'))}</div>
       </td>
       <td style="padding:8px 0;text-align:right;vertical-align:top;font-size:10px;color:var(--text3);white-space:nowrap;border-bottom:1px solid var(--border);">11 - Svc AR</td>
-      <td style="padding:8px 0;font-family:var(--mono);color:var(--accent);text-align:right;vertical-align:top;border-bottom:1px solid var(--border);">$${item.payout.toFixed(2)}</td>
+      <td style="padding:8px 0;font-family:var(--mono);color:var(--accent);text-align:right;vertical-align:top;border-bottom:1px solid var(--border);">${billingCurrencySymbol()}${item.payout.toFixed(2)}</td>
     </tr>
     ${item.taxiTotal > 0 ? `<tr>
       <td style="padding:6px 0;border-bottom:1px solid var(--border);"><div style="font-size:12px;">↳ Taxi Fare (${escapeHtml(item.outletName)})</div></td>
       <td style="padding:6px 0;text-align:right;font-size:10px;color:var(--text3);border-bottom:1px solid var(--border);">PTC</td>
-      <td style="padding:6px 0;font-family:var(--mono);color:var(--purple);text-align:right;border-bottom:1px solid var(--border);">$${item.taxiTotal.toFixed(2)}</td>
+      <td style="padding:6px 0;font-family:var(--mono);color:var(--purple);text-align:right;border-bottom:1px solid var(--border);">${billingCurrencySymbol()}${item.taxiTotal.toFixed(2)}</td>
     </tr>` : ''}
     ${item.compTotal > 0 ? `<tr>
       <td style="padding:6px 0;border-bottom:1px solid var(--border);"><div style="font-size:12px;">↳ Compensation — booking not honoured (${escapeHtml(item.outletName)})</div></td>
       <td style="padding:6px 0;text-align:right;font-size:10px;color:var(--text3);border-bottom:1px solid var(--border);">PTC</td>
-      <td style="padding:6px 0;font-family:var(--mono);color:var(--teal);text-align:right;border-bottom:1px solid var(--border);">$${item.compTotal.toFixed(2)}</td>
+      <td style="padding:6px 0;font-family:var(--mono);color:var(--teal);text-align:right;border-bottom:1px solid var(--border);">${billingCurrencySymbol()}${item.compTotal.toFixed(2)}</td>
     </tr>` : ''}
   `).join('');
 
@@ -22816,14 +22909,14 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
             <tr>
               <td style="padding:8px 0;"><div style="font-weight:600;">${d.billingMode === 'flat' ? `Service Fee (${d.commissionLabel})` : `${d.commissionPct}% Commission Fee`}</div></td>
               <td style="padding:8px 0;text-align:right;font-size:10px;color:var(--text3);">200 - Sales</td>
-              <td style="padding:8px 0;font-family:var(--mono);color:var(--amber);text-align:right;">$${d.commissionAmt.toFixed(2)}</td>
+              <td style="padding:8px 0;font-family:var(--mono);color:var(--amber);text-align:right;">${billingCurrencySymbol()}${d.commissionAmt.toFixed(2)}</td>
             </tr>
           </tbody>
         </table>
       </div>
       <div style="border-top:1px solid var(--border2);padding-top:10px;margin-top:4px;display:flex;justify-content:space-between;font-weight:700;">
         <span>Total (${billingCurrencyCode()})</span>
-        <span style="font-family:var(--mono);color:var(--green);font-size:16px;">$${d.subtotal.toFixed(2)}</span>
+        <span style="font-family:var(--mono);color:var(--green);font-size:16px;">${billingCurrencySymbol()}${d.subtotal.toFixed(2)}</span>
       </div>
       <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--text3);">
         <span>📋 ${d.shiftCount} shifts across ${d.outletLineItems.length} outlet${d.outletLineItems.length !== 1 ? 's' : ''}</span>
@@ -22899,11 +22992,24 @@ async function buildClientUsageWorkbook(billingName, year, month) {
     // "Shift Detail" sheet — e.g. Five Guys gets an iON Mall tab AND a Plaza
     // Singapura tab. Each tab keeps the Outlet column (rows stay self-contained
     // when copied out) and ends with a TOTAL row.
-    const detailHeaders = ['Date', 'Outlet', 'Worker', 'Role', 'Sched Start', 'Sched End', 'Clock In', 'Clock Out', 'Break (min)', 'Hours (excl. break)', 'Rate ($/hr)', 'Payout ($)', 'Transport ($)'];
+    // v91: headers carry the client's billing currency (RM/₱/$), not a hardcoded $.
+    const _hdrSym = billingCurrencySymbol();
+    const detailHeaders = ['Date', 'Outlet', 'Worker', 'Role', 'Sched Start', 'Sched End', 'Clock In', 'Clock Out', 'Break (min)', 'Hours (excl. break)', `Rate (${_hdrSym}/hr)`, `Payout (${_hdrSym})`, `Transport (${_hdrSym})`];
     const shiftToRow = s => {
         const hrs  = parseFloat(calcShiftHours(s) || 0);
         const rate = parseFloat(s.rate || 0);
-        const amt  = netPaymentForShift(s);
+        // v91: CLIENT amount, not the worker's net pay. netPaymentForShift is
+        // worker-side money (payout − late penalty − overpayment deduction
+        // + transport + compensation): using it here (a) under-billed the client
+        // by the workers' late-penalty fines (the RM12.50 gap vs the invoice —
+        // penalties are the WORKER's fine to Anytime Work, not a client discount;
+        // counted hours already start from the late clock-in), (b) would DOUBLE-
+        // COUNT transport (added into Payout AND shown in the Transport column
+        // AND billed as the invoice's separate taxi line), and (c) leaked SR
+        // worker-pay math into a client document. payoutForShift is the same
+        // figure the invoice + Reports "Client billing" use — attachment and
+        // invoice now always agree.
+        const amt  = payoutForShift(s);
         const taxi = parseFloat(s.transport_claim || 0);
         // v84: unpaid break shown explicitly — Hours/Payout already deduct it.
         const brk  = breakMinsForShift(s);
