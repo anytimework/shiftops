@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v92 (PER-WORKER "NO ACKNOWLEDGEMENT REQUIRED" PROFILE TICK) — Worked from the v91 (July4_2index_v86) build. Ops request: some workers find the reminder-acknowledgement chase annoying. NEW tick on the Add/Edit worker modal — "🔕 No acknowledgement required" — stored as a scalar profileMeta.workers[key].no_ack_required, so it syncs team-wide through the existing app_settings profile_meta merge ({...se,...pe} keeps scalars) with NO schema change and is reversed by simply unticking. EFFECT WHEN TICKED (helper workerNoAckRequired(name)): (1) reminders still SEND exactly as before — timing, claims, dedup all untouched; (2) buildNightReminderMessage drops only the "Please reply *OK* or *✓* to confirm." line for that worker (the can't-make-it / cancel escape line is KEPT so cancellations still surface; the clock-in message is unchanged — it only asks for a reply when there's a problem); (3) checkReminderAlerts never adds the worker to the night-unacked group alert or the per-worker clock-in no-response lines (dispute + late alerts unaffected); (4) reminderPanelHtml hides the "Worker acknowledged"/"Worker responded" checkboxes and shows a muted "🔕 No acknowledgement required for this worker" note; isFullyAck now treats BOTH SENDS alone as complete for a no-ack worker and the banner reads "✅ Reminders sent · 🔕 no ack required"; the past-shift badge row swaps the two grey ack ✗ badges for one muted "🔕 no-ack" badge so history doesn't read as failure. If the worker replies anyway the webhook/markWorkerAcknowledged still record acks — harmless, the panel already treats them as satisfied. Modal wiring: new #wf-no-ack row after Profile notes; resetWorkerModal clears it, editWorker populates from meta.no_ack_required, saveWorker persists it in the existing profileMeta write (all other profile fields preserved as before). Webhook NOT touched; autoSendShiftReminders NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: 6 original lines changed (night-builder return, two alert guards, isFullyAck line + two banner returns collapsed into label const, two ack badge lines, two ack checkbox rows gaining a !noAckWorker guard) + purely additive modal row, three modal-wiring lines, one helper, one panel note; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v91 (TICKS NOW SURVIVE REFRESH ON EVERY DEVICE + MALAYSIA BILLING RM12.50 MISMATCH + CURRENCY SYMBOLS) — Worked from the v90 (July4_1index_v86) build. THREE ops reports. (1) TICKS STILL VANISH ON REFRESH (6 Jul screen recording, iPhone): v90's durable sticky store is per-device localStorage — only the device that SET a tick could restore it, so a phone that merely DISPLAYED ticks set elsewhere wiped them on pull-to-refresh. Working around per-device storage can never satisfy "the tick should remain regardless of whoever refreshes"; a working SHARED store is required, and one already exists: app_settings — every auto/manual send since v88 writes an rsent:* claim with sent:true (proven writable team-wide). FIX: new syncTicksFromClaims() reads all rsent:% claims (fetch cached/throttled 60s) and, for every loaded shift whose claim says sent && !undone, forces the matching flag true, stamps the local durable store, repaints, and repairs the localStorage backup — on EVERY device, after ANY refresh, with NO shift_reminders write needed. Wired at boot (init, right after applyBootReminderSticky, force-fetch) and on the 30s silentSyncReminders cadence (also covers date navigation). Ops ACKS now publish claims too: markWorkerAcknowledged and toggleReminder write 'nightack'/'clockinack' claims (webhook acks already survive via service-role DB writes). UNDO SAFETY: unticks and undoFullAck now write a POSITIVE undone:true marker via upsert (markReminderClaimUndone) BEFORE the best-effort delete — a silently RLS-blocked delete would otherwise leave a sent:true ghost re-ticking the box on every device; the restore engine skips undone claims, resolveLostClaim treats undone as reclaimable (deliberate re-send works), and the local claim cache is invalidated on untick/undo. Claim prune window 2d→7d since claims now back the visible ticks. (2) INVOICE $4506.00 vs EXCEL RM4493.50: traced to exactly two late-arrival rows (3/6 KHAIRUL sched 12:00 in 12:39: 63.75→56.25 = +7.50; 4/6 KHAIRUL sched 18:00 in 18:25: 52.50→47.50 = +5.00; Δ=12.50). The EXCEL was wrong: buildClientUsageWorkbook used netPaymentForShift — WORKER-side money (payout − late penalty − overpayment deduction + transport + compensation) — in a CLIENT usage report. That under-billed the client by the workers' late-penalty fines (penalties are the worker's fine to Anytime Work, NOT a client discount — counted hours already start from the late clock-in), would DOUBLE-COUNT transport (inside Payout AND the Transport column AND the invoice's separate taxi PTC line), and leaked SR worker-pay math into client documents. FIX: the Excel row amount is now payoutForShift — the same figure the invoice preview and Reports "Client billing" use — so attachment and invoice always agree by construction (both now RM4506.00 for this client). (3) CURRENCY SYMBOLS: the invoice-preview modal hardcoded "$" on five renders (per-outlet payout — the "$4506.00" on a Malaysia invoice — taxi, compensation, commission, subtotal) → all now billingCurrencySymbol(); the Excel detail headers hardcoded ($/hr)/($) → now built from billingCurrencySymbol() (RM/₱/$). Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (cross-device refresh restore from claims incl. the recorded phone scenario, undone-marker semantics with blocked deletes, undo non-resurrection, billing recompute: the uploaded June workbook re-totals to RM4506.00 = invoice, transport not double-counted). Surgical diff: syncTicksFromClaims + markReminderClaimUndone + cache (new top-level, v88/89 region), resolveLostClaim one added branch, init one added call, silentSyncReminders one added call, toggleReminder claim-type/undone rework (v90's own lines), markWorkerAcknowledged + undoFullAck additive claim publishing (v90's own lines), prune constant (v88's own line), buildClientUsageWorkbook amount fn + headers, invoice-preview 5 currency renders; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v90 (REFRESH WIPES SENT-TICKS + ACKS; GREEN "FULLY ACKNOWLEDGED" GONE) — Worked from the v89 (July4_1index_v86) build. Ops report: sent-ticks AND worker-acknowledged ticks vanish on page refresh, and the green "✅ Fully acknowledged" banner no longer appears. DIAGNOSIS: (1) the green banner is not a separate bug — it renders when ALL FOUR flags hold (nightSent && nightAcked && clockinSent && clockinResponded, line ~4527), so the flag wipe kills it. (2) THE WIPE: v89's sticky guard lives in in-memory Sets that are EMPTY on a fresh page. loadReminders() loads localStorage first (the ticks WERE safe there), but if the Supabase read returns any rows it REPLACES shiftReminders wholesale with DB truth — whose writes are still being rejected, so its flags sit false — and then OVERWRITES the localStorage backup with the clobbered view. Every refresh therefore destroyed both the live flags and their only surviving copy. (3) ACK flags (nightAcked/clockinResponded) set by ops (hand-tick / banner button) die in the same rejected write; only webhook-set acks (service-role) survive in the DB. FIX: (A) DURABLE STICKY STORE — the two v89 Sets plus two NEW ack Sets (_nightAckedSticky/_clockinRespondedSticky) are persisted to localStorage ('reminder_sticky_v1'; same worker|date|start|end keys, worker-scoped; entries >3 days pruned at load) and reloaded at script start; _stickySave() is called at every mutation site (both sweep branches incl. lost-claim marks, manualSendReminder, toggleReminder, markWorkerAcknowledged). (B) BOOT-ORDER FIX — the sticky pass can't run inside loadReminders (logical keys need shift rows; loadReminders runs BEFORE loadShifts in init's Promise.all), so loadReminders now stashes the PRE-replace localStorage snapshot (_bootReminderSnapshot, captured BEFORE the backup is overwritten) and init() calls new applyBootReminderSticky() right AFTER loadShifts: shared applyStickyOverReminders() re-applies all four flags over the DB view, carries over records the DB has no row for at all, repairs the localStorage backup, and refreshes affected rows — so ticks and the green banner are correct on first paint. silentSyncReminders now uses the same shared pass (ack flags included). (C) applyStickySendFlags extended to nightAcked/clockinResponded. (D) CONSISTENCY GUARDS — undoFullAck clears all four sticky keys FIRST (else the next sync would resurrect the flags the undo removes) and best-effort deletes both send-claims; resetReminderLifecycleForRefill drops sticky keys for the OUTGOING occupancy so the SAME worker re-booked into the slot still gets fresh reminders (a different worker was never affected); toggleReminder handles all four fields with add/delete + save. Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (refresh-cycle restore, ack stickiness, green-banner predicate, undo non-resurrection, refill re-send, 3-day prune). Surgical diff: sticky-store block + helpers (top-level, v89 region), loadReminders snapshot hook, ONE line in init() (applyBootReminderSticky after loadShifts), silentSyncReminders pass swapped to the shared helper (v89's own lines), toggleReminder/manualSendReminder/markWorkerAcknowledged/undoFullAck/resetReminderLifecycleForRefill additive blocks, four one-line _stickySave() taps in the sweep (v88/v89's own lines); zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v89 (NIGHT REMINDERS NOT SENT AT 9PM + SENT-TICK VANISHES) — Worked from the v88 (July4_1index_v86) build. TWO ops reports: (A) night reminders don't reach workers at 9pm; (B) after a manual send the "Reminder sent" ✓ disappears a little later as if never sent. DIAGNOSIS — three interacting faults, one of them INTRODUCED BY v88: (1) v88 GHOST-CLAIM BUG (owned): when a device WON the app_settings claim but the Periskope send then FAILED, v88 released the claim with a DELETE — and if that delete was silently rejected (e.g. RLS that permits INSERT but not DELETE), the orphaned claim made every device's sweep read 'lost' → mark nightSent=true locally WITHOUT ANYONE EVER SENDING (ticks shown, worker got nothing — exactly the 4 Jul screenshot). FIX: a claim is now only PROOF OF INTENT; the winner records the OUTCOME on the row via upsert (sent:true / failed:true — upserts on app_settings are the app's proven write path), and a losing device resolves the claim instead of trusting it: sent→stand down + mark local; failed OR stale (>2 min, no outcome — winner died mid-send)→TAKE OVER and send; fresh pending (<2 min)→do nothing this sweep and re-check next minute. releaseReminderClaim now marks failed:true FIRST and keeps delete as best-effort cleanup only. (2) 5-MINUTE NIGHT WINDOW: 21:00–21:05 only fired if a tab was open, FOREGROUNDED and un-throttled in those exact minutes — browsers throttle background-tab timers, so a minimised tab misses the whole window and nothing sends (all sending is client-side). The narrowness was v77b's dupe protection, but dedup is now claim-based, so the window is WIDENED to 21:00–22:30 (1260–1350): still fires AT 9pm when a tab is live, and a tab opened later back-fills instead of silently skipping the night. THIS IS THE ONE BEHAVIOURAL CHANGE TO PRE-v88 CODE (one constant, 1265→1350). (3) SENT-TICK CLOBBER (why ✓ vanishes): persistReminder is still being REJECTED by a NON-column error (v87's retry only catches missing-column; the verbatim DB error — likely RLS on shift_reminders — was hidden behind a generic toast). The DB therefore never holds night_sent=true, and BOTH re-sync paths (silentSyncReminders' wholesale `shiftReminders = incoming` AND the realtime handler's per-row replace — which the WEBHOOK triggers with service-role writes whose night_sent is false) clobber the local ✓. FIX: STICKY SEND FLAGS — new applyStickySendFlags() refuses to let any DB read downgrade a nightSent/clockinSent this session set (keyed by the session Sets' logical worker|date|start|end key, so a refill to a NEW worker is untouched), restores records the DB has no row for at all, re-pushes once per shift so the DB heals when writes work again, and is applied in BOTH silentSyncReminders and the realtime handler. persistReminder additionally shows the VERBATIM database error once (new toast) so the real cause gets fixed at the source. (4) MANUAL PATHS JOIN THE SAME MACHINERY: manualSendReminder stamps the session Set + records a sent claim after success (auto sweep on every device stands down; a human pressing the button always sends). toggleReminder: hand-ticking "Reminder sent" = sticky + sent claim (ops WhatsApped the worker themselves — automation must not double-send); un-ticking removes both so a deliberate re-send works. New helpers: reminderLogicalKey, applyStickySendFlags, markReminderClaimOutcome, resolveLostClaim, markReminderClaimTakeover, _shiftopsDeviceId, _stickyRepushed. Webhook NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: night-window constant (the one pre-v88 behavioural change) + claim-lifecycle rework inside v88's own additions + sticky hooks at the two re-sync replace points + manualSendReminder/toggleReminder additions; zero function removals or renames; nothing else touched. -->
@@ -2184,6 +2185,7 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div class="form-row"><label>Account / PayNow no.</label><input type="text" id="wf-bank" placeholder="e.g. 9xxx xxxx"></div>
     </div>
     <div class="form-row"><label>Profile notes</label><textarea id="wf-notes" rows="4" placeholder="e.g. Watch lateness; check location 1 hour before shift"></textarea></div>
+    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-ack" style="width:auto;margin:0;"> 🔕 No acknowledgement required</label><div class="sub-text">Reminders still send, but the night reminder won't ask this worker to reply and they never appear in the "hasn't acknowledged" alerts. Untick anytime to restore normal behaviour.</div></div>
     <div class="form-row"><label>Outlets this worker should not be assigned to</label>
       <div class="ms-picker" id="wf-disliked-picker">
         <div class="ms-chips" id="wf-disliked-chips"></div>
@@ -3339,6 +3341,16 @@ function workerProfile(name) {
 }
 function outletProfile(name) {
   return profileMeta.outlets[normProfileKey(name)] || {};
+}
+// v92: worker profile opt-out from reminder acknowledgements. When ticked in the
+// worker modal, reminders still SEND normally but (a) the night message drops the
+// "reply OK to confirm" line, (b) the worker never appears in the unacked alert
+// banners, and (c) the reminder panel hides the ack checkboxes / treats sent-only
+// as complete. Stored as a scalar on profileMeta.workers[key] so it syncs
+// team-wide through the existing profile_meta merge ({...se,...pe} keeps scalars)
+// and is reversible by simply unticking. No schema change.
+function workerNoAckRequired(name) {
+  return !!workerProfile(name).no_ack_required;
 }
 
 // ── Client Booking Requirements ───────────────────────────────────────────────
@@ -4616,21 +4628,26 @@ function reminderPanelHtml(s) {
       </div>
     </div>`;
   }
-  const isFullyAck = r.nightSent && r.nightAcked && r.clockinSent && r.clockinResponded;
+  // v92: for a no-ack worker, both sends alone complete the panel — no acks expected.
+  const noAckWorker = workerNoAckRequired(s.worker_name);
+  const isFullyAck = r.nightSent && r.clockinSent && (noAckWorker || (r.nightAcked && r.clockinResponded));
+  const fullAckLabel = noAckWorker
+    ? '✅ Reminders sent <span style="color:var(--text3);font-weight:400;">· 🔕 no ack required</span>'
+    : '✅ Fully acknowledged';
   if (isFullyAck && !r.disputed && !r.lateNotified) {
-    return `<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
+    return `<div class="reminder-all-ack">${fullAckLabel} <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
   }
   if (isFullyAck && !r.disputed && r.lateNotified) {
-    return `${lateBanner()}<div class="reminder-all-ack">✅ Fully acknowledged <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
+    return `${lateBanner()}<div class="reminder-all-ack">${fullAckLabel} <button class="btn-undo-ack" onclick="undoFullAck('${escapeAttr(String(s.id))}')">↩ Edit</button></div>`;
   }
   const sid = escapeAttr(String(s.id));
   // Past shifts with partial data: show read-only summary so ops can see what was recorded
   if (isPast && hasAnyData) {
     const badges = [
       r.nightSent      ? '<span style="color:var(--green);">🌙✓</span>' : '<span style="color:var(--text3);">🌙✗</span>',
-      r.nightAcked     ? '<span style="color:var(--green);">👤✓</span>' : '<span style="color:var(--text3);">👤✗</span>',
+      noAckWorker ? '' : (r.nightAcked ? '<span style="color:var(--green);">👤✓</span>' : '<span style="color:var(--text3);">👤✗</span>'),
       r.clockinSent    ? '<span style="color:var(--green);">⏰✓</span>' : '<span style="color:var(--text3);">⏰✗</span>',
-      r.clockinResponded ? '<span style="color:var(--green);">✅✓</span>' : '<span style="color:var(--text3);">✅✗</span>',
+      noAckWorker ? '<span style="color:var(--text3);">🔕 no-ack</span>' : (r.clockinResponded ? '<span style="color:var(--green);">✅✓</span>' : '<span style="color:var(--text3);">✅✗</span>'),
       r.disputed       ? '<span style="color:var(--red);">⚠ disputed</span>' : '',
       r.lateNotified   ? '<span style="color:var(--amber);">⏰ late</span>' : '',
     ].filter(Boolean).join(' ');
@@ -4640,19 +4657,20 @@ function reminderPanelHtml(s) {
   const workerHasPhone = !!workerPhone(s.worker_name);
   const canSendPk = pkEnabled && workerHasPhone;
   let html = disputeBanner() + lateBanner() + '<div class="reminder-panel">';
+  if (noAckWorker) html += `<div class="sub-text" style="color:var(--text3);margin-bottom:4px;">🔕 No acknowledgement required for this worker (set in their profile)</div>`;
   // Night reminder section — shown on tomorrow + today
   html += `<div class="reminder-section-label">🌙 Night reminder</div>`;
   html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rns-${sid}" ${r.nightSent?'checked':''} onchange="toggleReminder('${sid}','nightSent',this.checked)"><label for="rns-${sid}">Reminder sent</label>`;
   if (canSendPk && !r.nightSent) html += `<button class="btn-undo-ack" style="margin-left:6px;" onclick="manualSendReminder('${sid}','night')">📲 Send</button>`;
   html += `</div>`;
-  html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rna-${sid}" ${r.nightAcked?'checked':''} onchange="toggleReminder('${sid}','nightAcked',this.checked)"><label for="rna-${sid}">Worker acknowledged</label></div>`;
+  if (!noAckWorker) html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rna-${sid}" ${r.nightAcked?'checked':''} onchange="toggleReminder('${sid}','nightAcked',this.checked)"><label for="rna-${sid}">Worker acknowledged</label></div>`;
   // Clock-in section — only on today's view
   if (isToday) {
     html += `<div class="reminder-section-label" style="margin-top:6px;">⏰ Clock-in reminder</div>`;
     html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcs-${sid}" ${r.clockinSent?'checked':''} onchange="toggleReminder('${sid}','clockinSent',this.checked)"><label for="rcs-${sid}">Reminder sent</label>`;
     if (canSendPk && !r.clockinSent) html += `<button class="btn-undo-ack" style="margin-left:6px;" onclick="manualSendReminder('${sid}','clockin')">📲 Send</button>`;
     html += `</div>`;
-    html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcr-${sid}" ${r.clockinResponded?'checked':''} onchange="toggleReminder('${sid}','clockinResponded',this.checked)"><label for="rcr-${sid}">Worker responded</label></div>`;
+    if (!noAckWorker) html += `<div class="reminder-row"><input type="checkbox" class="reminder-cb" id="rcr-${sid}" ${r.clockinResponded?'checked':''} onchange="toggleReminder('${sid}','clockinResponded',this.checked)"><label for="rcr-${sid}">Worker responded</label></div>`;
   }
   // Manual dispute flag — for issues heard verbally / outside Periskope
   if (!r.disputed) {
@@ -4704,12 +4722,14 @@ function checkReminderAlerts() {
       lateAlerts.push({ id: s.id, name: workerName, outlet: s.outlet || '', start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '', acked: !!r.lateAck, informed: !!r.outletInformed });
     }
 
+    // v92: profile opt-out — a no-ack worker is never chased for acknowledgements.
+    const noAckWorker = workerNoAckRequired(workerName);
     // Night reminder: collect all who haven't acked (past 8am)
-    if (r.nightSent && !r.nightAcked && nowMins >= 480) {
+    if (!noAckWorker && r.nightSent && !r.nightAcked && nowMins >= 480) {
       nightUnacked.push({ id: s.id, name: workerName, outlet: s.outlet || '', time: s.scheduled_start ? s.scheduled_start.slice(0,5) : '' });
     }
     // Clock-in: individual alert, within 2hrs of shift start
-    if (r.clockinSent && !r.clockinResponded && s.scheduled_start) {
+    if (!noAckWorker && r.clockinSent && !r.clockinResponded && s.scheduled_start) {
       const [sh, sm] = s.scheduled_start.split(':').map(Number);
       const shiftMins = sh * 60 + sm;
       if (nowMins >= shiftMins - 120) {
@@ -9579,7 +9599,10 @@ function buildNightReminderMessage(s) {
   const end   = (s.scheduled_end   || '').slice(0,5);
   const role  = s.role || s.worker_role || '';
   const outlet = s.outlet || '';
-  return `🌙 *Shift Reminder — Tomorrow*\n\nHi ${s.worker_name}! You have a shift tomorrow:\n\n📅 *${dateStr}*\n🏠 *${outlet}*\n⏰ ${start} – ${end}${role ? `\n👔 ${role}` : ''}\n\nPlease reply *OK* or *✓* to confirm.\nIf you *can't make it* or need to *cancel*, reply here and let us know. See you tomorrow! 🙌`;
+  // v92: a no-ack worker still receives the reminder, minus the "reply OK" ask —
+  // the can't-make-it escape line is kept so cancellations still surface.
+  const ackLine = workerNoAckRequired(s.worker_name) ? '' : `Please reply *OK* or *✓* to confirm.\n`;
+  return `🌙 *Shift Reminder — Tomorrow*\n\nHi ${s.worker_name}! You have a shift tomorrow:\n\n📅 *${dateStr}*\n🏠 *${outlet}*\n⏰ ${start} – ${end}${role ? `\n👔 ${role}` : ''}\n\n${ackLine}If you *can't make it* or need to *cancel*, reply here and let us know. See you tomorrow! 🙌`;
 }
 
 // ── Clock-in reminder message builder ────────────────────────────────────────
@@ -13295,6 +13318,7 @@ function resetWorkerModal() {
   document.getElementById('wf-method').value = 'PayNow';
   document.getElementById('wf-bank').value = '';
   document.getElementById('wf-notes').value = '';
+  document.getElementById('wf-no-ack').checked = false;
   wfDislikedOutlets = [];
   renderDislikedOutletPicker();
   wfUnavailable = [];
@@ -13316,6 +13340,7 @@ function editWorker(id) {
   document.getElementById('wf-bank').value = w.bank_details || '';
   const meta = workerProfile(w.name);
   document.getElementById('wf-notes').value = meta.notes || '';
+  document.getElementById('wf-no-ack').checked = !!meta.no_ack_required;
   wfDislikedOutlets = Array.isArray(meta.disliked_outlets) ? meta.disliked_outlets.slice() : [];
   renderDislikedOutletPicker();
   wfUnavailable = Array.isArray(meta.unavailable)
@@ -13358,6 +13383,7 @@ async function saveWorker() {
   profileMeta.workers[normProfileKey(name)] = {
     ...existingProfile,
     notes: document.getElementById('wf-notes').value.trim(),
+    no_ack_required: document.getElementById('wf-no-ack').checked,
     disliked_outlets: wfDislikedOutlets.slice(),
     unavailable: wfUnavailable
       .filter(r => r && r.from && r.to)
