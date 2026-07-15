@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <!-- Build patch: v92 (PER-WORKER "NO ACKNOWLEDGEMENT REQUIRED" PROFILE TICK) — Worked from the v91 (July4_2index_v86) build. Ops request: some workers find the reminder-acknowledgement chase annoying. NEW tick on the Add/Edit worker modal — "🔕 No acknowledgement required" — stored as a scalar profileMeta.workers[key].no_ack_required, so it syncs team-wide through the existing app_settings profile_meta merge ({...se,...pe} keeps scalars) with NO schema change and is reversed by simply unticking. EFFECT WHEN TICKED (helper workerNoAckRequired(name)): (1) reminders still SEND exactly as before — timing, claims, dedup all untouched; (2) buildNightReminderMessage drops only the "Please reply *OK* or *✓* to confirm." line for that worker (the can't-make-it / cancel escape line is KEPT so cancellations still surface; the clock-in message is unchanged — it only asks for a reply when there's a problem); (3) checkReminderAlerts never adds the worker to the night-unacked group alert or the per-worker clock-in no-response lines (dispute + late alerts unaffected); (4) reminderPanelHtml hides the "Worker acknowledged"/"Worker responded" checkboxes and shows a muted "🔕 No acknowledgement required for this worker" note; isFullyAck now treats BOTH SENDS alone as complete for a no-ack worker and the banner reads "✅ Reminders sent · 🔕 no ack required"; the past-shift badge row swaps the two grey ack ✗ badges for one muted "🔕 no-ack" badge so history doesn't read as failure. If the worker replies anyway the webhook/markWorkerAcknowledged still record acks — harmless, the panel already treats them as satisfied. Modal wiring: new #wf-no-ack row after Profile notes; resetWorkerModal clears it, editWorker populates from meta.no_ack_required, saveWorker persists it in the existing profileMeta write (all other profile fields preserved as before). Webhook NOT touched; autoSendShiftReminders NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: 6 original lines changed (night-builder return, two alert guards, isFullyAck line + two banner returns collapsed into label const, two ack badge lines, two ack checkbox rows gaining a !noAckWorker guard) + purely additive modal row, three modal-wiring lines, one helper, one panel note; zero function removals or renames; nothing else touched. -->
+<!-- Build patch: v92 (ASPIRE PAYOUTS PANEL) — Worked from the v91 (July15index_v86) build. NEW money-out pipeline: a nav page "Aspire Payouts" (owner + finance roles; hidden from ops and the PH partner; NOT in PH_PARTNER_PAGES or OPS_ONLY_PAGES) that turns completed unpaid Singapore shifts into reviewed, deduplicated bank payouts released through the aspire-relay Supabase Edge Function -> VPS proxy (aspire-proxy.anytimeanywork.com) -> Aspire production API, with every transfer created approval:true so money only moves after a manual tap in the Aspire app. FLOW: (1) GENERATE — pick a date range; generatePayouts() queries shifts for the range (Supabase direct, not view-bound), keeps completed (clock_in+clock_out), not cancelled, not Available, not is_paid, Singapore-resolved rows; payee = s.sr_worker || s.worker_name (SR shifts pay the SR worker); amount = sum of netPaymentForShift (same worker-side figure the attendance Payment column shows); one pending_payouts row per payee per period with idempotency_key payout-<slug>-<start>_<end> (structurally double-spend-proof: unique here AND sent to Aspire) and the covered shift ids in shift_ids jsonb. Payees who already have a row for the period are skipped and reported. (2) LANES — payoutLaneForWorker maps bank_method: DBS/POSB->DBSSSGSG, OCBC->OCBCSGSG, UOB->UOVBSGSG, GXS->GXSPSGSG, Maybank->MBBESGS2, Standard Chartered->SCBLSGSG, HSBC->HSBCSGSG, CIMB->CIBBSGSG, Trust->TRBKSGSG (lane bank, API-released); PayNow (Aspire app supports PayNow but the public API does NOT expose proxy transfers) and Cash/unknown/bad account numbers -> lane paynow/manual: tracked in the same run, paid by hand, closed with Mark paid. (3) RELEASE — per-row or release-all posts action:release with explicit payout_ids to the relay; relay claims rows pending->queued atomically (double-click safe), submits to the proxy (SGD cap + forced approval enforced server-side), rows land submitted (pending_approval in the Aspire app) or failed with reason. (4) SYNC — action:sync polls Aspire; posted transfers flip rows to approved_posted AND tick the covered shifts is_paid=true (markShiftsPaidForPayout), same for manual Mark paid, so the attendance Paid ticks stay the source of truth. Balance chip on the page header via action:balance (60s cache). RLS: browser may only insert pending rows, cancel pending, and mark paid pending paynow/manual rows (migration pending_payouts_migration_v2.sql adds the method column + that policy, WITH CHECK includes method so bank rows cannot be hand-flipped); every money transition is service-role via the Edge Function — the shift_reminders RLS failure mode cannot recur here by construction. applyRoleVisibility: nav-payouts shown for owner+finance, hidden for PH partner, payouts added to allowedForFinance. switchPage: payouts -> loadPayoutsPage(). node --check passes on all inline script blocks. Surgical diff: 1 nav button + 1 page div + 1 switchPage line + 4 applyRoleVisibility touches (payNav declare, PH hide, reveal line, allowedForFinance) + one new self-contained JS region after togglePaid; zero existing functions modified or renamed; webhook untouched; no other schema change. -->
 <!-- Build patch: v91 (TICKS NOW SURVIVE REFRESH ON EVERY DEVICE + MALAYSIA BILLING RM12.50 MISMATCH + CURRENCY SYMBOLS) — Worked from the v90 (July4_1index_v86) build. THREE ops reports. (1) TICKS STILL VANISH ON REFRESH (6 Jul screen recording, iPhone): v90's durable sticky store is per-device localStorage — only the device that SET a tick could restore it, so a phone that merely DISPLAYED ticks set elsewhere wiped them on pull-to-refresh. Working around per-device storage can never satisfy "the tick should remain regardless of whoever refreshes"; a working SHARED store is required, and one already exists: app_settings — every auto/manual send since v88 writes an rsent:* claim with sent:true (proven writable team-wide). FIX: new syncTicksFromClaims() reads all rsent:% claims (fetch cached/throttled 60s) and, for every loaded shift whose claim says sent && !undone, forces the matching flag true, stamps the local durable store, repaints, and repairs the localStorage backup — on EVERY device, after ANY refresh, with NO shift_reminders write needed. Wired at boot (init, right after applyBootReminderSticky, force-fetch) and on the 30s silentSyncReminders cadence (also covers date navigation). Ops ACKS now publish claims too: markWorkerAcknowledged and toggleReminder write 'nightack'/'clockinack' claims (webhook acks already survive via service-role DB writes). UNDO SAFETY: unticks and undoFullAck now write a POSITIVE undone:true marker via upsert (markReminderClaimUndone) BEFORE the best-effort delete — a silently RLS-blocked delete would otherwise leave a sent:true ghost re-ticking the box on every device; the restore engine skips undone claims, resolveLostClaim treats undone as reclaimable (deliberate re-send works), and the local claim cache is invalidated on untick/undo. Claim prune window 2d→7d since claims now back the visible ticks. (2) INVOICE $4506.00 vs EXCEL RM4493.50: traced to exactly two late-arrival rows (3/6 KHAIRUL sched 12:00 in 12:39: 63.75→56.25 = +7.50; 4/6 KHAIRUL sched 18:00 in 18:25: 52.50→47.50 = +5.00; Δ=12.50). The EXCEL was wrong: buildClientUsageWorkbook used netPaymentForShift — WORKER-side money (payout − late penalty − overpayment deduction + transport + compensation) — in a CLIENT usage report. That under-billed the client by the workers' late-penalty fines (penalties are the worker's fine to Anytime Work, NOT a client discount — counted hours already start from the late clock-in), would DOUBLE-COUNT transport (inside Payout AND the Transport column AND the invoice's separate taxi PTC line), and leaked SR worker-pay math into client documents. FIX: the Excel row amount is now payoutForShift — the same figure the invoice preview and Reports "Client billing" use — so attachment and invoice always agree by construction (both now RM4506.00 for this client). (3) CURRENCY SYMBOLS: the invoice-preview modal hardcoded "$" on five renders (per-outlet payout — the "$4506.00" on a Malaysia invoice — taxi, compensation, commission, subtotal) → all now billingCurrencySymbol(); the Excel detail headers hardcoded ($/hr)/($) → now built from billingCurrencySymbol() (RM/₱/$). Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (cross-device refresh restore from claims incl. the recorded phone scenario, undone-marker semantics with blocked deletes, undo non-resurrection, billing recompute: the uploaded June workbook re-totals to RM4506.00 = invoice, transport not double-counted). Surgical diff: syncTicksFromClaims + markReminderClaimUndone + cache (new top-level, v88/89 region), resolveLostClaim one added branch, init one added call, silentSyncReminders one added call, toggleReminder claim-type/undone rework (v90's own lines), markWorkerAcknowledged + undoFullAck additive claim publishing (v90's own lines), prune constant (v88's own line), buildClientUsageWorkbook amount fn + headers, invoice-preview 5 currency renders; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v90 (REFRESH WIPES SENT-TICKS + ACKS; GREEN "FULLY ACKNOWLEDGED" GONE) — Worked from the v89 (July4_1index_v86) build. Ops report: sent-ticks AND worker-acknowledged ticks vanish on page refresh, and the green "✅ Fully acknowledged" banner no longer appears. DIAGNOSIS: (1) the green banner is not a separate bug — it renders when ALL FOUR flags hold (nightSent && nightAcked && clockinSent && clockinResponded, line ~4527), so the flag wipe kills it. (2) THE WIPE: v89's sticky guard lives in in-memory Sets that are EMPTY on a fresh page. loadReminders() loads localStorage first (the ticks WERE safe there), but if the Supabase read returns any rows it REPLACES shiftReminders wholesale with DB truth — whose writes are still being rejected, so its flags sit false — and then OVERWRITES the localStorage backup with the clobbered view. Every refresh therefore destroyed both the live flags and their only surviving copy. (3) ACK flags (nightAcked/clockinResponded) set by ops (hand-tick / banner button) die in the same rejected write; only webhook-set acks (service-role) survive in the DB. FIX: (A) DURABLE STICKY STORE — the two v89 Sets plus two NEW ack Sets (_nightAckedSticky/_clockinRespondedSticky) are persisted to localStorage ('reminder_sticky_v1'; same worker|date|start|end keys, worker-scoped; entries >3 days pruned at load) and reloaded at script start; _stickySave() is called at every mutation site (both sweep branches incl. lost-claim marks, manualSendReminder, toggleReminder, markWorkerAcknowledged). (B) BOOT-ORDER FIX — the sticky pass can't run inside loadReminders (logical keys need shift rows; loadReminders runs BEFORE loadShifts in init's Promise.all), so loadReminders now stashes the PRE-replace localStorage snapshot (_bootReminderSnapshot, captured BEFORE the backup is overwritten) and init() calls new applyBootReminderSticky() right AFTER loadShifts: shared applyStickyOverReminders() re-applies all four flags over the DB view, carries over records the DB has no row for at all, repairs the localStorage backup, and refreshes affected rows — so ticks and the green banner are correct on first paint. silentSyncReminders now uses the same shared pass (ack flags included). (C) applyStickySendFlags extended to nightAcked/clockinResponded. (D) CONSISTENCY GUARDS — undoFullAck clears all four sticky keys FIRST (else the next sync would resurrect the flags the undo removes) and best-effort deletes both send-claims; resetReminderLifecycleForRefill drops sticky keys for the OUTGOING occupancy so the SAME worker re-booked into the slot still gets fresh reminders (a different worker was never affected); toggleReminder handles all four fields with add/delete + save. Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (refresh-cycle restore, ack stickiness, green-banner predicate, undo non-resurrection, refill re-send, 3-day prune). Surgical diff: sticky-store block + helpers (top-level, v89 region), loadReminders snapshot hook, ONE line in init() (applyBootReminderSticky after loadShifts), silentSyncReminders pass swapped to the shared helper (v89's own lines), toggleReminder/manualSendReminder/markWorkerAcknowledged/undoFullAck/resetReminderLifecycleForRefill additive blocks, four one-line _stickySave() taps in the sweep (v88/v89's own lines); zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v89 (NIGHT REMINDERS NOT SENT AT 9PM + SENT-TICK VANISHES) — Worked from the v88 (July4_1index_v86) build. TWO ops reports: (A) night reminders don't reach workers at 9pm; (B) after a manual send the "Reminder sent" ✓ disappears a little later as if never sent. DIAGNOSIS — three interacting faults, one of them INTRODUCED BY v88: (1) v88 GHOST-CLAIM BUG (owned): when a device WON the app_settings claim but the Periskope send then FAILED, v88 released the claim with a DELETE — and if that delete was silently rejected (e.g. RLS that permits INSERT but not DELETE), the orphaned claim made every device's sweep read 'lost' → mark nightSent=true locally WITHOUT ANYONE EVER SENDING (ticks shown, worker got nothing — exactly the 4 Jul screenshot). FIX: a claim is now only PROOF OF INTENT; the winner records the OUTCOME on the row via upsert (sent:true / failed:true — upserts on app_settings are the app's proven write path), and a losing device resolves the claim instead of trusting it: sent→stand down + mark local; failed OR stale (>2 min, no outcome — winner died mid-send)→TAKE OVER and send; fresh pending (<2 min)→do nothing this sweep and re-check next minute. releaseReminderClaim now marks failed:true FIRST and keeps delete as best-effort cleanup only. (2) 5-MINUTE NIGHT WINDOW: 21:00–21:05 only fired if a tab was open, FOREGROUNDED and un-throttled in those exact minutes — browsers throttle background-tab timers, so a minimised tab misses the whole window and nothing sends (all sending is client-side). The narrowness was v77b's dupe protection, but dedup is now claim-based, so the window is WIDENED to 21:00–22:30 (1260–1350): still fires AT 9pm when a tab is live, and a tab opened later back-fills instead of silently skipping the night. THIS IS THE ONE BEHAVIOURAL CHANGE TO PRE-v88 CODE (one constant, 1265→1350). (3) SENT-TICK CLOBBER (why ✓ vanishes): persistReminder is still being REJECTED by a NON-column error (v87's retry only catches missing-column; the verbatim DB error — likely RLS on shift_reminders — was hidden behind a generic toast). The DB therefore never holds night_sent=true, and BOTH re-sync paths (silentSyncReminders' wholesale `shiftReminders = incoming` AND the realtime handler's per-row replace — which the WEBHOOK triggers with service-role writes whose night_sent is false) clobber the local ✓. FIX: STICKY SEND FLAGS — new applyStickySendFlags() refuses to let any DB read downgrade a nightSent/clockinSent this session set (keyed by the session Sets' logical worker|date|start|end key, so a refill to a NEW worker is untouched), restores records the DB has no row for at all, re-pushes once per shift so the DB heals when writes work again, and is applied in BOTH silentSyncReminders and the realtime handler. persistReminder additionally shows the VERBATIM database error once (new toast) so the real cause gets fixed at the source. (4) MANUAL PATHS JOIN THE SAME MACHINERY: manualSendReminder stamps the session Set + records a sent claim after success (auto sweep on every device stands down; a human pressing the button always sends). toggleReminder: hand-ticking "Reminder sent" = sticky + sent claim (ops WhatsApped the worker themselves — automation must not double-send); un-ticking removes both so a deliberate re-send works. New helpers: reminderLogicalKey, applyStickySendFlags, markReminderClaimOutcome, resolveLostClaim, markReminderClaimTakeover, _shiftopsDeviceId, _stickyRepushed. Webhook NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: night-window constant (the one pre-v88 behavioural change) + claim-lifecycle rework inside v88's own additions + sticky hooks at the two re-sync replace points + manualSendReminder/toggleReminder additions; zero function removals or renames; nothing else touched. -->
@@ -915,6 +916,10 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
         <span class="nav-icon">🧾</span><span class="nav-label">Xero Billing</span>
         <span class="nav-badge" id="billing-nav-badge" style="background:var(--green);" title="Clients pending billing">0</span>
       </button>
+      <button class="nav-item" id="nav-payouts" onclick="switchPage('payouts',this)" style="display:none;">
+        <span class="nav-icon">🏦</span><span class="nav-label">Aspire Payouts</span>
+        <span class="nav-badge" id="payouts-nav-badge" style="background:var(--amber);display:none;" title="Payouts pending release">0</span>
+      </button>
       <button class="nav-item" id="nav-finance" onclick="switchPage('finance',this)" style="display:none;">
         <span class="nav-icon">💰</span><span class="nav-label">Finance Dashboard</span>
       </button>
@@ -1375,6 +1380,26 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
             <div class="empty-state"><div class="spinner"></div><p style="margin-top:12px;">Loading billing data…</p></div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ASPIRE PAYOUTS PAGE (owner + finance) — v92 -->
+    <div id="page-payouts" style="display:none;">
+      <div class="topbar">
+        <div class="topbar-left">
+          <h2>Aspire Payouts</h2>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Singapore worker payouts via Aspire — every transfer still needs your approval tap in the Aspire app</p>
+        </div>
+        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;align-items:center;">
+          <span id="po-balance-chip" style="font-size:12px;color:var(--text2);padding:6px 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);">Balance: …</span>
+          <input type="date" id="po-start" onchange="loadPayoutsPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+          <input type="date" id="po-end" onchange="loadPayoutsPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+          <button class="btn btn-primary btn-sm" onclick="generatePayouts()">⚙️ Generate payouts</button>
+          <button class="btn btn-ghost btn-sm" onclick="syncPayouts()" title="Poll Aspire for transfer status updates">↻ Sync status</button>
+        </div>
+      </div>
+      <div class="content">
+        <div id="payouts-body"><div class="sub-text" style="padding:20px;">Loading…</div></div>
       </div>
     </div>
 
@@ -4873,6 +4898,7 @@ function switchPage(name, btn) {
   if (name === 'knowledge') { renderKnowledgePage(); }
   if (name === 'analytics') { loadAnalytics(); }
   if (name === 'billing') { loadBillingPage(); }
+  if (name === 'payouts') { loadPayoutsPage(); }
   if (name === 'finance') { loadFinancePage(); }
   if (name === 'expenses') { renderExpensesPage(); }
   if (name === 'salary') { renderSalaryPage(); }
@@ -12311,6 +12337,325 @@ async function togglePaid(id, currentlyPaid) {
     'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet }
   );
   await loadShifts();
+}
+
+// ── Aspire Payouts (v92) ─────────────────────────────────────
+// Completed unpaid SG shifts -> pending_payouts rows -> aspire-relay Edge
+// Function -> VPS proxy -> Aspire API. Money moves ONLY after the manual
+// approval tap in the Aspire app (approval:true is forced server-side).
+
+const ASPIRE_RELAY_ACTION_URL = () => (SUPABASE_URL || '').replace(/\/+$/, '') + '/functions/v1/aspire-relay';
+
+// bank_method (as stored on workers) -> SWIFT/BIC for Aspire SGD LOCAL transfers.
+const PAYOUT_BANK_SWIFT = {
+  'dbs': 'DBSSSGSG', 'posb': 'DBSSSGSG', 'ocbc': 'OCBCSGSG', 'uob': 'UOVBSGSG',
+  'gxs': 'GXSPSGSG', 'maybank': 'MBBESGS2', 'standard chartered': 'SCBLSGSG',
+  'sc': 'SCBLSGSG', 'hsbc': 'HSBCSGSG', 'cimb': 'CIBBSGSG', 'trust': 'TRBKSGSG'
+};
+
+function payoutLaneForWorker(w) {
+  const method = String(w?.bank_method || '').trim().toLowerCase();
+  const digits = String(w?.bank_details || '').replace(/[\s\-]/g, '');
+  if (!method || method === 'cash') return { lane: 'manual', label: w?.bank_method || 'No method saved', detail: digits };
+  if (method === 'paynow') return { lane: 'paynow', label: 'PayNow', detail: digits || '(no number saved)' };
+  const swift = PAYOUT_BANK_SWIFT[method];
+  if (!swift) return { lane: 'manual', label: w?.bank_method, detail: digits, reason: 'unknown bank' };
+  if (!/^\d{5,20}$/.test(digits)) return { lane: 'manual', label: w?.bank_method, detail: digits, reason: 'account number missing/invalid' };
+  return { lane: 'bank', label: w?.bank_method, detail: digits, bank_code: swift, acct: digits };
+}
+
+function payoutSlug(name) { return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'worker'; }
+function payoutLocalDate(d) { try { return formatDate(d); } catch (e) { return d.toISOString().slice(0, 10); } }
+function payoutPeriodKey() {
+  return document.getElementById('po-start').value + '_' + document.getElementById('po-end').value;
+}
+function payoutMoney(n) { try { return fmtMoney(n, 'SGD'); } catch (e) { return 'S$' + Number(n || 0).toFixed(2); } }
+function payoutRef(startISO, endISO) {
+  const f = iso => { const d = new Date(iso + 'T00:00:00'); return String(d.getDate()).padStart(2, '0') + d.toLocaleString('en', { month: 'short' }); };
+  return ('AW payout ' + f(startISO) + '-' + f(endISO)).replace(/[^A-Za-z0-9 ._-]/g, '').slice(0, 35);
+}
+
+async function aspireRelay(action, extra) {
+  const res = await fetch(ASPIRE_RELAY_ACTION_URL(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY },
+    body: JSON.stringify(Object.assign({ action: action }, extra || {}))
+  });
+  let body = null;
+  try { body = await res.json(); } catch (e) { body = {}; }
+  if (!res.ok) throw new Error(body?.error ? (body.error + (body.detail ? ': ' + JSON.stringify(body.detail) : '')) : ('relay HTTP ' + res.status));
+  return body;
+}
+
+let _payoutBalanceCache = { at: 0, text: null };
+async function refreshPayoutBalance(force) {
+  const chip = document.getElementById('po-balance-chip');
+  if (!chip) return;
+  if (!force && _payoutBalanceCache.text && (Date.now() - _payoutBalanceCache.at) < 60000) { chip.textContent = _payoutBalanceCache.text; return; }
+  chip.textContent = 'Balance: …';
+  try {
+    const b = await aspireRelay('balance');
+    // Aspire returns the balance in account units as provided by their API.
+    const text = 'Aspire ' + (b.currency || 'SGD') + ' balance: ' + Number(b.available_balance || 0).toLocaleString();
+    _payoutBalanceCache = { at: Date.now(), text: text };
+    chip.textContent = text;
+  } catch (e) { chip.textContent = 'Balance unavailable'; }
+}
+
+function payoutDefaultDates() {
+  const s = document.getElementById('po-start'), e = document.getElementById('po-end');
+  if (!s || !e) return;
+  if (!s.value || !e.value) {
+    const now = new Date();
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    s.value = s.value || payoutLocalDate(first);
+    e.value = e.value || payoutLocalDate(now);
+  }
+}
+
+async function fetchPayoutRowsForPeriod() {
+  const { data, error } = await supabaseClient
+    .from('pending_payouts').select('*')
+    .eq('pay_period', payoutPeriodKey())
+    .order('worker_name', { ascending: true });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+async function updatePayoutsNavBadge() {
+  try {
+    const { count } = await supabaseClient.from('pending_payouts').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+    const b = document.getElementById('payouts-nav-badge');
+    if (b) { b.textContent = count || 0; b.style.display = count ? '' : 'none'; }
+  } catch (e) { /* table may not exist yet */ }
+}
+
+// ── Generate: completed unpaid SG shifts -> one pending row per payee ──
+async function generatePayouts() {
+  const role = currentUserRole();
+  if (role !== 'owner' && role !== 'finance') { toast('Payout generation is owner/finance only', 'error'); return; }
+  payoutDefaultDates();
+  const start = document.getElementById('po-start').value, end = document.getElementById('po-end').value;
+  if (!start || !end || start > end) { toast('Pick a valid date range first', 'error'); return; }
+
+  const body = document.getElementById('payouts-body');
+  if (body) body.innerHTML = '<div class="sub-text" style="padding:20px;">Scanning shifts ' + start + ' → ' + end + '…</div>';
+
+  const { data: shifts, error } = await supabaseClient
+    .from('shifts').select('*').gte('shift_date', start).lte('shift_date', end);
+  if (error) { toast('Shift query failed: ' + error.message, 'error'); loadPayoutsPage(); return; }
+
+  // Same eligibility the attendance Paid tick implies: completed, real worker,
+  // not cancelled, not already paid, Singapore-resolved.
+  const eligible = (shifts || []).filter(s =>
+    s && !s.cancelled && s.worker_name && String(s.worker_name).toLowerCase() !== 'available' &&
+    s.clock_in && s.clock_out && !s.is_paid && countryForShift(s) === 'Singapore');
+
+  const perPayee = {};
+  eligible.forEach(s => {
+    const payee = s.sr_worker || s.worker_name;              // SR shifts pay the SR worker
+    let net = 0; try { net = parseFloat(netPaymentForShift(s) || 0); } catch (e) {}
+    if (!(net > 0)) return;
+    (perPayee[payee] = perPayee[payee] || { amount: 0, shiftIds: [] });
+    perPayee[payee].amount += net;
+    perPayee[payee].shiftIds.push(s.id);
+  });
+
+  const payees = Object.keys(perPayee).sort();
+  if (!payees.length) { toast('No unpaid completed Singapore shifts in that range'); loadPayoutsPage(); return; }
+
+  let existing = [];
+  try { existing = await fetchPayoutRowsForPeriod(); } catch (e) {}
+  const already = new Set(existing.map(r => r.worker_id));
+
+  const periodKey = payoutPeriodKey();
+  const reference = payoutRef(start, end);
+  const rows = [], skipped = [];
+  payees.forEach(name => {
+    if (already.has(name)) { skipped.push(name); return; }
+    const w = (allWorkers || []).find(x => x.name === name) || null;
+    const lane = payoutLaneForWorker(w);
+    rows.push({
+      worker_id: name,
+      worker_name: name,
+      bank_code: lane.lane === 'bank' ? lane.bank_code : lane.lane.toUpperCase(),
+      bank_account_no: lane.lane === 'bank' ? lane.acct : (lane.detail || 'NA'),
+      pay_period: periodKey,
+      shift_ids: perPayee[name].shiftIds,
+      amount_sgd: Math.round(perPayee[name].amount * 100) / 100,
+      reference: reference,
+      idempotency_key: 'payout-' + payoutSlug(name) + '-' + periodKey,
+      method: lane.lane,
+      status: 'pending'
+    });
+  });
+
+  if (rows.length) {
+    const { error: insErr } = await supabaseClient.from('pending_payouts').insert(rows);
+    if (insErr) { toast('Insert failed: ' + insErr.message, 'error'); loadPayoutsPage(); return; }
+    await logActivity('Payouts generated', rows.length + ' payout(s) for ' + start + ' → ' + end + ' totalling ' + payoutMoney(rows.reduce((a, r) => a + r.amount_sgd, 0)), 'payout', null, { period: periodKey });
+  }
+  toast('Generated ' + rows.length + ' payout(s)' + (skipped.length ? ' · ' + skipped.length + ' already existed' : ''));
+  loadPayoutsPage();
+}
+
+// ── Render ──────────────────────────────────────────────────────
+const PAYOUT_STATUS_CHIP = {
+  pending:         ['Pending release', 'var(--amber)'],
+  queued:          ['Queued…', 'var(--accent)'],
+  submitted:       ['In Aspire app — approve there', 'var(--accent)'],
+  approved_posted: ['Paid ✓', 'var(--green)'],
+  failed:          ['Failed', 'var(--red)'],
+  cancelled:       ['Cancelled', 'var(--text2)']
+};
+function payoutChip(r) {
+  const c = PAYOUT_STATUS_CHIP[r.status] || [r.status, 'var(--text2)'];
+  return '<span style="font-size:11px;font-weight:600;color:' + c[1] + ';border:1px solid ' + c[1] + ';border-radius:20px;padding:2px 9px;white-space:nowrap;">' + c[0] + '</span>';
+}
+
+async function loadPayoutsPage() {
+  const role = currentUserRole();
+  const body = document.getElementById('payouts-body');
+  if (!body) return;
+  if (role !== 'owner' && role !== 'finance') { body.innerHTML = '<div class="sub-text" style="padding:20px;">Owner / finance only.</div>'; return; }
+  payoutDefaultDates();
+  refreshPayoutBalance(false);
+  updatePayoutsNavBadge();
+
+  let rows = [];
+  try { rows = await fetchPayoutRowsForPeriod(); }
+  catch (e) {
+    body.innerHTML = '<div class="alert alert-red" style="margin:16px;"><span class="alert-icon">⚠️</span><span>Could not load payouts: ' + e.message + '. Has pending_payouts_migration_v2.sql been run?</span></div>';
+    return;
+  }
+
+  const live = rows.filter(r => r.status !== 'cancelled');
+  const sum = st => live.filter(r => r.status === st).reduce((a, r) => a + parseFloat(r.amount_sgd || 0), 0);
+  const cnt = st => live.filter(r => r.status === st).length;
+  const bank = rows.filter(r => r.method === 'bank');
+  const manual = rows.filter(r => r.method !== 'bank');
+  const pendingBankIds = bank.filter(r => r.status === 'pending').map(r => r.id);
+  const capWarn = bank.some(r => r.status === 'pending' && parseFloat(r.amount_sgd) > 500);
+
+  const summary =
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">' +
+    [['Pending', cnt('pending'), sum('pending'), 'var(--amber)'],
+     ['In Aspire app', cnt('submitted'), sum('submitted'), 'var(--accent)'],
+     ['Paid', cnt('approved_posted'), sum('approved_posted'), 'var(--green)'],
+     ['Failed', cnt('failed'), sum('failed'), 'var(--red)']]
+      .map(c => '<div style="flex:1;min-width:150px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;">' +
+        '<div style="font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:var(--text2);">' + c[0] + '</div>' +
+        '<div style="font-size:20px;font-weight:700;color:' + c[3] + ';margin-top:4px;">' + c[1] + '</div>' +
+        '<div style="font-size:12px;color:var(--text2);">' + payoutMoney(c[2]) + '</div></div>').join('') +
+    '</div>';
+
+  const bankRows = bank.map(r =>
+    '<tr' + (r.status === 'cancelled' ? ' style="opacity:0.45;"' : '') + '>' +
+    '<td><strong>' + r.worker_name + '</strong><div class="sub-text">' + r.bank_code + ' · ' + r.bank_account_no + '</div></td>' +
+    '<td style="text-align:right;font-weight:600;">' + payoutMoney(r.amount_sgd) +
+      (parseFloat(r.amount_sgd) > 500 && r.status === 'pending' ? '<div class="sub-text" style="color:var(--red);">exceeds proxy cap</div>' : '') + '</td>' +
+    '<td>' + payoutChip(r) + (r.failure_reason ? '<div class="sub-text" style="color:var(--red);max-width:220px;">' + r.failure_reason + '</div>' : '') +
+      (r.aspire_status && r.status === 'submitted' ? '<div class="sub-text">' + r.aspire_status + '</div>' : '') + '</td>' +
+    '<td style="white-space:nowrap;">' +
+      (r.status === 'pending' ? '<button class="btn btn-primary btn-sm" onclick="releasePayouts([\'' + r.id + '\'])">Release</button> ' +
+        '<button class="btn btn-ghost btn-sm" onclick="cancelPayout(\'' + r.id + '\')">Cancel</button>' : '') +
+    '</td></tr>').join('');
+
+  const manualRows = manual.map(r =>
+    '<tr' + (r.status === 'cancelled' ? ' style="opacity:0.45;"' : '') + '>' +
+    '<td><strong>' + r.worker_name + '</strong><div class="sub-text">' + (r.bank_code === 'PAYNOW' ? 'PayNow · ' : '') + r.bank_account_no + '</div></td>' +
+    '<td style="text-align:right;font-weight:600;">' + payoutMoney(r.amount_sgd) + '</td>' +
+    '<td>' + payoutChip(r) + '</td>' +
+    '<td style="white-space:nowrap;">' +
+      (r.status === 'pending' ? '<button class="btn btn-primary btn-sm" onclick="markPayoutPaid(\'' + r.id + '\')">Mark paid</button> ' +
+        '<button class="btn btn-ghost btn-sm" onclick="cancelPayout(\'' + r.id + '\')">Cancel</button>' : '') +
+    '</td></tr>').join('');
+
+  body.innerHTML =
+    summary +
+    (capWarn ? '<div class="alert alert-amber" style="margin-bottom:14px;"><span class="alert-icon">⚠️</span><span>One or more pending payouts exceed the proxy per-transfer cap (SGD 500) and will fail on release. Raise MAX_TRANSFER_SGD on the server or split the payout.</span></div>' : '') +
+    '<div class="table-wrap" style="margin-bottom:20px;">' +
+      '<div class="table-header"><span class="table-title">🏦 Bank transfers via Aspire (' + bank.length + ')</span>' +
+      (pendingBankIds.length ? '<button class="btn btn-primary btn-sm" onclick="releasePayouts(' + JSON.stringify(pendingBankIds).replace(/"/g, "&quot;") + ')">🚀 Release all pending (' + pendingBankIds.length + ')</button>' : '') + '</div>' +
+      (bank.length ? '<table class="data-table"><thead><tr><th>Worker</th><th style="text-align:right;">Amount</th><th>Status</th><th></th></tr></thead><tbody>' + bankRows + '</tbody></table>'
+                   : '<div class="sub-text" style="padding:14px 16px;">No bank-lane payouts for this period. Use ⚙️ Generate payouts.</div>') +
+    '</div>' +
+    '<div class="table-wrap">' +
+      '<div class="table-header"><span class="table-title">📱 PayNow / manual (' + manual.length + ')</span></div>' +
+      '<div class="sub-text" style="padding:10px 16px 0;">Aspire\'s API doesn\'t support PayNow proxy transfers — pay these in the Aspire app as usual, then Mark paid to tick their shifts.</div>' +
+      (manual.length ? '<table class="data-table"><thead><tr><th>Worker</th><th style="text-align:right;">Amount</th><th>Status</th><th></th></tr></thead><tbody>' + manualRows + '</tbody></table>'
+                     : '<div class="sub-text" style="padding:14px 16px;">None for this period.</div>') +
+    '</div>';
+}
+
+// ── Actions ─────────────────────────────────────────────────────
+async function releasePayouts(ids) {
+  if (!ids || !ids.length) return;
+  let rows = [];
+  try { rows = (await fetchPayoutRowsForPeriod()).filter(r => ids.includes(r.id) && r.status === 'pending' && r.method === 'bank'); } catch (e) {}
+  if (!rows.length) { toast('Nothing releasable in that selection', 'error'); return; }
+  const total = rows.reduce((a, r) => a + parseFloat(r.amount_sgd || 0), 0);
+  if (!confirm('Release ' + rows.length + ' payout(s) totalling ' + payoutMoney(total) + ' to Aspire?\n\nEach transfer will still wait for your approval tap in the Aspire app before any money moves.')) return;
+  toast('Submitting ' + rows.length + ' payout(s) to Aspire…');
+  try {
+    const out = await aspireRelay('release', { payout_ids: rows.map(r => r.id), released_by: currentInternalUser || 'unknown' });
+    const ok = (out.results || []).filter(x => x.outcome === 'submitted' || x.outcome === 'already_submitted').length;
+    const failed = (out.results || []).filter(x => x.outcome === 'failed');
+    toast(ok + ' submitted — approve them in the Aspire app' + (failed.length ? ' · ' + failed.length + ' failed' : ''), failed.length ? 'error' : 'success');
+    await logActivity('Payouts released', ok + ' payout(s) submitted to Aspire (' + payoutMoney(total) + ')', 'payout', null, {});
+  } catch (e) { toast('Release failed: ' + e.message, 'error'); }
+  loadPayoutsPage();
+}
+
+async function syncPayouts() {
+  toast('Checking Aspire transfer statuses…');
+  try {
+    const out = await aspireRelay('sync');
+    const posted = (out.updates || []).filter(u => u.outcome === 'posted');
+    // Tick the underlying shifts for anything that actually posted.
+    for (const u of posted) {
+      try {
+        const { data: r } = await supabaseClient.from('pending_payouts').select('shift_ids,worker_name').eq('id', u.id).maybeSingle();
+        if (r) await markShiftsPaidForPayout(r);
+      } catch (e) {}
+    }
+    toast('Checked ' + (out.checked || 0) + ' transfer(s)' + (posted.length ? ' · ' + posted.length + ' posted ✓' : ' · no changes'));
+  } catch (e) { toast('Sync failed: ' + e.message, 'error'); }
+  loadPayoutsPage();
+}
+
+async function markShiftsPaidForPayout(payoutRow) {
+  const ids = Array.isArray(payoutRow.shift_ids) ? payoutRow.shift_ids : [];
+  if (!ids.length) return;
+  const { error } = await supabaseClient.from('shifts')
+    .update({ is_paid: true, updated_at: new Date().toISOString() }).in('id', ids);
+  if (!error) {
+    (allShifts || []).forEach(s => { if (ids.includes(s.id)) s.is_paid = true; });
+    await logActivity('Payroll paid', payoutRow.worker_name + ' — ' + ids.length + ' shift(s) ticked paid via Aspire payout', 'payout', null, {});
+  }
+}
+
+async function markPayoutPaid(id) {
+  let row = null;
+  try { row = (await fetchPayoutRowsForPeriod()).find(r => r.id === id); } catch (e) {}
+  if (!row || row.status !== 'pending' || row.method === 'bank') { toast('Only pending PayNow/manual payouts can be marked paid by hand', 'error'); return; }
+  if (!confirm('Mark ' + row.worker_name + ' (' + payoutMoney(row.amount_sgd) + ') as paid?\n\nOnly do this AFTER you have actually sent the PayNow/manual payment.')) return;
+  const { error } = await supabaseClient.from('pending_payouts')
+    .update({ status: 'approved_posted', released_by: currentInternalUser || 'unknown', released_at: new Date().toISOString() })
+    .eq('id', id).eq('status', 'pending');
+  if (error) { toast('Failed: ' + error.message + ' (run pending_payouts_migration_v2.sql?)', 'error'); return; }
+  await markShiftsPaidForPayout(row);
+  toast(row.worker_name + ' marked paid ✓');
+  loadPayoutsPage();
+}
+
+async function cancelPayout(id) {
+  if (!confirm('Cancel this payout? The shifts stay unpaid and can be regenerated under a different period.')) return;
+  const { error } = await supabaseClient.from('pending_payouts')
+    .update({ status: 'cancelled' }).eq('id', id).eq('status', 'pending');
+  if (error) { toast('Failed: ' + error.message, 'error'); return; }
+  toast('Payout cancelled');
+  loadPayoutsPage();
 }
 
 // ── Penalty management ───────────────────────────────────────
@@ -23945,6 +24290,7 @@ function applyRoleVisibility() {
   const role = currentUserRole();
   const finNav = document.getElementById('nav-finance');
   const expNav = document.getElementById('nav-expenses');
+  const payNav = document.getElementById('nav-payouts');
   const salNav = document.getElementById('nav-salary');
   const waNav  = document.getElementById('nav-whatsapp');
   const tasksNav = document.querySelector('.nav-item-tasks');
@@ -23954,6 +24300,7 @@ function applyRoleVisibility() {
   if (isPhPartner) {
     if (finNav) finNav.style.display = 'none';
     if (expNav) expNav.style.display = 'none';
+    if (payNav) payNav.style.display = 'none';
     if (salNav) salNav.style.display = 'none';
     if (waNav)  waNav.style.display = 'none';
     if (tasksNav) tasksNav.style.display = '';
@@ -23982,6 +24329,8 @@ function applyRoleVisibility() {
   if (finNav) finNav.style.display = (role === 'owner' || role === 'finance') ? '' : 'none';
   // Expenses: owner only
   if (expNav) expNav.style.display = (role === 'owner') ? '' : 'none';
+  // Aspire Payouts: owner + finance (money out — mirrors Finance Dashboard access)
+  if (payNav) payNav.style.display = (role === 'owner' || role === 'finance') ? '' : 'none';
   // My Salary: everyone who has a salary profile (all current users)
   if (salNav) salNav.style.display = '';
 
@@ -24006,7 +24355,7 @@ function applyRoleVisibility() {
   const landing = (role === 'finance') ? 'finance' : 'attendance';
   const visiblePage = Array.from(document.querySelectorAll('.main > div')).find(d => d.style.display === 'block');
   const currentPageId = visiblePage ? visiblePage.id.replace('page-','') : null;
-  const allowedForFinance = ['finance','salary','leave'];
+  const allowedForFinance = ['finance','salary','leave','payouts'];
   if (role === 'finance' && currentPageId && !allowedForFinance.includes(currentPageId)) {
     const btn = navButtonForPage('finance');
     if (btn) switchPage('finance', btn);
