@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v95 (REAL LOGIN: SUPABASE AUTH + TOTP MFA FOR MONEY ROLES + RELAY JWT) — Worked from the v94 (July17_2index_v94) build. Ops request: secure the login now that the panel charges cards. REALITY FIXED: the old gate was client-side only — 7 passcodes hardcoded in this public file, sessions in localStorage, nothing verified server-side; the anon key could drive Supabase and both relays regardless of login. NEW (flag USE_SUPABASE_AUTH=true): (1) LOGIN is now Supabase Auth email+password (signInWithPassword). Username + role come from user_metadata {username, role} so every existing username-keyed behaviour (activity log authorship, USER_COUNTRY_SCOPE for Hiro, salary profiles, messaging selects, applyRoleVisibility) is unchanged. Session = Supabase JWT (auto-refresh, signOut on logout); the app no longer trusts localStorage for auth in supa mode (current_internal_user kept only as a display-name cache for boot-time logActivity). (2) TOTP MFA (authenticator app): owner + finance MUST enrol — on first login the modal shows the QR + secret from mfa.enroll(totp), verifies the 6-digit code, and thereafter every login for a TOTP-enrolled user goes through challenge/verify to AAL2 before the app opens. Ops/ph_partner stay password-only (enrolment optional later). (3) RELAY CALLS now send the LOGGED-IN USER'S JWT (authBearerToken(): session access_token, anon-key fallback in legacy mode) — stripeRelay + aspireRelay headers switched — so stripe-relay v3 (ships alongside) can verify the caller: auth.getUser(jwt), role/email allowlist (owner+finance only), optional country gate + daily cap; a drop-in auth guard snippet for aspire-relay ships too. (4) LEGACY FALLBACK: set USE_SUPABASE_AUTH=false to restore the old gate for a transition week — with ALL SEVEN PASSCODES ROTATED to fresh random values (old ones are burned: they lived in a public file). seedInternalUsers/select-fill skip in supa mode; the modal shows email+password (+MFA row/enrol panel) in supa mode and username+passcode in legacy. changeInternalPasscode is legacy-only (supa users reset via email). auth_migration_v1.sql ships with staged steps: A) create the 7 users with metadata, B) verify v95, C) revoke anon table access so the embedded anon key stops being a data key. node --check passes (2/2 inline script blocks). Surgical diff: login modal reworked + MFA/enrol rows added, INTERNAL_USER_ACCOUNTS passcodes rotated + flag const, requireInternalLogin/internalLogin/internalLogout branched (legacy bodies preserved), new self-contained supa-auth region (supaLogin/supaMfaVerify/supaEnrollStart/supaEnrollVerify/finishSupaLogin/supaRequireLogin/authBearerToken + _supaRole), currentUserRole one supa branch, seedInternalUsers one guard line, stripeRelay + aspireRelay auth header lines; zero function removals or renames; webhook untouched; v93/v94 features untouched. -->
 <!-- Build patch: v94 (STRIPE BUTTON NOW DRIVEN BY THE OUTLET/CLIENT PROFILE CARD TICK) — Worked from the v93 (July17index_v93) build. Ops feedback: the v93 card tag lived in Xero Billing → Client Billing Settings, so it was easy to miss and the button "never appeared". NEW: the tag moves to where clients are actually managed — the Add/Edit OUTLET modal (client profile). (1) New "💳 Card payment via Stripe — always 15% commission" checkbox under Commission charged (%), plus a Stripe Customer ID field that appears only when ticked. Ticking locks the commission input to 15 (_ofCardPaymentToggle); saveOutlet force-writes commission_pct 15 while ticked. Stored as scalars profileMeta.outlets[key].card_payment / .stripe_customer_id — the SAME team-synced app_settings profile_meta merge as attire/notes/lat-lng ({...se,...pe} keeps scalars), NO schema change; resetOutletModal clears, editOutlet populates, saveOutlet persists (all other profile fields preserved). The Outlets table commission cell shows 💳 next to the % for card outlets. (2) GATING REWIRED: shiftStripeState now checks outletProfile(s.outlet).card_payment — the outlet tick alone makes the "💳 Charge on Stripe" button appear on a clocked-out, non-cancelled, non-Available shift, and the green "💳 Paid (Stripe)" chip after charging; the v93 billing-client 'card' mode is NO LONGER required for the button (it remains available in Client Billing Settings purely as the invoice-side 15% method). openStripeChargeModal reads the Stripe Customer ID from the outlet profile (amber warning when blank); confirmStripeCharge sends outlet (+ the billing-owner name as a label) to the relay. (3) stripe-relay v2 ships alongside: it now resolves the card flag + customer id from app_settings profile_meta (key = outlet name trimmed/lowercased, matching normProfileKey) instead of billing_client_settings — the browser still cannot pick the customer; the relay reads it from the shared store server-side. DELIBERATELY UNCHANGED: is_paid (the worker "Paid" tick used for payroll/Aspire) is a completely separate flag — a Stripe charge never touches it, per ops. Double-charge guards (server re-read of stripe_charge_id + Stripe idempotency key shiftops-shift-<id>) unchanged. node --check passes (2/2 inline script blocks). Surgical diff: outlet modal HTML row + one toggle fn, 3 lines each in resetOutletModal/editOutlet, 1 line in the saveOutlet profileMeta write + commission force, 1 outlets-table cell, shiftStripeState/openStripeChargeModal/confirmStripeCharge reworked within the v93 Stripe region (v93's own lines); zero function removals or renames; webhook untouched; no other build region touched. -->
 <!-- Build patch: v93 (STRIPE CARD CHARGING + EDITABLE/UNIQUE BILLING CLIENT NAMES) — Worked from the v92 (July16index_v86) build. THREE requests. (1) CARD-PAYMENT CLIENT TAG: Client Billing Settings gains a third Billing Method — "Card payment via Stripe (15%)" (billingMode:'card'). Card clients are ALWAYS 15% commission: the % input locks to 15 and disables when card is picked (_billingToggleMode), saveBillingSettings force-writes 15 regardless of the input, and computeClientBilling forces pct 15 with label "15% (card)" — the invoice fee line reads "15% Commission Fee". A 💳 Card · 15% chip shows on the client row. New per-client "Stripe Customer ID" field (cfg.stripeCustomerId, saved alongside xeroContactId in the same team-synced billing_client_settings store) — the customer must have a saved card in Stripe. (2) CHARGE ON STRIPE AFTER END SHIFT: every attendance action-stack (day + both week builders) appends stripeChargeControlHtml(s): for a completed (clock_in+clock_out), non-cancelled, non-Available shift whose outlet is OWNED (buildOutletOwnershipMap, 5s memo) by a card-mode client, a purple "💳 Charge on Stripe" button appears once the shift ends; already-charged shifts show a green "💳 Paid (Stripe)" chip instead. Button → breakdown modal (base payoutForShift + 15% commission + transport PTC + billable compensation = total, in the outlet's currency) → confirmStripeCharge() POSTs action:charge {shift_id, billing_client, amount_cents, currency} to the NEW stripe-relay Supabase Edge Function (ships alongside; mirrors aspire-relay: anon-key call in, service-role inside). The relay re-reads the shift server-side, REFUSES if stripe_charge_id is already set (structural double-charge guard, plus Stripe idempotency key shiftops-shift-<id>), reads the client's stripeCustomerId from the shared billing settings, creates an off-session confirmed PaymentIntent on the customer's saved card, and on success service-role-writes shifts.stripe_charge_id + stripe_charged_at → the row flips to the Paid (Stripe) chip on every device via the normal loadShifts. DECLINE → relay returns {declined,reason} and the panel shows a dedicated red "Card declined" popup (stripe-decline-modal) with Stripe's reason; genuine errors (no saved card, missing customer id, cap exceeded, missing migration) surface in the same popup. DELIBERATE: is_paid is NOT touched — that tick is the WORKER-payroll flag driving Aspire payouts; Stripe is CLIENT money-in, tracked on its own columns so the worker still gets paid. Requires stripe_migration_v1.sql (adds shifts.stripe_charge_id + stripe_charged_at; browser never writes them — no RLS change) and the stripe-relay deploy with STRIPE_SECRET_KEY. (3) BILLING CLIENT NAMES NOW EDITABLE + DUPLICATE-PROOF: the static 🏢 name header is an editable input (.bs-name); Save renames the config key (outlets/emails/Xero id/Stripe id all carried over, rename activity-logged; sent-invoice history stays under the old name). saveBillingSettings validates ALL names first — normalised (trim/collapse-spaces) case-insensitive — and refuses the whole save on any duplicate; addNewBillingClient now uses the same case-insensitive check (was exact-match only, so "Tam Jai"/"tam jai" could coexist). node --check passes (2/2 inline script blocks). Surgical diff: 3 action-stack lines gain one template call each, billing modal name/mode/pct/flat/xero-row lines reworked + stripe-id row added, _billingToggleMode + saveBillingSettings + addNewBillingClient + computeClientBilling mode/pct/label lines, 2 new modal-overlay divs, one new self-contained Stripe JS region after the Aspire payouts region; zero function removals or renames; webhook untouched. -->
 <!-- Build patch: v92 (PER-WORKER "NO ACKNOWLEDGEMENT REQUIRED" PROFILE TICK) — Worked from the v91 (July4_2index_v86) build. Ops request: some workers find the reminder-acknowledgement chase annoying. NEW tick on the Add/Edit worker modal — "🔕 No acknowledgement required" — stored as a scalar profileMeta.workers[key].no_ack_required, so it syncs team-wide through the existing app_settings profile_meta merge ({...se,...pe} keeps scalars) with NO schema change and is reversed by simply unticking. EFFECT WHEN TICKED (helper workerNoAckRequired(name)): (1) reminders still SEND exactly as before — timing, claims, dedup all untouched; (2) buildNightReminderMessage drops only the "Please reply *OK* or *✓* to confirm." line for that worker (the can't-make-it / cancel escape line is KEPT so cancellations still surface; the clock-in message is unchanged — it only asks for a reply when there's a problem); (3) checkReminderAlerts never adds the worker to the night-unacked group alert or the per-worker clock-in no-response lines (dispute + late alerts unaffected); (4) reminderPanelHtml hides the "Worker acknowledged"/"Worker responded" checkboxes and shows a muted "🔕 No acknowledgement required for this worker" note; isFullyAck now treats BOTH SENDS alone as complete for a no-ack worker and the banner reads "✅ Reminders sent · 🔕 no ack required"; the past-shift badge row swaps the two grey ack ✗ badges for one muted "🔕 no-ack" badge so history doesn't read as failure. If the worker replies anyway the webhook/markWorkerAcknowledged still record acks — harmless, the panel already treats them as satisfied. Modal wiring: new #wf-no-ack row after Profile notes; resetWorkerModal clears it, editWorker populates from meta.no_ack_required, saveWorker persists it in the existing profileMeta write (all other profile fields preserved as before). Webhook NOT touched; autoSendShiftReminders NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: 6 original lines changed (night-builder return, two alert guards, isFullyAck line + two banner returns collapsed into label const, two ack badge lines, two ack checkbox rows gaining a !noAckWorker guard) + purely additive modal row, three modal-wiring lines, one helper, one panel note; zero function removals or renames; nothing else touched. -->
@@ -2401,10 +2402,23 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
 <div class="modal-overlay" id="internal-login-modal">
   <div class="modal" style="width:360px;">
     <h3>Internal login</h3>
-    <div class="alert alert-blue"><span class="alert-icon">ℹ️</span><span>Use your dedicated internal passcode to access ShiftOps.</span></div>
-    <div class="form-row"><label>Username</label><select id="login-user"></select></div>
-    <div class="form-row"><label>Passcode</label><input type="password" id="login-pass" placeholder="Enter passcode"></div>
-    <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="internalLogin()">Login</button>
+    <div class="alert alert-blue"><span class="alert-icon">🔐</span><span id="login-hint">Sign in with your ShiftOps account. Owner &amp; finance accounts require an authenticator code.</span></div>
+    <div class="form-row" id="login-user-row" style="display:none;"><label>Username</label><select id="login-user"></select></div>
+    <div class="form-row" id="login-email-row"><label>Email</label><input type="email" id="login-email" placeholder="you@anytimeanywork.com" autocomplete="username"></div>
+    <div class="form-row"><label id="login-pass-label">Password</label><input type="password" id="login-pass" placeholder="Enter password" autocomplete="current-password"></div>
+    <div class="form-row" id="login-mfa-row" style="display:none;">
+      <label>Authenticator code</label>
+      <input type="text" id="login-mfa-code" inputmode="numeric" maxlength="6" placeholder="6-digit code" style="font-family:var(--mono);letter-spacing:4px;">
+    </div>
+    <button class="btn btn-primary" id="login-btn" style="width:100%;justify-content:center;" onclick="internalLogin()">Login</button>
+    <!-- v95: first-login TOTP enrolment for owner/finance -->
+    <div id="mfa-enroll-panel" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px;"><b>Set up your authenticator (required for this account).</b> Scan the QR with Google Authenticator / Authy / 1Password, then enter the 6-digit code.</div>
+      <div id="mfa-enroll-qr" style="display:flex;justify-content:center;background:#fff;border-radius:8px;padding:8px;margin-bottom:8px;"></div>
+      <div id="mfa-enroll-secret" style="font-family:var(--mono);font-size:10px;color:var(--text3);word-break:break-all;text-align:center;margin-bottom:8px;"></div>
+      <div class="form-row"><label>Code from app</label><input type="text" id="mfa-enroll-code" inputmode="numeric" maxlength="6" placeholder="6-digit code" style="font-family:var(--mono);letter-spacing:4px;"></div>
+      <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="supaEnrollVerify()">✓ Verify &amp; finish setup</button>
+    </div>
   </div>
 </div>
 
@@ -2645,14 +2659,22 @@ let shiftMapInstance = null, shiftMapMarkers = [];
 let profileMeta = loadProfileMeta();
 let outletGroups = loadOutletGroups(); // [{ id, name, outlets:[outletName,...] }]
 let shiftComments = loadShiftComments();
+// v95: real authentication. true = Supabase Auth (email+password, JWT sessions,
+// TOTP MFA enforced for owner/finance). false = legacy passcode gate (transition
+// fallback only). The legacy passcodes below were ROTATED in v95 — the previous
+// set lived in this public file for months and must be considered burned.
+const USE_SUPABASE_AUTH = true;
+// Emails of the Supabase Auth users (create them in Step A of auth_migration_v1.sql).
+// Used only for the login hint + mapping display names if metadata is missing.
+const SUPA_AUTH_ROLES_REQUIRING_MFA = ['owner', 'finance'];
 const INTERNAL_USER_ACCOUNTS = [
-  { username:'Jon', passcode:'8472915630', role:'owner' },
-  { username:'Jayden', passcode:'5028741936', role:'ops' },
-  { username:'McBilly', passcode:'9182637450', role:'ops' },
-  { username:'Yra', passcode:'3749501826', role:'ops' },
-  { username:'Niro', passcode:'6839172045', role:'ops' },
-  { username:'Emmanuel', passcode:'DaantpWBq2niv5', role:'finance' },
-  { username:'Hiro', passcode:'PH4465865', role:'ph_partner' }
+  { username:'Jon', passcode:'K7x2mQ9pR4vT', role:'owner' },
+  { username:'Jayden', passcode:'W3nB8sL1zD6f', role:'ops' },
+  { username:'McBilly', passcode:'H5cJ2tY7qM0k', role:'ops' },
+  { username:'Yra', passcode:'P9dF4wS6xN3r', role:'ops' },
+  { username:'Niro', passcode:'G1vK8bC5jL2m', role:'ops' },
+  { username:'Emmanuel', passcode:'Z6yQ3hT9nX4w', role:'finance' },
+  { username:'Hiro', passcode:'R2sM7fV0kB8p', role:'ph_partner' }
 ];
 // Countries a user is allowed to see. Empty/undefined = all countries (no scope).
 // ph_partner (Hiro) is locked to the Philippines only — he never sees SG/MY data,
@@ -2670,7 +2692,11 @@ const INTERNAL_USERS = INTERNAL_USER_ACCOUNTS.map(u => u.username);
 // ops = everyone else (operations pages + own Salary, no Finance Dashboard / Expenses).
 const USER_ROLES = INTERNAL_USER_ACCOUNTS.reduce((m,a) => { m[a.username] = a.role || 'ops'; return m; }, {});
 function roleForUser(u) { return USER_ROLES[u] || 'ops'; }
-function currentUserRole() { return roleForUser(currentInternalUser); }
+let _supaRole = null; // v95: role from Supabase user_metadata when USE_SUPABASE_AUTH
+function currentUserRole() {
+  if (USE_SUPABASE_AUTH && _supaRole) return _supaRole;
+  return roleForUser(currentInternalUser);
+}
 
 // ── Salary profile configuration (per-user pay basis) ─────────
 // Future-proof: each member has a configurable profile { currency, type, base,
@@ -12430,9 +12456,10 @@ function payoutRef(startISO, endISO) {
 }
 
 async function aspireRelay(action, extra) {
+  const _tok = await authBearerToken(); // v95: user JWT for server-side caller verification
   const res = await fetch(ASPIRE_RELAY_ACTION_URL(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY },
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _tok, 'apikey': SUPABASE_KEY },
     body: JSON.stringify(Object.assign({ action: action }, extra || {}))
   });
   let body = null;
@@ -12724,9 +12751,10 @@ async function cancelPayout(id) {
 const STRIPE_RELAY_URL = () => (SUPABASE_URL || '').replace(/\/+$/, '') + '/functions/v1/stripe-relay';
 
 async function stripeRelay(action, extra) {
+  const _tok = await authBearerToken(); // v95: logged-in user's JWT so the relay can verify who is charging
   const res = await fetch(STRIPE_RELAY_URL(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY },
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _tok, 'apikey': SUPABASE_KEY },
     body: JSON.stringify(Object.assign({ action: action }, extra || {}))
   });
   let body = null;
@@ -14589,6 +14617,16 @@ function focusShiftMapOutlet(lat, lng) {
 
 // ── Internal users / login ───────────────────────────────────
 function seedInternalUsers() {
+  if (USE_SUPABASE_AUTH) {
+    // v95: no client-side passcode store in supa mode; show email field, hide select.
+    const er = document.getElementById('login-email-row'); if (er) er.style.display = '';
+    const ur = document.getElementById('login-user-row'); if (ur) ur.style.display = 'none';
+    return;
+  }
+  const ur2 = document.getElementById('login-user-row'); if (ur2) ur2.style.display = '';
+  const er2 = document.getElementById('login-email-row'); if (er2) er2.style.display = 'none';
+  const hint = document.getElementById('login-hint'); if (hint) hint.textContent = 'Use your dedicated internal passcode to access ShiftOps.';
+  const pl = document.getElementById('login-pass-label'); if (pl) pl.textContent = 'Passcode';
   const saved = JSON.parse(localStorage.getItem('internal_users') || '{}');
   INTERNAL_USER_ACCOUNTS.forEach(acc => {
     const existing = saved[acc.username];
@@ -14657,6 +14695,7 @@ function saveInternalSession(user) {
   localStorage.setItem('current_internal_user', user);
 }
 function requireInternalLogin() {
+  if (USE_SUPABASE_AUTH) { supaRequireLogin(); return; }
   const session = getValidInternalSession();
   if (session) {
     currentInternalUser = session.user;
@@ -14678,6 +14717,7 @@ function requireInternalLogin() {
   setTimeout(() => document.getElementById('login-pass')?.focus(), 50);
 }
 function internalLogin() {
+  if (USE_SUPABASE_AUTH) { supaLogin(); return; }
   const user = document.getElementById('login-user').value;
   const pass = document.getElementById('login-pass').value;
   const users = JSON.parse(localStorage.getItem('internal_users') || '{}');
@@ -14703,6 +14743,7 @@ function internalLogin() {
   if (users[user].mustChange) document.getElementById('change-pass-modal').classList.add('open');
 }
 function internalLogout() {
+  if (USE_SUPABASE_AUTH) { try { supabaseClient.auth.signOut(); } catch (e) {} _supaRole = null; }
   if (messagePollTimer) clearInterval(messagePollTimer);
   messagePollTimer = null;
   currentInternalUser = null;
@@ -14750,6 +14791,185 @@ function fillInternalUserSelects() {
       el.innerHTML = INTERNAL_USERS.map(u => `<option>${u}</option>`).join('');
     }
   });
+}
+
+// ── Supabase Auth login (v95) ────────────────────────────────
+// Email+password via Supabase Auth; username/role from user_metadata so all
+// username-keyed behaviour (activity log, country scope, salary, messaging)
+// is untouched. TOTP MFA is REQUIRED for owner/finance: first login walks
+// through enrolment (QR + code), later logins challenge to AAL2. The session
+// JWT is what the relays verify server-side (authBearerToken()).
+
+let _supaMfaFactorId = null;     // verified TOTP factor awaiting challenge
+let _supaMfaChallengeId = null;
+let _supaEnrollFactorId = null;  // factor being enrolled right now
+
+async function authBearerToken() {
+  if (USE_SUPABASE_AUTH) {
+    try {
+      const { data } = await supabaseClient.auth.getSession();
+      if (data?.session?.access_token) return data.session.access_token;
+    } catch (e) {}
+  }
+  return SUPABASE_KEY; // legacy mode / no session: anon key (relay will reject money actions)
+}
+
+function _supaShowApp() {
+  document.getElementById('main-app').style.display = 'flex';
+  document.getElementById('internal-login-modal').classList.remove('open');
+  const mfaRow = document.getElementById('login-mfa-row'); if (mfaRow) mfaRow.style.display = 'none';
+  const enroll = document.getElementById('mfa-enroll-panel'); if (enroll) enroll.style.display = 'none';
+  const pw = document.getElementById('login-pass'); if (pw) pw.value = '';
+  const mc = document.getElementById('login-mfa-code'); if (mc) mc.value = '';
+  setLoggedInUserLabel();
+  setAuthGateUI(true);
+  startMessagePolling();
+}
+
+function _supaShowLogin() {
+  currentInternalUser = null; _supaRole = null;
+  localStorage.removeItem('current_internal_user');
+  setLoggedInUserLabel();
+  setAuthGateUI(false);
+  try { updateAnnouncementBadge(0); } catch (e) {}
+  document.getElementById('main-app').style.display = 'none';
+  document.getElementById('internal-login-modal').classList.add('open');
+  setTimeout(() => document.getElementById(document.getElementById('login-email-row')?.style.display !== 'none' ? 'login-email' : 'login-pass')?.focus(), 60);
+}
+
+function _supaApplyUser(user) {
+  const meta = user?.user_metadata || {};
+  const uname = String(meta.username || (user?.email || '').split('@')[0] || 'Unknown');
+  const role  = String(meta.role || 'ops');
+  currentInternalUser = uname;
+  _supaRole = ['owner','ops','finance','ph_partner'].includes(role) ? role : 'ops';
+  // Display-name cache only (NOT an auth token) so boot-time logActivity has a name.
+  localStorage.setItem('current_internal_user', uname);
+}
+
+async function _supaVerifiedTotpFactor() {
+  try {
+    const { data, error } = await supabaseClient.auth.mfa.listFactors();
+    if (error) return null;
+    const f = (data?.totp || []).find(x => x.status === 'verified');
+    return f ? f.id : null;
+  } catch (e) { return null; }
+}
+
+async function supaRequireLogin() {
+  seedInternalUsers(); // toggles email vs username rows
+  try {
+    const { data } = await supabaseClient.auth.getSession();
+    const session = data?.session;
+    if (session?.user) {
+      // Enforce AAL2 for MFA-required roles / enrolled users.
+      const { data: aal } = await supabaseClient.auth.mfa.getAuthenticatorAssuranceLevel();
+      const role = String(session.user.user_metadata?.role || 'ops');
+      const needsMfa = SUPA_AUTH_ROLES_REQUIRING_MFA.includes(role);
+      const enrolled = await _supaVerifiedTotpFactor();
+      if ((needsMfa || enrolled) && aal?.currentLevel !== 'aal2') {
+        // Session exists but not MFA-verified this session → force fresh login.
+        await supabaseClient.auth.signOut();
+        _supaShowLogin();
+        return;
+      }
+      _supaApplyUser(session.user);
+      _supaShowApp();
+      return;
+    }
+  } catch (e) { console.warn('supaRequireLogin:', e); }
+  _supaShowLogin();
+}
+
+async function supaLogin() {
+  const btn = document.getElementById('login-btn');
+  const mfaRowVisible = document.getElementById('login-mfa-row')?.style.display !== 'none';
+  if (mfaRowVisible) { supaMfaVerify(); return; }
+  const email = (document.getElementById('login-email')?.value || '').trim().toLowerCase();
+  const pass  = document.getElementById('login-pass')?.value || '';
+  if (!email || !pass) { toast('Enter email and password', 'error'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password: pass });
+    if (error) { toast('Login failed: ' + error.message, 'error'); return; }
+    const user = data?.user;
+    const role = String(user?.user_metadata?.role || 'ops');
+    const needsMfa = SUPA_AUTH_ROLES_REQUIRING_MFA.includes(role);
+    const factorId = await _supaVerifiedTotpFactor();
+    if (factorId) {
+      // Enrolled (any role): challenge to AAL2.
+      const { data: ch, error: chErr } = await supabaseClient.auth.mfa.challenge({ factorId });
+      if (chErr) { toast('MFA challenge failed: ' + chErr.message, 'error'); return; }
+      _supaMfaFactorId = factorId; _supaMfaChallengeId = ch.id;
+      document.getElementById('login-mfa-row').style.display = '';
+      if (btn) btn.textContent = '✓ Verify code';
+      setTimeout(() => document.getElementById('login-mfa-code')?.focus(), 60);
+      toast('Enter the 6-digit code from your authenticator');
+      return;
+    }
+    if (needsMfa) { supaEnrollStart(); return; } // owner/finance must enrol before entering
+    _supaApplyUser(user);
+    _supaShowApp();
+    toast('Welcome, ' + currentInternalUser);
+  } catch (e) {
+    toast('Login error: ' + (e?.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; if (document.getElementById('login-mfa-row')?.style.display === 'none') btn.textContent = 'Login'; }
+  }
+}
+
+async function supaMfaVerify() {
+  const code = (document.getElementById('login-mfa-code')?.value || '').trim();
+  if (!/^\d{6}$/.test(code)) { toast('Enter the 6-digit code', 'error'); return; }
+  const btn = document.getElementById('login-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Verifying…'; }
+  try {
+    const { data, error } = await supabaseClient.auth.mfa.verify({
+      factorId: _supaMfaFactorId, challengeId: _supaMfaChallengeId, code
+    });
+    if (error) { toast('Wrong code — try again', 'error'); return; }
+    const { data: u } = await supabaseClient.auth.getUser();
+    _supaApplyUser(u?.user);
+    _supaShowApp();
+    toast('Welcome, ' + currentInternalUser);
+  } catch (e) {
+    toast('MFA error: ' + (e?.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Login'; }
+  }
+}
+
+async function supaEnrollStart() {
+  try {
+    const { data, error } = await supabaseClient.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'ShiftOps' });
+    if (error) { toast('MFA enrolment failed: ' + error.message, 'error'); return; }
+    _supaEnrollFactorId = data.id;
+    const qrHost = document.getElementById('mfa-enroll-qr');
+    if (qrHost) {
+      // Supabase returns an SVG QR (data.totp.qr_code). Render it directly.
+      qrHost.innerHTML = data.totp?.qr_code || '';
+    }
+    const secretEl = document.getElementById('mfa-enroll-secret');
+    if (secretEl) secretEl.textContent = 'Manual key: ' + (data.totp?.secret || '');
+    document.getElementById('mfa-enroll-panel').style.display = '';
+    toast('Scan the QR, then enter the 6-digit code');
+  } catch (e) { toast('MFA enrolment error: ' + (e?.message || e), 'error'); }
+}
+
+async function supaEnrollVerify() {
+  const code = (document.getElementById('mfa-enroll-code')?.value || '').trim();
+  if (!/^\d{6}$/.test(code)) { toast('Enter the 6-digit code from the app', 'error'); return; }
+  try {
+    const { data: ch, error: chErr } = await supabaseClient.auth.mfa.challenge({ factorId: _supaEnrollFactorId });
+    if (chErr) { toast('Challenge failed: ' + chErr.message, 'error'); return; }
+    const { error } = await supabaseClient.auth.mfa.verify({ factorId: _supaEnrollFactorId, challengeId: ch.id, code });
+    if (error) { toast('Wrong code — check your authenticator and try again', 'error'); return; }
+    const { data: u } = await supabaseClient.auth.getUser();
+    _supaApplyUser(u?.user);
+    document.getElementById('mfa-enroll-code').value = '';
+    _supaShowApp();
+    toast('✅ Authenticator set up — welcome, ' + currentInternalUser);
+  } catch (e) { toast('Enrolment error: ' + (e?.message || e), 'error'); }
 }
 
 // ── Incidents ────────────────────────────────────────────────
