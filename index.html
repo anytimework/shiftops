@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v94 (STRIPE BUTTON NOW DRIVEN BY THE OUTLET/CLIENT PROFILE CARD TICK) — Worked from the v93 (July17index_v93) build. Ops feedback: the v93 card tag lived in Xero Billing → Client Billing Settings, so it was easy to miss and the button "never appeared". NEW: the tag moves to where clients are actually managed — the Add/Edit OUTLET modal (client profile). (1) New "💳 Card payment via Stripe — always 15% commission" checkbox under Commission charged (%), plus a Stripe Customer ID field that appears only when ticked. Ticking locks the commission input to 15 (_ofCardPaymentToggle); saveOutlet force-writes commission_pct 15 while ticked. Stored as scalars profileMeta.outlets[key].card_payment / .stripe_customer_id — the SAME team-synced app_settings profile_meta merge as attire/notes/lat-lng ({...se,...pe} keeps scalars), NO schema change; resetOutletModal clears, editOutlet populates, saveOutlet persists (all other profile fields preserved). The Outlets table commission cell shows 💳 next to the % for card outlets. (2) GATING REWIRED: shiftStripeState now checks outletProfile(s.outlet).card_payment — the outlet tick alone makes the "💳 Charge on Stripe" button appear on a clocked-out, non-cancelled, non-Available shift, and the green "💳 Paid (Stripe)" chip after charging; the v93 billing-client 'card' mode is NO LONGER required for the button (it remains available in Client Billing Settings purely as the invoice-side 15% method). openStripeChargeModal reads the Stripe Customer ID from the outlet profile (amber warning when blank); confirmStripeCharge sends outlet (+ the billing-owner name as a label) to the relay. (3) stripe-relay v2 ships alongside: it now resolves the card flag + customer id from app_settings profile_meta (key = outlet name trimmed/lowercased, matching normProfileKey) instead of billing_client_settings — the browser still cannot pick the customer; the relay reads it from the shared store server-side. DELIBERATELY UNCHANGED: is_paid (the worker "Paid" tick used for payroll/Aspire) is a completely separate flag — a Stripe charge never touches it, per ops. Double-charge guards (server re-read of stripe_charge_id + Stripe idempotency key shiftops-shift-<id>) unchanged. node --check passes (2/2 inline script blocks). Surgical diff: outlet modal HTML row + one toggle fn, 3 lines each in resetOutletModal/editOutlet, 1 line in the saveOutlet profileMeta write + commission force, 1 outlets-table cell, shiftStripeState/openStripeChargeModal/confirmStripeCharge reworked within the v93 Stripe region (v93's own lines); zero function removals or renames; webhook untouched; no other build region touched. -->
 <!-- Build patch: v93 (STRIPE CARD CHARGING + EDITABLE/UNIQUE BILLING CLIENT NAMES) — Worked from the v92 (July16index_v86) build. THREE requests. (1) CARD-PAYMENT CLIENT TAG: Client Billing Settings gains a third Billing Method — "Card payment via Stripe (15%)" (billingMode:'card'). Card clients are ALWAYS 15% commission: the % input locks to 15 and disables when card is picked (_billingToggleMode), saveBillingSettings force-writes 15 regardless of the input, and computeClientBilling forces pct 15 with label "15% (card)" — the invoice fee line reads "15% Commission Fee". A 💳 Card · 15% chip shows on the client row. New per-client "Stripe Customer ID" field (cfg.stripeCustomerId, saved alongside xeroContactId in the same team-synced billing_client_settings store) — the customer must have a saved card in Stripe. (2) CHARGE ON STRIPE AFTER END SHIFT: every attendance action-stack (day + both week builders) appends stripeChargeControlHtml(s): for a completed (clock_in+clock_out), non-cancelled, non-Available shift whose outlet is OWNED (buildOutletOwnershipMap, 5s memo) by a card-mode client, a purple "💳 Charge on Stripe" button appears once the shift ends; already-charged shifts show a green "💳 Paid (Stripe)" chip instead. Button → breakdown modal (base payoutForShift + 15% commission + transport PTC + billable compensation = total, in the outlet's currency) → confirmStripeCharge() POSTs action:charge {shift_id, billing_client, amount_cents, currency} to the NEW stripe-relay Supabase Edge Function (ships alongside; mirrors aspire-relay: anon-key call in, service-role inside). The relay re-reads the shift server-side, REFUSES if stripe_charge_id is already set (structural double-charge guard, plus Stripe idempotency key shiftops-shift-<id>), reads the client's stripeCustomerId from the shared billing settings, creates an off-session confirmed PaymentIntent on the customer's saved card, and on success service-role-writes shifts.stripe_charge_id + stripe_charged_at → the row flips to the Paid (Stripe) chip on every device via the normal loadShifts. DECLINE → relay returns {declined,reason} and the panel shows a dedicated red "Card declined" popup (stripe-decline-modal) with Stripe's reason; genuine errors (no saved card, missing customer id, cap exceeded, missing migration) surface in the same popup. DELIBERATE: is_paid is NOT touched — that tick is the WORKER-payroll flag driving Aspire payouts; Stripe is CLIENT money-in, tracked on its own columns so the worker still gets paid. Requires stripe_migration_v1.sql (adds shifts.stripe_charge_id + stripe_charged_at; browser never writes them — no RLS change) and the stripe-relay deploy with STRIPE_SECRET_KEY. (3) BILLING CLIENT NAMES NOW EDITABLE + DUPLICATE-PROOF: the static 🏢 name header is an editable input (.bs-name); Save renames the config key (outlets/emails/Xero id/Stripe id all carried over, rename activity-logged; sent-invoice history stays under the old name). saveBillingSettings validates ALL names first — normalised (trim/collapse-spaces) case-insensitive — and refuses the whole save on any duplicate; addNewBillingClient now uses the same case-insensitive check (was exact-match only, so "Tam Jai"/"tam jai" could coexist). node --check passes (2/2 inline script blocks). Surgical diff: 3 action-stack lines gain one template call each, billing modal name/mode/pct/flat/xero-row lines reworked + stripe-id row added, _billingToggleMode + saveBillingSettings + addNewBillingClient + computeClientBilling mode/pct/label lines, 2 new modal-overlay divs, one new self-contained Stripe JS region after the Aspire payouts region; zero function removals or renames; webhook untouched. -->
 <!-- Build patch: v92 (PER-WORKER "NO ACKNOWLEDGEMENT REQUIRED" PROFILE TICK) — Worked from the v91 (July4_2index_v86) build. Ops request: some workers find the reminder-acknowledgement chase annoying. NEW tick on the Add/Edit worker modal — "🔕 No acknowledgement required" — stored as a scalar profileMeta.workers[key].no_ack_required, so it syncs team-wide through the existing app_settings profile_meta merge ({...se,...pe} keeps scalars) with NO schema change and is reversed by simply unticking. EFFECT WHEN TICKED (helper workerNoAckRequired(name)): (1) reminders still SEND exactly as before — timing, claims, dedup all untouched; (2) buildNightReminderMessage drops only the "Please reply *OK* or *✓* to confirm." line for that worker (the can't-make-it / cancel escape line is KEPT so cancellations still surface; the clock-in message is unchanged — it only asks for a reply when there's a problem); (3) checkReminderAlerts never adds the worker to the night-unacked group alert or the per-worker clock-in no-response lines (dispute + late alerts unaffected); (4) reminderPanelHtml hides the "Worker acknowledged"/"Worker responded" checkboxes and shows a muted "🔕 No acknowledgement required for this worker" note; isFullyAck now treats BOTH SENDS alone as complete for a no-ack worker and the banner reads "✅ Reminders sent · 🔕 no ack required"; the past-shift badge row swaps the two grey ack ✗ badges for one muted "🔕 no-ack" badge so history doesn't read as failure. If the worker replies anyway the webhook/markWorkerAcknowledged still record acks — harmless, the panel already treats them as satisfied. Modal wiring: new #wf-no-ack row after Profile notes; resetWorkerModal clears it, editWorker populates from meta.no_ack_required, saveWorker persists it in the existing profileMeta write (all other profile fields preserved as before). Webhook NOT touched; autoSendShiftReminders NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: 6 original lines changed (night-builder return, two alert guards, isFullyAck line + two banner returns collapsed into label const, two ack badge lines, two ack checkbox rows gaining a !noAckWorker guard) + purely additive modal row, three modal-wiring lines, one helper, one panel note; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v92 (ASPIRE PAYOUTS PANEL) — Worked from the v91 (July15index_v86) build. NEW money-out pipeline: a nav page "Aspire Payouts" (owner + finance roles; hidden from ops and the PH partner; NOT in PH_PARTNER_PAGES or OPS_ONLY_PAGES) that turns completed unpaid Singapore shifts into reviewed, deduplicated bank payouts released through the aspire-relay Supabase Edge Function -> VPS proxy (aspire-proxy.anytimeanywork.com) -> Aspire production API, with every transfer created approval:true so money only moves after a manual tap in the Aspire app. FLOW: (1) GENERATE — pick a date range; generatePayouts() queries shifts for the range (Supabase direct, not view-bound), keeps completed (clock_in+clock_out), not cancelled, not Available, not is_paid, Singapore-resolved rows; payee = s.sr_worker || s.worker_name (SR shifts pay the SR worker); amount = sum of netPaymentForShift (same worker-side figure the attendance Payment column shows); one pending_payouts row per payee per period with idempotency_key payout-<slug>-<start>_<end> (structurally double-spend-proof: unique here AND sent to Aspire) and the covered shift ids in shift_ids jsonb. Payees who already have a row for the period are skipped and reported. (2) LANES — payoutLaneForWorker maps bank_method: DBS/POSB->DBSSSGSG, OCBC->OCBCSGSG, UOB->UOVBSGSG, GXS->GXSPSGSG, Maybank->MBBESGS2, Standard Chartered->SCBLSGSG, HSBC->HSBCSGSG, CIMB->CIBBSGSG, Trust->TRBKSGSG (lane bank, API-released); PayNow (Aspire app supports PayNow but the public API does NOT expose proxy transfers) and Cash/unknown/bad account numbers -> lane paynow/manual: tracked in the same run, paid by hand, closed with Mark paid. (3) RELEASE — per-row or release-all posts action:release with explicit payout_ids to the relay; relay claims rows pending->queued atomically (double-click safe), submits to the proxy (SGD cap + forced approval enforced server-side), rows land submitted (pending_approval in the Aspire app) or failed with reason. (4) SYNC — action:sync polls Aspire; posted transfers flip rows to approved_posted AND tick the covered shifts is_paid=true (markShiftsPaidForPayout), same for manual Mark paid, so the attendance Paid ticks stay the source of truth. Balance chip on the page header via action:balance (60s cache). RLS: browser may only insert pending rows, cancel pending, and mark paid pending paynow/manual rows (migration pending_payouts_migration_v2.sql adds the method column + that policy, WITH CHECK includes method so bank rows cannot be hand-flipped); every money transition is service-role via the Edge Function — the shift_reminders RLS failure mode cannot recur here by construction. applyRoleVisibility: nav-payouts shown for owner+finance, hidden for PH partner, payouts added to allowedForFinance. switchPage: payouts -> loadPayoutsPage(). node --check passes on all inline script blocks. Surgical diff: 1 nav button + 1 page div + 1 switchPage line + 4 applyRoleVisibility touches (payNav declare, PH hide, reveal line, allowedForFinance) + one new self-contained JS region after togglePaid; zero existing functions modified or renamed; webhook untouched; no other schema change. -->
@@ -2317,6 +2318,17 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div id="of-geo-status" style="font-size:11px;color:var(--text3);margin-top:5px;font-family:var(--mono);">No coordinates set — pick an address from the list to pin it on the map.</div>
     </div>
     <div class="form-row"><label>Commission charged (%)</label><input type="number" id="of-commission" step="0.5" min="0" value="20" placeholder="20"></div>
+    <div class="form-row" style="margin-top:2px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;">
+        <input type="checkbox" id="of-card-payment" onchange="_ofCardPaymentToggle()" style="width:auto;">
+        <span>💳 Card payment via Stripe — <b>always 15% commission</b></span>
+      </label>
+      <div id="of-stripe-cid-row" style="display:none;margin-top:8px;">
+        <label>Stripe Customer ID <span style="font-weight:400;color:var(--text3);">(from Stripe › Customers — must have a saved card)</span></label>
+        <input type="text" id="of-stripe-cid" placeholder="e.g. cus_ABC123xyz" style="font-family:var(--mono);font-size:12px;">
+        <div class="sub-text" style="margin-top:4px;">After clock-out, shifts at this outlet get a <b>💳 Charge on Stripe</b> button. This is separate from the worker “Paid” tick, which stays payroll-only.</div>
+      </div>
+    </div>
     <div class="form-row"><label>WhatsApp group / chat link</label><input type="text" id="of-chat-link" placeholder="e.g. https://chat.whatsapp.com/… or wa.me/65… or pick a group below">
       <div style="margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="fetchOutletWhatsappGroups()">🔍 Fetch my WhatsApp groups</button>
@@ -12733,16 +12745,18 @@ function _stripeOwnerMap() {
   return _stripeOwnerCache.map;
 }
 
-// null = not a card-client shift; {state:'chargeable'|'charged', client}
+// null = not a card shift; {state:'chargeable'|'charged', client}
+// v94: driven by the OUTLET profile tick (profileMeta.outlets[key].card_payment,
+// set in the Add/Edit outlet modal) — no billing-settings config needed.
 function shiftStripeState(s) {
   try {
     if (!s || s.cancelled) return null;
     if (String(s.worker_name || '').trim().toLowerCase() === 'available') return null;
     if (!s.clock_in || !s.clock_out) return null;               // only AFTER end shift
-    const owner = _stripeOwnerMap()[_outletKey(s.outlet)];
-    if (!owner) return null;
-    const cfg = billingClientSettings[owner] || {};
-    if (cfg.billingMode !== 'card') return null;
+    const meta = outletProfile(s.outlet);
+    if (!meta.card_payment) return null;
+    // Label with the billing-client owner when one is configured, else the outlet.
+    const owner = _stripeOwnerMap()[_outletKey(s.outlet)] || s.outlet;
     return s.stripe_charge_id
       ? { state: 'charged', client: owner }
       : { state: 'chargeable', client: owner };
@@ -12781,14 +12795,14 @@ function openStripeChargeModal(shiftId) {
   const st = shiftStripeState(s);
   if (!st) { toast('This shift is not billed to a card-payment client', 'error'); return; }
   if (st.state === 'charged') { toast('Already charged on Stripe', 'error'); return; }
-  const cfg = billingClientSettings[st.client] || {};
+  const meta = outletProfile(s.outlet) || {};
   const b = shiftStripeChargeBreakdown(s);
   if (!(b.total > 0)) { toast('Charge amount is 0 — nothing to charge', 'error'); return; }
   document.getElementById('stripe-charge-shift-id').value = shiftId;
   document.getElementById('stripe-charge-worker').textContent =
     `${s.worker_name} — ${s.outlet} · ${s.shift_date} ${String(s.scheduled_start||'').slice(0,5)}–${String(s.scheduled_end||'').slice(0,5)}`;
   document.getElementById('stripe-charge-client').innerHTML =
-    `Billing client: <b>${escapeHtml(st.client)}</b>${cfg.stripeCustomerId ? ` · <span style="font-family:var(--mono);font-size:11px;">${escapeHtml(cfg.stripeCustomerId)}</span>` : ` · <span style="color:var(--amber);">⚠️ No Stripe Customer ID set in Client Settings — the charge will fail</span>`}`;
+    `Billing client: <b>${escapeHtml(st.client)}</b>${meta.stripe_customer_id ? ` · <span style="font-family:var(--mono);font-size:11px;">${escapeHtml(meta.stripe_customer_id)}</span>` : ` · <span style="color:var(--amber);">⚠️ No Stripe Customer ID on the outlet profile — the charge will fail</span>`}`;
   const line = (label, v) => `<div style="display:flex;justify-content:space-between;"><span>${label}</span><span>${b.sym}${v.toFixed(2)}</span></div>`;
   document.getElementById('stripe-charge-breakdown').innerHTML =
     line('Shift (hours × client rate)', b.base) +
@@ -12819,6 +12833,7 @@ async function confirmStripeCharge() {
   try {
     const out = await stripeRelay('charge', {
       shift_id: id,
+      outlet: s.outlet,
       billing_client: st.client,
       amount_cents: Math.round(b.total * 100),
       currency: b.currency.toLowerCase(),
@@ -14133,9 +14148,22 @@ function loadOutletsList() {
       const attireLine = String(meta.attire || '').trim()
         ? `<div class="sub-text" style="color:var(--green);margin-top:4px;" title="${escapeAttr(meta.attire)}">👕 Attire on file</div>`
         : '';
-      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${chatLink}${reqLine}${attireLine}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
+      return `<tr><td style="font-weight:500;"><span onclick="openOutletDetail('${escapeAttr(o.name)}')" style="cursor:pointer;color:var(--text);" title="View work history">${escapeHtml(o.name)} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗</span></span></td><td><span class="badge badge-blue">${normaliseCountry(o.country)}</span></td><td>${escapeHtml(o.location || '—')}${meta.notes ? `<div class="sub-text" style="margin-top:4px;">${escapeHtml(meta.notes)}</div>` : ''}${chatLink}${reqLine}${attireLine}${banned}</td><td style="font-family:var(--mono);font-size:12px;">${Number(meta.commission_pct ?? 20).toFixed(1).replace(/\.0$/,'')}%${meta.card_payment ? ' <span title="Card payment via Stripe — charge after clock-out">💳</span>' : ''}</td><td><div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" onclick="editOutlet('${o.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteOutlet('${o.id}')">Delete</button></div></td></tr>`;
     }).join('')}</tbody>
   </table>`;
+}
+
+// v94: the card tick locks commission to 15% and reveals the Stripe Customer ID
+// field. Unticking re-enables the commission input (value kept for hand-editing).
+function _ofCardPaymentToggle() {
+  const on = !!document.getElementById('of-card-payment')?.checked;
+  const pct = document.getElementById('of-commission');
+  const row = document.getElementById('of-stripe-cid-row');
+  if (pct) {
+    if (on) { pct.value = 15; pct.disabled = true; pct.title = 'Card-payment clients are always 15%'; }
+    else { pct.disabled = false; pct.title = ''; }
+  }
+  if (row) row.style.display = on ? '' : 'none';
 }
 
 function resetOutletModal() {
@@ -14146,6 +14174,9 @@ function resetOutletModal() {
   document.getElementById('of-country').value = 'Singapore';
   document.getElementById('of-location').value = '';
   document.getElementById('of-commission').value = '20';
+  document.getElementById('of-card-payment').checked = false;
+  document.getElementById('of-stripe-cid').value = '';
+  _ofCardPaymentToggle();
   document.getElementById('of-chat-link').value = '';
   resetOutletWhatsappGroupPicker();
   document.getElementById('of-attire').value = '';
@@ -14169,6 +14200,9 @@ function editOutlet(id) {
   document.getElementById('of-location').value = o.location || '';
   const meta = outletProfile(o.name);
   document.getElementById('of-commission').value = meta.commission_pct ?? '20';
+  document.getElementById('of-card-payment').checked = !!meta.card_payment;
+  document.getElementById('of-stripe-cid').value = meta.stripe_customer_id || '';
+  _ofCardPaymentToggle();
   document.getElementById('of-chat-link').value = meta.chat_link || '';
   resetOutletWhatsappGroupPicker();
   document.getElementById('of-attire').value = meta.attire || '';
@@ -14211,7 +14245,9 @@ async function saveOutlet() {
   const prevMeta = profileMeta.outlets[normProfileKey(name)] || {};
   profileMeta.outlets[normProfileKey(name)] = {
     ...prevMeta,            // preserve any fields not edited here
-    commission_pct: parseFloat(document.getElementById('of-commission').value) || 0,
+    commission_pct: document.getElementById('of-card-payment').checked ? 15 : (parseFloat(document.getElementById('of-commission').value) || 0),
+    card_payment: !!document.getElementById('of-card-payment').checked,
+    stripe_customer_id: document.getElementById('of-stripe-cid').value.trim(),
     chat_link: document.getElementById('of-chat-link').value.trim(),
     attire: document.getElementById('of-attire').value.trim(),
     notes: document.getElementById('of-notes').value.trim(),
