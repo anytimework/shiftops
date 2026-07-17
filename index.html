@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v93 (STRIPE CARD CHARGING + EDITABLE/UNIQUE BILLING CLIENT NAMES) — Worked from the v92 (July16index_v86) build. THREE requests. (1) CARD-PAYMENT CLIENT TAG: Client Billing Settings gains a third Billing Method — "Card payment via Stripe (15%)" (billingMode:'card'). Card clients are ALWAYS 15% commission: the % input locks to 15 and disables when card is picked (_billingToggleMode), saveBillingSettings force-writes 15 regardless of the input, and computeClientBilling forces pct 15 with label "15% (card)" — the invoice fee line reads "15% Commission Fee". A 💳 Card · 15% chip shows on the client row. New per-client "Stripe Customer ID" field (cfg.stripeCustomerId, saved alongside xeroContactId in the same team-synced billing_client_settings store) — the customer must have a saved card in Stripe. (2) CHARGE ON STRIPE AFTER END SHIFT: every attendance action-stack (day + both week builders) appends stripeChargeControlHtml(s): for a completed (clock_in+clock_out), non-cancelled, non-Available shift whose outlet is OWNED (buildOutletOwnershipMap, 5s memo) by a card-mode client, a purple "💳 Charge on Stripe" button appears once the shift ends; already-charged shifts show a green "💳 Paid (Stripe)" chip instead. Button → breakdown modal (base payoutForShift + 15% commission + transport PTC + billable compensation = total, in the outlet's currency) → confirmStripeCharge() POSTs action:charge {shift_id, billing_client, amount_cents, currency} to the NEW stripe-relay Supabase Edge Function (ships alongside; mirrors aspire-relay: anon-key call in, service-role inside). The relay re-reads the shift server-side, REFUSES if stripe_charge_id is already set (structural double-charge guard, plus Stripe idempotency key shiftops-shift-<id>), reads the client's stripeCustomerId from the shared billing settings, creates an off-session confirmed PaymentIntent on the customer's saved card, and on success service-role-writes shifts.stripe_charge_id + stripe_charged_at → the row flips to the Paid (Stripe) chip on every device via the normal loadShifts. DECLINE → relay returns {declined,reason} and the panel shows a dedicated red "Card declined" popup (stripe-decline-modal) with Stripe's reason; genuine errors (no saved card, missing customer id, cap exceeded, missing migration) surface in the same popup. DELIBERATE: is_paid is NOT touched — that tick is the WORKER-payroll flag driving Aspire payouts; Stripe is CLIENT money-in, tracked on its own columns so the worker still gets paid. Requires stripe_migration_v1.sql (adds shifts.stripe_charge_id + stripe_charged_at; browser never writes them — no RLS change) and the stripe-relay deploy with STRIPE_SECRET_KEY. (3) BILLING CLIENT NAMES NOW EDITABLE + DUPLICATE-PROOF: the static 🏢 name header is an editable input (.bs-name); Save renames the config key (outlets/emails/Xero id/Stripe id all carried over, rename activity-logged; sent-invoice history stays under the old name). saveBillingSettings validates ALL names first — normalised (trim/collapse-spaces) case-insensitive — and refuses the whole save on any duplicate; addNewBillingClient now uses the same case-insensitive check (was exact-match only, so "Tam Jai"/"tam jai" could coexist). node --check passes (2/2 inline script blocks). Surgical diff: 3 action-stack lines gain one template call each, billing modal name/mode/pct/flat/xero-row lines reworked + stripe-id row added, _billingToggleMode + saveBillingSettings + addNewBillingClient + computeClientBilling mode/pct/label lines, 2 new modal-overlay divs, one new self-contained Stripe JS region after the Aspire payouts region; zero function removals or renames; webhook untouched. -->
 <!-- Build patch: v92 (PER-WORKER "NO ACKNOWLEDGEMENT REQUIRED" PROFILE TICK) — Worked from the v91 (July4_2index_v86) build. Ops request: some workers find the reminder-acknowledgement chase annoying. NEW tick on the Add/Edit worker modal — "🔕 No acknowledgement required" — stored as a scalar profileMeta.workers[key].no_ack_required, so it syncs team-wide through the existing app_settings profile_meta merge ({...se,...pe} keeps scalars) with NO schema change and is reversed by simply unticking. EFFECT WHEN TICKED (helper workerNoAckRequired(name)): (1) reminders still SEND exactly as before — timing, claims, dedup all untouched; (2) buildNightReminderMessage drops only the "Please reply *OK* or *✓* to confirm." line for that worker (the can't-make-it / cancel escape line is KEPT so cancellations still surface; the clock-in message is unchanged — it only asks for a reply when there's a problem); (3) checkReminderAlerts never adds the worker to the night-unacked group alert or the per-worker clock-in no-response lines (dispute + late alerts unaffected); (4) reminderPanelHtml hides the "Worker acknowledged"/"Worker responded" checkboxes and shows a muted "🔕 No acknowledgement required for this worker" note; isFullyAck now treats BOTH SENDS alone as complete for a no-ack worker and the banner reads "✅ Reminders sent · 🔕 no ack required"; the past-shift badge row swaps the two grey ack ✗ badges for one muted "🔕 no-ack" badge so history doesn't read as failure. If the worker replies anyway the webhook/markWorkerAcknowledged still record acks — harmless, the panel already treats them as satisfied. Modal wiring: new #wf-no-ack row after Profile notes; resetWorkerModal clears it, editWorker populates from meta.no_ack_required, saveWorker persists it in the existing profileMeta write (all other profile fields preserved as before). Webhook NOT touched; autoSendShiftReminders NOT touched. node --check passes (2/2 inline script blocks). Surgical diff: 6 original lines changed (night-builder return, two alert guards, isFullyAck line + two banner returns collapsed into label const, two ack badge lines, two ack checkbox rows gaining a !noAckWorker guard) + purely additive modal row, three modal-wiring lines, one helper, one panel note; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v92 (ASPIRE PAYOUTS PANEL) — Worked from the v91 (July15index_v86) build. NEW money-out pipeline: a nav page "Aspire Payouts" (owner + finance roles; hidden from ops and the PH partner; NOT in PH_PARTNER_PAGES or OPS_ONLY_PAGES) that turns completed unpaid Singapore shifts into reviewed, deduplicated bank payouts released through the aspire-relay Supabase Edge Function -> VPS proxy (aspire-proxy.anytimeanywork.com) -> Aspire production API, with every transfer created approval:true so money only moves after a manual tap in the Aspire app. FLOW: (1) GENERATE — pick a date range; generatePayouts() queries shifts for the range (Supabase direct, not view-bound), keeps completed (clock_in+clock_out), not cancelled, not Available, not is_paid, Singapore-resolved rows; payee = s.sr_worker || s.worker_name (SR shifts pay the SR worker); amount = sum of netPaymentForShift (same worker-side figure the attendance Payment column shows); one pending_payouts row per payee per period with idempotency_key payout-<slug>-<start>_<end> (structurally double-spend-proof: unique here AND sent to Aspire) and the covered shift ids in shift_ids jsonb. Payees who already have a row for the period are skipped and reported. (2) LANES — payoutLaneForWorker maps bank_method: DBS/POSB->DBSSSGSG, OCBC->OCBCSGSG, UOB->UOVBSGSG, GXS->GXSPSGSG, Maybank->MBBESGS2, Standard Chartered->SCBLSGSG, HSBC->HSBCSGSG, CIMB->CIBBSGSG, Trust->TRBKSGSG (lane bank, API-released); PayNow (Aspire app supports PayNow but the public API does NOT expose proxy transfers) and Cash/unknown/bad account numbers -> lane paynow/manual: tracked in the same run, paid by hand, closed with Mark paid. (3) RELEASE — per-row or release-all posts action:release with explicit payout_ids to the relay; relay claims rows pending->queued atomically (double-click safe), submits to the proxy (SGD cap + forced approval enforced server-side), rows land submitted (pending_approval in the Aspire app) or failed with reason. (4) SYNC — action:sync polls Aspire; posted transfers flip rows to approved_posted AND tick the covered shifts is_paid=true (markShiftsPaidForPayout), same for manual Mark paid, so the attendance Paid ticks stay the source of truth. Balance chip on the page header via action:balance (60s cache). RLS: browser may only insert pending rows, cancel pending, and mark paid pending paynow/manual rows (migration pending_payouts_migration_v2.sql adds the method column + that policy, WITH CHECK includes method so bank rows cannot be hand-flipped); every money transition is service-role via the Edge Function — the shift_reminders RLS failure mode cannot recur here by construction. applyRoleVisibility: nav-payouts shown for owner+finance, hidden for PH partner, payouts added to allowedForFinance. switchPage: payouts -> loadPayoutsPage(). node --check passes on all inline script blocks. Surgical diff: 1 nav button + 1 page div + 1 switchPage line + 4 applyRoleVisibility touches (payNav declare, PH hide, reveal line, allowedForFinance) + one new self-contained JS region after togglePaid; zero existing functions modified or renamed; webhook untouched; no other schema change. -->
 <!-- Build patch: v91 (TICKS NOW SURVIVE REFRESH ON EVERY DEVICE + MALAYSIA BILLING RM12.50 MISMATCH + CURRENCY SYMBOLS) — Worked from the v90 (July4_1index_v86) build. THREE ops reports. (1) TICKS STILL VANISH ON REFRESH (6 Jul screen recording, iPhone): v90's durable sticky store is per-device localStorage — only the device that SET a tick could restore it, so a phone that merely DISPLAYED ticks set elsewhere wiped them on pull-to-refresh. Working around per-device storage can never satisfy "the tick should remain regardless of whoever refreshes"; a working SHARED store is required, and one already exists: app_settings — every auto/manual send since v88 writes an rsent:* claim with sent:true (proven writable team-wide). FIX: new syncTicksFromClaims() reads all rsent:% claims (fetch cached/throttled 60s) and, for every loaded shift whose claim says sent && !undone, forces the matching flag true, stamps the local durable store, repaints, and repairs the localStorage backup — on EVERY device, after ANY refresh, with NO shift_reminders write needed. Wired at boot (init, right after applyBootReminderSticky, force-fetch) and on the 30s silentSyncReminders cadence (also covers date navigation). Ops ACKS now publish claims too: markWorkerAcknowledged and toggleReminder write 'nightack'/'clockinack' claims (webhook acks already survive via service-role DB writes). UNDO SAFETY: unticks and undoFullAck now write a POSITIVE undone:true marker via upsert (markReminderClaimUndone) BEFORE the best-effort delete — a silently RLS-blocked delete would otherwise leave a sent:true ghost re-ticking the box on every device; the restore engine skips undone claims, resolveLostClaim treats undone as reclaimable (deliberate re-send works), and the local claim cache is invalidated on untick/undo. Claim prune window 2d→7d since claims now back the visible ticks. (2) INVOICE $4506.00 vs EXCEL RM4493.50: traced to exactly two late-arrival rows (3/6 KHAIRUL sched 12:00 in 12:39: 63.75→56.25 = +7.50; 4/6 KHAIRUL sched 18:00 in 18:25: 52.50→47.50 = +5.00; Δ=12.50). The EXCEL was wrong: buildClientUsageWorkbook used netPaymentForShift — WORKER-side money (payout − late penalty − overpayment deduction + transport + compensation) — in a CLIENT usage report. That under-billed the client by the workers' late-penalty fines (penalties are the worker's fine to Anytime Work, NOT a client discount — counted hours already start from the late clock-in), would DOUBLE-COUNT transport (inside Payout AND the Transport column AND the invoice's separate taxi PTC line), and leaked SR worker-pay math into client documents. FIX: the Excel row amount is now payoutForShift — the same figure the invoice preview and Reports "Client billing" use — so attachment and invoice always agree by construction (both now RM4506.00 for this client). (3) CURRENCY SYMBOLS: the invoice-preview modal hardcoded "$" on five renders (per-outlet payout — the "$4506.00" on a Malaysia invoice — taxi, compensation, commission, subtotal) → all now billingCurrencySymbol(); the Excel detail headers hardcoded ($/hr)/($) → now built from billingCurrencySymbol() (RM/₱/$). Webhook NOT touched; no schema change. node --check passes (2/2 inline script blocks); harness passes (cross-device refresh restore from claims incl. the recorded phone scenario, undone-marker semantics with blocked deletes, undo non-resurrection, billing recompute: the uploaded June workbook re-totals to RM4506.00 = invoice, transport not double-counted). Surgical diff: syncTicksFromClaims + markReminderClaimUndone + cache (new top-level, v88/89 region), resolveLostClaim one added branch, init one added call, silentSyncReminders one added call, toggleReminder claim-type/undone rework (v90's own lines), markWorkerAcknowledged + undoFullAck additive claim publishing (v90's own lines), prune constant (v88's own line), buildClientUsageWorkbook amount fn + headers, invoice-preview 5 currency renders; zero function removals or renames; nothing else touched. -->
@@ -2079,6 +2080,44 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
 </div>
 
 <!-- CLOCK-OUT MODAL -->
+<div class="modal-overlay" id="stripe-charge-modal">
+  <div class="modal" style="max-width:440px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <h3 style="margin:0;">💳 Charge on Stripe</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('stripe-charge-modal')">✕</button>
+    </div>
+    <div id="stripe-charge-worker" style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;"></div>
+    <div id="stripe-charge-client" style="font-size:12px;color:var(--text2);margin-bottom:12px;"></div>
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;font-family:var(--mono);margin-bottom:8px;">Charge Breakdown</div>
+      <div id="stripe-charge-breakdown" style="font-family:var(--mono);font-size:12px;color:var(--text2);line-height:1.9;"></div>
+    </div>
+    <div class="alert alert-blue" style="margin-bottom:14px;">
+      <span class="alert-icon">ℹ️</span>
+      <span style="font-size:12px;">The client's saved card in Stripe is charged immediately (off-session). On success the shift is marked <b>Paid (Stripe)</b>. A decline shows the bank's reason.</span>
+    </div>
+    <input type="hidden" id="stripe-charge-shift-id">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px;border-top:1px solid var(--border);">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('stripe-charge-modal')">Cancel</button>
+      <button class="btn btn-primary" id="stripe-charge-confirm-btn" style="background:#635bff;border-color:#635bff;" onclick="confirmStripeCharge()">💳 Charge card</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="stripe-decline-modal">
+  <div class="modal" style="max-width:420px;border:1px solid rgba(255,92,92,0.5);">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <span style="font-size:22px;">❌</span>
+      <h3 style="margin:0;color:var(--red);">Card Declined / Charge Failed</h3>
+    </div>
+    <div id="stripe-decline-reason" style="font-size:13px;color:var(--text);background:rgba(255,92,92,0.08);border:1px solid rgba(255,92,92,0.3);border-radius:var(--radius);padding:12px 14px;margin-bottom:12px;line-height:1.6;"></div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:16px;">The shift stays unpaid — nothing was marked. Ask the client to update their card in Stripe, or invoice them via Xero instead. You can retry from the same button.</div>
+    <div style="display:flex;justify-content:flex-end;padding-top:4px;border-top:1px solid var(--border);">
+      <button class="btn btn-primary" onclick="closeModal('stripe-decline-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="clock-out-modal">
   <div class="modal" style="max-width:440px;overflow-y:auto;">
 
@@ -8194,6 +8233,7 @@ function renderTable() {
         ? `<button class="btn btn-ghost btn-sm" onclick="openOverpaymentModal('${s.id}','recover')" style="color:var(--amber);" title="Apply overpayment recovery">↩ Recover</button>` : '';
       const actions = `<div class="action-stack">
         ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
+        ${stripeChargeControlHtml(s)}
         <button class="btn btn-ghost btn-sm" onclick="openEditRow('${s.id}')">Edit</button>
         ${assignAction}
         ${pendingOpAction1}
@@ -8375,6 +8415,7 @@ function renderTable() {
         actions = `<div class="action-stack">
           ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
           ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
+          ${stripeChargeControlHtml(s)}
           ${showPaidTick ? `<button onclick="togglePaid('${s.id}',${isPaid})"
             style="font-size:11px;padding:3px 8px;border:1px solid ${isPaid?'var(--green)':'var(--border2)'};background:${isPaid?'rgba(52,199,123,0.15)':'transparent'};color:${isPaid?'var(--green)':'var(--text3)'};border-radius:4px;cursor:pointer;white-space:nowrap;font-weight:600;"
             title="${isPaid?'Mark as unpaid':'Mark as paid'}">${isPaid ? '✓ Paid' : '○ Unpaid'}</button>` : ''}
@@ -8485,6 +8526,7 @@ function renderTable() {
           actions = `<div class="action-stack">
             ${showClockIn  ? `<button class="btn btn-primary btn-sm" onclick="quickClockIn('${s.id}')">Clock In</button>` : ''}
             ${showClockOut ? `<button class="btn btn-primary btn-sm" onclick="quickClockOut('${s.id}')">Clock Out</button>` : ''}
+            ${stripeChargeControlHtml(s)}
             ${showPaidTick ? `<button onclick="togglePaid('${s.id}',${isPaid})"
               style="font-size:11px;padding:3px 8px;border:1px solid ${isPaid ? 'var(--green)' : 'var(--border2)'};
               background:${isPaid ? 'rgba(52,199,123,0.15)' : 'transparent'};
@@ -12656,6 +12698,147 @@ async function cancelPayout(id) {
   if (error) { toast('Failed: ' + error.message, 'error'); return; }
   toast('Payout cancelled');
   loadPayoutsPage();
+}
+
+// ── Stripe card charging (v93) ───────────────────────────────
+// Card-payment clients (billingMode:'card', always 15%) can be charged on
+// Stripe per completed shift, straight from the attendance row. Mirrors the
+// aspire-relay pattern: the browser calls the stripe-relay Edge Function with
+// the anon key; the secret key, the double-charge guard and the shift write
+// (stripe_charge_id / stripe_charged_at, service-role) all live server-side.
+// DELIBERATE: is_paid is NOT touched — that is the WORKER-payroll tick that
+// drives Aspire payouts. A Stripe charge is CLIENT money-in.
+
+const STRIPE_RELAY_URL = () => (SUPABASE_URL || '').replace(/\/+$/, '') + '/functions/v1/stripe-relay';
+
+async function stripeRelay(action, extra) {
+  const res = await fetch(STRIPE_RELAY_URL(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY },
+    body: JSON.stringify(Object.assign({ action: action }, extra || {}))
+  });
+  let body = null;
+  try { body = await res.json(); } catch (e) { body = {}; }
+  if (!res.ok) throw new Error(body?.error ? (body.error + (body.detail ? ': ' + JSON.stringify(body.detail) : '')) : ('stripe relay HTTP ' + res.status));
+  return body;
+}
+
+// Ownership map memo (5s) so per-row rendering doesn't rebuild it N times.
+let _stripeOwnerCache = { at: 0, map: null };
+function _stripeOwnerMap() {
+  if (!_stripeOwnerCache.map || (Date.now() - _stripeOwnerCache.at) > 5000) {
+    try { _stripeOwnerCache = { at: Date.now(), map: buildOutletOwnershipMap() }; }
+    catch (e) { _stripeOwnerCache = { at: Date.now(), map: {} }; }
+  }
+  return _stripeOwnerCache.map;
+}
+
+// null = not a card-client shift; {state:'chargeable'|'charged', client}
+function shiftStripeState(s) {
+  try {
+    if (!s || s.cancelled) return null;
+    if (String(s.worker_name || '').trim().toLowerCase() === 'available') return null;
+    if (!s.clock_in || !s.clock_out) return null;               // only AFTER end shift
+    const owner = _stripeOwnerMap()[_outletKey(s.outlet)];
+    if (!owner) return null;
+    const cfg = billingClientSettings[owner] || {};
+    if (cfg.billingMode !== 'card') return null;
+    return s.stripe_charge_id
+      ? { state: 'charged', client: owner }
+      : { state: 'chargeable', client: owner };
+  } catch (e) { return null; }
+}
+
+// Rendered inside every attendance action-stack (returns '' for non-card shifts).
+function stripeChargeControlHtml(s) {
+  const st = shiftStripeState(s);
+  if (!st) return '';
+  if (st.state === 'charged') {
+    const when = s.stripe_charged_at ? new Date(s.stripe_charged_at).toLocaleString() : '';
+    return `<span class="badge badge-green" style="font-size:9px;white-space:nowrap;" title="Charged on Stripe${when ? ' — ' + when : ''} (${escapeAttr(s.stripe_charge_id || '')})">💳 Paid (Stripe)</span>`;
+  }
+  return `<button class="btn btn-primary btn-sm" style="background:#635bff;border-color:#635bff;white-space:nowrap;" onclick="openStripeChargeModal('${s.id}')" title="Charge ${escapeAttr(st.client)}'s saved card (15% commission)">💳 Charge on Stripe</button>`;
+}
+
+// Per-shift client-side amount: base (hours × client rate, same as the invoice)
+// + forced 15% card commission + transport PTC + billable compensation.
+function shiftStripeChargeBreakdown(s) {
+  const base = parseFloat(payoutForShift(s) || 0);
+  const commission = parseFloat((base * 0.15).toFixed(2));
+  let taxi = 0, comp = 0;
+  try { taxi = parseFloat(transportClaim(s) || 0); } catch (e) {}
+  try { comp = parseFloat(compensationBillable(s) || 0); } catch (e) {}
+  const total = parseFloat((base + commission + taxi + comp).toFixed(2));
+  const country = resolvedCountryForShift(s);
+  const currency = country === 'Malaysia' ? 'MYR' : (country === 'Philippines' ? 'PHP' : 'SGD');
+  const sym = currencySymbolForCountry(country);
+  return { base, commission, taxi, comp, total, currency, sym };
+}
+
+function openStripeChargeModal(shiftId) {
+  const s = allShifts.find(x => x.id === shiftId);
+  if (!s) { toast('Shift not found in the current view', 'error'); return; }
+  const st = shiftStripeState(s);
+  if (!st) { toast('This shift is not billed to a card-payment client', 'error'); return; }
+  if (st.state === 'charged') { toast('Already charged on Stripe', 'error'); return; }
+  const cfg = billingClientSettings[st.client] || {};
+  const b = shiftStripeChargeBreakdown(s);
+  if (!(b.total > 0)) { toast('Charge amount is 0 — nothing to charge', 'error'); return; }
+  document.getElementById('stripe-charge-shift-id').value = shiftId;
+  document.getElementById('stripe-charge-worker').textContent =
+    `${s.worker_name} — ${s.outlet} · ${s.shift_date} ${String(s.scheduled_start||'').slice(0,5)}–${String(s.scheduled_end||'').slice(0,5)}`;
+  document.getElementById('stripe-charge-client').innerHTML =
+    `Billing client: <b>${escapeHtml(st.client)}</b>${cfg.stripeCustomerId ? ` · <span style="font-family:var(--mono);font-size:11px;">${escapeHtml(cfg.stripeCustomerId)}</span>` : ` · <span style="color:var(--amber);">⚠️ No Stripe Customer ID set in Client Settings — the charge will fail</span>`}`;
+  const line = (label, v) => `<div style="display:flex;justify-content:space-between;"><span>${label}</span><span>${b.sym}${v.toFixed(2)}</span></div>`;
+  document.getElementById('stripe-charge-breakdown').innerHTML =
+    line('Shift (hours × client rate)', b.base) +
+    line('Commission 15% (card)', b.commission) +
+    (b.taxi > 0 ? line('Transport (pass-through)', b.taxi) : '') +
+    (b.comp > 0 ? line('Compensation (pass-through)', b.comp) : '') +
+    `<div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:6px;padding-top:6px;font-weight:700;color:var(--text);"><span>Total to charge</span><span>${b.sym}${b.total.toFixed(2)} ${b.currency}</span></div>`;
+  const btn = document.getElementById('stripe-charge-confirm-btn');
+  if (btn) { btn.disabled = false; btn.textContent = `💳 Charge ${b.sym}${b.total.toFixed(2)}`; }
+  document.getElementById('stripe-charge-modal').classList.add('open');
+}
+
+function _showStripeDecline(reason) {
+  const el = document.getElementById('stripe-decline-reason');
+  if (el) el.textContent = reason || 'The charge could not be completed.';
+  document.getElementById('stripe-decline-modal')?.classList.add('open');
+}
+
+async function confirmStripeCharge() {
+  const id = document.getElementById('stripe-charge-shift-id').value;
+  const s = allShifts.find(x => x.id === id);
+  if (!s) { closeModal('stripe-charge-modal'); return; }
+  const st = shiftStripeState(s);
+  if (!st || st.state !== 'chargeable') { closeModal('stripe-charge-modal'); toast('Shift is no longer chargeable', 'error'); return; }
+  const b = shiftStripeChargeBreakdown(s);
+  const btn = document.getElementById('stripe-charge-confirm-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Charging…'; }
+  try {
+    const out = await stripeRelay('charge', {
+      shift_id: id,
+      billing_client: st.client,
+      amount_cents: Math.round(b.total * 100),
+      currency: b.currency.toLowerCase(),
+      description: `${st.client} — ${s.worker_name} ${s.shift_date} ${String(s.scheduled_start||'').slice(0,5)}-${String(s.scheduled_end||'').slice(0,5)} @ ${s.outlet}`,
+      charged_by: currentInternalUser || 'unknown'
+    });
+    closeModal('stripe-charge-modal');
+    if (out && out.declined) { _showStripeDecline(out.reason); return; }
+    toast(`💳 Charged ${b.sym}${b.total.toFixed(2)} — ${st.client} marked paid (Stripe)`);
+    try {
+      await logActivity('Stripe charge', `${st.client}: ${b.sym}${b.total.toFixed(2)} for ${s.worker_name} at ${s.outlet} ${s.shift_date}${out.payment_intent_id ? ' (' + out.payment_intent_id + ')' : ''}`,
+        'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+    } catch (e) {}
+    await loadShifts();
+  } catch (e) {
+    closeModal('stripe-charge-modal');
+    _showStripeDecline(e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '💳 Charge card'; }
+  }
 }
 
 // ── Penalty management ───────────────────────────────────────
@@ -22630,8 +22813,9 @@ function computeClientBilling(billingName, periodShifts) {
   const cfg           = billingClientSettings[billingName] || {};
   // Billing mode: 'pct' (commission % of worker payout) or 'flat' ($ per shift).
   // Default is 'pct' so every existing client is unchanged.
-  const billingMode   = cfg.billingMode === 'flat' ? 'flat' : 'pct';
-  const commissionPct = cfg.commissionPct !== undefined ? cfg.commissionPct : 20;
+  const billingMode   = cfg.billingMode === 'flat' ? 'flat' : (cfg.billingMode === 'card' ? 'card' : 'pct');
+  // Card-payment (Stripe) clients are ALWAYS 15% commission, whatever the stored pct says.
+  const commissionPct = billingMode === 'card' ? 15 : (cfg.commissionPct !== undefined ? cfg.commissionPct : 20);
   const flatPerShift  = cfg.flatPerShift !== undefined ? (parseFloat(cfg.flatPerShift) || 0) : 0;
   const shiftCountForFee = clientShifts.length;
   const commissionAmt = billingMode === 'flat'
@@ -22640,7 +22824,7 @@ function computeClientBilling(billingName, periodShifts) {
   // Label shown in the % column / invoice line for this fee.
   const commissionLabel = billingMode === 'flat'
     ? `$${flatPerShift.toFixed(2)}/shift`
-    : `${commissionPct}%`;
+    : (billingMode === 'card' ? '15% (card)' : `${commissionPct}%`);
   // Compensation is a pass-through make-good — added after commission, like taxi
   const subtotal      = parseFloat((workerPayout + commissionAmt + taxiTotal + compTotal).toFixed(2));
 
@@ -23021,6 +23205,14 @@ function _billingToggleMode(idx, mode) {
   const flatField = row.querySelector('.bs-flat-field');
   if (pctField)  pctField.style.display  = (mode === 'flat') ? 'none' : '';
   if (flatField) flatField.style.display = (mode === 'flat') ? '' : 'none';
+  // Card-payment clients are ALWAYS 15% — lock the % input; Stripe Customer ID row only shows for card.
+  const pctInput = row.querySelector('.bs-commission');
+  if (pctInput) {
+    if (mode === 'card') { pctInput.value = 15; pctInput.disabled = true; pctInput.title = 'Card-payment clients are always 15%'; }
+    else { pctInput.disabled = false; pctInput.title = ''; }
+  }
+  const stripeRow = row.querySelector('.bs-stripecid')?.closest('.form-row');
+  if (stripeRow) stripeRow.style.display = (mode === 'card') ? '' : 'none';
 }
 
 async function openBillingSettingsModal() {
@@ -23064,7 +23256,7 @@ function _renderBillingSettingsModal() {
     <div id="billing-settings-rows">
     ${clients.map((client, idx) => {
       const cfg  = billingClientSettings[client] || {};
-      const mode = cfg.billingMode === 'flat' ? 'flat' : 'pct';
+      const mode = cfg.billingMode === 'flat' ? 'flat' : (cfg.billingMode === 'card' ? 'card' : 'pct');
       const pct  = cfg.commissionPct !== undefined ? cfg.commissionPct : 20;
       const flat = cfg.flatPerShift !== undefined ? (parseFloat(cfg.flatPerShift) || 0) : 0;
       const days = cfg.paymentTermsDays || 30;
@@ -23073,7 +23265,11 @@ function _renderBillingSettingsModal() {
       const outlets = cfg.outlets || [];
       return `<div class="billing-settings-row" data-idx="${idx}" style="margin-bottom:14px;padding:14px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <div style="font-weight:600;font-size:13px;color:var(--text);">🏢 ${escapeHtml(client)}</div>
+          <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;margin-right:10px;">
+            <span style="font-size:14px;">🏢</span>
+            <input class="form-input bs-name" type="text" value="${escapeHtml(client)}" title="Client name — edit and Save to rename (must be unique)" style="font-weight:600;font-size:13px;max-width:340px;">
+            ${mode === 'card' ? `<span style="font-size:10px;font-weight:700;color:#a5a0ff;background:rgba(99,91,255,0.15);border:1px solid rgba(99,91,255,0.4);border-radius:4px;padding:2px 7px;white-space:nowrap;">💳 Card · 15%</span>` : ''}
+          </div>
           <button class="btn btn-danger btn-sm" onclick="_removeBillingClient(${idx})">Remove</button>
         </div>
         <div class="form-row" style="margin-bottom:8px;">
@@ -23092,14 +23288,15 @@ function _renderBillingSettingsModal() {
           <select class="form-input bs-mode" onchange="_billingToggleMode(${idx}, this.value)">
             <option value="pct"  ${mode==='pct'?'selected':''}>Commission % of worker pay</option>
             <option value="flat" ${mode==='flat'?'selected':''}>Flat fee per shift ($)</option>
+            <option value="card" ${mode==='card'?'selected':''}>💳 Card payment via Stripe (always 15%)</option>
           </select>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
           <div class="form-row bs-pct-field" style="margin:0;${mode==='flat'?'display:none;':''}">
             <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Commission %</label>
-            <input class="form-input bs-commission" type="number" min="0" max="100" step="0.5" value="${pct}">
+            <input class="form-input bs-commission" type="number" min="0" max="100" step="0.5" value="${mode==='card' ? 15 : pct}" ${mode==='card' ? 'disabled title="Card-payment clients are always 15%"' : ''}>
           </div>
-          <div class="form-row bs-flat-field" style="margin:0;${mode==='pct'?'display:none;':''}">
+          <div class="form-row bs-flat-field" style="margin:0;${mode!=='flat'?'display:none;':''}">
             <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Fee per shift ($)</label>
             <input class="form-input bs-flat" type="number" min="0" step="0.5" value="${flat}" placeholder="e.g. 10">
           </div>
@@ -23120,6 +23317,10 @@ function _renderBillingSettingsModal() {
           <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Xero Contact ID <span style="opacity:0.6;">(from Xero › Contacts URL)</span></label>
           <input class="form-input bs-xeroid" type="text" placeholder="e.g. a1b2c3d4-e5f6-7890-abcd-ef1234567890" value="${escapeHtml(xeroId)}" style="font-family:var(--mono);font-size:12px;">
         </div>
+        <div class="form-row" style="margin:8px 0 0;${mode==='card'?'':'display:none;'}">
+          <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Stripe Customer ID <span style="opacity:0.6;">(from Stripe › Customers — must have a saved card)</span></label>
+          <input class="form-input bs-stripecid" type="text" placeholder="e.g. cus_ABC123xyz" value="${escapeHtml(cfg.stripeCustomerId || '')}" style="font-family:var(--mono);font-size:12px;">
+        </div>
       </div>`;
     }).join('')}
     </div>`;
@@ -23129,25 +23330,54 @@ function _renderBillingSettingsModal() {
 
 function saveBillingSettings() {
   const rows = document.querySelectorAll('.billing-settings-row');
+  // PASS 1 — validate names first (v93): editable, renameable, but NEVER duplicated.
+  // Normalised (trim + collapse internal whitespace) case-insensitive comparison so
+  // "Tam Jai" vs "tam  jai" can't coexist and cause invoice confusion.
+  const _bcNorm = n => String(n || '').replace(/\s+/g, ' ').trim();
+  const planned = [];
+  const seenKeys = new Set();
+  let dupName = null;
   rows.forEach(row => {
     const idx = parseInt(row.dataset.idx);
-    const client = _billingSettingsIndex[idx];
-    if (!client) return;
-    // Outlets now come from the click-toggle picker (spans with data-checked="1").
+    const oldName = _billingSettingsIndex[idx];
+    if (!oldName) return;
+    const newName = _bcNorm(row.querySelector('.bs-name')?.value) || oldName;
+    const key = newName.toLowerCase();
+    if (seenKeys.has(key)) dupName = newName;
+    seenKeys.add(key);
+    planned.push({ row, oldName, newName });
+  });
+  if (dupName) { toast(`Duplicate client name "${dupName}" — every billing client must have a unique name. Nothing was saved.`, 'error'); return; }
+  // PASS 2 — rebuild the settings object under the (possibly renamed) keys.
+  const next = {};
+  planned.forEach(({ row, oldName, newName }) => {
+    // Outlets come from the click-toggle picker (spans with data-checked="1").
     const outlets = [...row.querySelectorAll('.bs-outlet-opt')]
       .filter(opt => opt.querySelector('.bs-outlet-cb')?.dataset.checked === '1')
       .map(opt => opt.dataset.outlet.trim())
       .filter(Boolean);
-    billingClientSettings[client] = {
-      billingMode:      row.querySelector('.bs-mode')?.value === 'flat' ? 'flat' : 'pct',
-      commissionPct:    parseFloat(row.querySelector('.bs-commission')?.value) || 20,
+    const modeVal = row.querySelector('.bs-mode')?.value;
+    const billingMode = modeVal === 'flat' ? 'flat' : (modeVal === 'card' ? 'card' : 'pct');
+    next[newName] = {
+      billingMode:      billingMode,
+      // Card-payment clients are ALWAYS 15% — force it regardless of the (disabled) input.
+      commissionPct:    billingMode === 'card' ? 15 : (parseFloat(row.querySelector('.bs-commission')?.value) || 20),
       flatPerShift:     parseFloat(row.querySelector('.bs-flat')?.value) || 0,
       paymentTermsDays: parseInt(row.querySelector('.bs-terms')?.value) || 30,
       emails:    (row.querySelector('.bs-emails')?.value || '').split(/[\n,]/).map(e => e.trim()).filter(Boolean),
-      xeroContactId: (row.querySelector('.bs-xeroid')?.value || '').trim(),
+      xeroContactId:    (row.querySelector('.bs-xeroid')?.value || '').trim(),
+      stripeCustomerId: (row.querySelector('.bs-stripecid')?.value || '').trim(),
       outlets:   outlets
     };
+    if (oldName !== newName) {
+      try { logActivity('Billing client renamed', `${oldName} → ${newName}`, 'billing', null, {}); } catch(e){}
+    }
   });
+  // Defensive: keep any configured client the modal didn't render (should not happen).
+  Object.keys(billingClientSettings).forEach(n => {
+    if (!planned.some(p => p.oldName === n) && next[n] === undefined) next[n] = billingClientSettings[n];
+  });
+  billingClientSettings = next;
   saveBillingSettingsAll();
   toast('✅ Client billing settings saved');
   document.getElementById('billing-settings-modal').classList.remove('open');
@@ -23180,8 +23410,11 @@ function addNewBillingClient() {
   const input = document.getElementById('new-billing-client-name');
   const name  = input?.value?.trim();
   if (!name) { toast('Enter a client name', 'error'); return; }
-  if (billingClientSettings[name]) { toast('Client already exists', 'error'); return; }
-  billingClientSettings[name] = { billingMode: 'pct', commissionPct: 20, flatPerShift: 0, paymentTermsDays: 30, emails: [], xeroContactId: '', outlets: [] };
+  // v93: case-insensitive, whitespace-normalised duplicate guard (was exact-match only).
+  const _newKey = name.replace(/\s+/g, ' ').trim().toLowerCase();
+  const _clash = Object.keys(billingClientSettings).find(n => n.replace(/\s+/g, ' ').trim().toLowerCase() === _newKey);
+  if (_clash) { toast(`A client named "${_clash}" already exists — names must be unique`, 'error'); return; }
+  billingClientSettings[name] = { billingMode: 'pct', commissionPct: 20, flatPerShift: 0, paymentTermsDays: 30, emails: [], xeroContactId: '', stripeCustomerId: '', outlets: [] };
   saveBillingSettingsAll();
   input.value = '';
   openBillingSettingsModal();
