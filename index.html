@@ -2788,6 +2788,21 @@ function mergeProfileMeta(primary, secondary) {
     });
     return res;
   };
+  // Merge two {key: isoTimestamp} maps keeping the LATEST timestamp per key.
+  // Used for the _removed/_added tombstone maps that let a ban/restriction
+  // REMOVAL survive the union merge (v99 fix: before this, unionList re-added
+  // any removed ban from the other side's copy, so lifting a ban never stuck).
+  const latestTsMap = (a, b) => {
+    const out = {};
+    [a, b].forEach(m => {
+      if (m && typeof m === 'object' && !Array.isArray(m)) {
+        Object.entries(m).forEach(([k, ts]) => {
+          if (ts && (!out[k] || String(ts) > String(out[k]))) out[k] = ts;
+        });
+      }
+    });
+    return out;
+  };
   const mergeSection = (sectionName, listField) => {
     const p = (primary && primary[sectionName]) || {};
     const s = (secondary && secondary[sectionName]) || {};
@@ -2795,11 +2810,26 @@ function mergeProfileMeta(primary, secondary) {
     keys.forEach(k => {
       const pe = p[k] || {};
       const se = s[k] || {};
+      // v99: tombstone-aware list merge. Union both sides as before, but then
+      // drop any entry whose removal tombstone is newer than its last add — so
+      // "lift ban" on one device sticks instead of being resurrected by the
+      // other side's stale copy. A later re-ban (fresh _added stamp) still wins.
+      const removedTs = latestTsMap(pe[listField + '_removed'], se[listField + '_removed']);
+      const addedTs   = latestTsMap(pe[listField + '_added'],   se[listField + '_added']);
+      const mergedList = unionList(pe[listField], se[listField]).filter(v => {
+        const vk = normProfileKey(v);
+        const rts = removedTs[vk];
+        if (!rts) return true;                       // never removed → keep
+        const ats = addedTs[vk];
+        return !!(ats && String(ats) > String(rts)); // re-added after removal → keep
+      });
       const merged = {
         ...se,            // remote/secondary defaults
         ...pe,            // primary (local) overrides scalars like notes/commission
-        [listField]: unionList(pe[listField], se[listField])
+        [listField]: mergedList
       };
+      if (Object.keys(removedTs).length) merged[listField + '_removed'] = removedTs;
+      if (Object.keys(addedTs).length)   merged[listField + '_added']   = addedTs;
       // OUTLET requirements: a list of {id,label}. Replace with primary's copy
       // (so an edit/delete on this device propagates) — but if this device has no
       // requirements key at all, keep the remote one rather than wiping it.
@@ -2847,6 +2877,30 @@ function mergeProfileMeta(primary, secondary) {
   mergeSection('workers', 'disliked_outlets');
   mergeSection('outlets', 'banned_workers');
   return out;
+}
+// v99: build the fields for setting a ban/restriction list on a profile entry,
+// stamping timestamped _added/_removed maps by diffing against the entry's
+// current list. These stamps are what make removals survive mergeProfileMeta's
+// union (without them, lifting a ban was always undone by the merge with the
+// remote copy — the "can't remove a ban" bug). Spread the result into the entry:
+//   profileMeta.outlets[k] = { ...existing, ...listWithChangeStamps(existing, 'banned_workers', newList) }
+function listWithChangeStamps(existing, listField, newList) {
+  const now = new Date().toISOString();
+  const clean = (Array.isArray(newList) ? newList : []).filter(v => normProfileKey(v));
+  const oldKeys = new Set((((existing || {})[listField]) || []).map(normProfileKey));
+  const newKeys = new Set(clean.map(normProfileKey));
+  const removed = { ...(((existing || {})[listField + '_removed']) || {}) };
+  const added   = { ...(((existing || {})[listField + '_added'])   || {}) };
+  newKeys.forEach(k => { if (!oldKeys.has(k)) added[k] = now; });    // newly added
+  oldKeys.forEach(k => { if (!newKeys.has(k)) removed[k] = now; });  // newly removed
+  // Anything deliberately present in the new list must not lose to an old
+  // tombstone (e.g. re-banning a worker whose ban was lifted earlier).
+  newKeys.forEach(k => { if (removed[k] && !(added[k] && String(added[k]) > String(removed[k]))) added[k] = now; });
+  return {
+    [listField]: clean.slice(),
+    [listField + '_removed']: removed,
+    [listField + '_added']: added
+  };
 }
 async function saveProfileMeta() {
   // Write-through with merge: localStorage immediately (instant + offline), then
@@ -13950,7 +14004,9 @@ async function liftWorkerBanFromOutlet(outletName) {
   if (!existing) return;
   const wk = normProfileKey(wfBanWorkerName);
   const list = (existing.banned_workers || []).filter(n => normProfileKey(n) !== wk);
-  profileMeta.outlets[oKey] = { ...existing, banned_workers: list };
+  // listWithChangeStamps stamps a removal tombstone so the lift survives the
+  // team-wide merge (previously the merge unioned the remote copy's ban back in).
+  profileMeta.outlets[oKey] = { ...existing, ...listWithChangeStamps(existing, 'banned_workers', list) };
   saveProfileMeta();
   renderWorkerBans();
   toast(`Lifted ${outletName}'s ban on ${wfBanWorkerName}`);
@@ -14031,7 +14087,7 @@ async function saveWorker() {
     ...existingProfile,
     notes: document.getElementById('wf-notes').value.trim(),
     no_ack_required: document.getElementById('wf-no-ack').checked,
-    disliked_outlets: wfDislikedOutlets.slice(),
+    ...listWithChangeStamps(existingProfile, 'disliked_outlets', wfDislikedOutlets),
     unavailable: wfUnavailable
       .filter(r => r && r.from && r.to)
       .map(r => ({ from: String(r.from).slice(0,10), to: String(r.to).slice(0,10), ...(r.note ? { note: r.note } : {}) }))
@@ -14355,7 +14411,7 @@ async function saveOutlet() {
     chat_link: document.getElementById('of-chat-link').value.trim(),
     attire: document.getElementById('of-attire').value.trim(),
     notes: document.getElementById('of-notes').value.trim(),
-    banned_workers: splitProfileList(document.getElementById('of-banned-workers').value),
+    ...listWithChangeStamps(prevMeta, 'banned_workers', splitProfileList(document.getElementById('of-banned-workers').value)),
     requirements: (_outletReqEditing || []).filter(r => r && r.id && r.label).map(r => ({ id: r.id, label: r.label })),
     lat: (outletGeo.lat !== null && outletGeo.lng !== null) ? outletGeo.lat : (prevMeta.lat ?? null),
     lng: (outletGeo.lat !== null && outletGeo.lng !== null) ? outletGeo.lng : (prevMeta.lng ?? null)
@@ -22353,7 +22409,9 @@ async function executeAIAction(a) {
         const idx = list.findIndex(n => normProfileKey(n) === normProfileKey(worker.name));
         if (idx > -1) list.splice(idx, 1);
       }
-      profileMeta.outlets[oKey] = { ...existing, banned_workers: list };
+      // Stamp add/remove timestamps so the AI's ban/unban survives the team-wide
+      // merge (an unstamped unban was previously resurrected by the remote copy).
+      profileMeta.outlets[oKey] = { ...existing, ...listWithChangeStamps(existing, 'banned_workers', list) };
       await saveProfileMeta();
       // Refresh any open views that surface bans/restrictions.
       try { await loadWorkerCards(); } catch(e) {}
