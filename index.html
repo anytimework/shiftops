@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v98 (STOP THE ACK CLOBBER: PERSIST IS NOW MERGE-UP, NEVER DOWNGRADE) — Worked from v97. Live forensic evidence (Jon, 19 Jul, two SQL snapshots 3 minutes apart): shift_reminders rows for Joseph/Vicknesh/Aliff/Quan were night_acked=true, clockin_responded=true at 08:03 (recorded by the periskope-webhook when the workers replied OK on WhatsApp), and by 16:10 the SAME rows read false/false — a panel device OVERWROTE the acknowledged state. ROOT CAUSE: persistReminder() upserts the ENTIRE row from the device's LOCAL memory ("night_acked: !!r.nightAcked" etc.), so any device whose local flags are stale-false clobbers server-true the moment any sweep persists that shift (the 4:08pm clock-in reminder sends did exactly that). The v89/v90 sticky system only protects flags the SAME device set — webhook-recorded worker acks have no sticky anywhere and were defenseless. The clobber was MASKED for weeks because RLS rejected all panel writes to shift_reminders; the 17-Jul RLS fix restored panel writes and re-armed it. FIX: persistReminder gains MERGE-UP semantics for the four progress flags (night_sent, night_acked, clockin_sent, clockin_responded): when a flag is locally FALSE it is now OMITTED from the upsert payload (both the full payload and the v87 core-columns retry), so the database's true value survives; a true value still writes normally. PostgREST upserts only update provided columns, so this is a pure server-truth-preserving change. Explicit un-acking still works: persistReminder(shiftId, { force: true }) includes all four flags verbatim, and undoFullAck — the ONLY intentional downgrade path — now calls it with force. All 37 other persistReminder call sites keep their existing one-argument form and get merge-up automatically. Combined with v97 (session self-heal + phone-less ack claims), the ack pipeline is now: webhook/button sets true → nothing can silently flip it back → every device converges. NOTHING ELSE TOUCHED; node --check 2/2. Surgical diff: header + persistReminder (signature + 2 payload guards) + undoFullAck's one persist call. -->
 <!-- Build patch: v97 (LIVE-SYNC SELF-HEAL + NO MORE SILENT STALE + PHONE-LESS ACK SYNC) — Worked from the live v96 build (verified byte-identical to the audited v96). Ops report (Jon, 19 Jul): Yra acknowledged the morning clock-in alerts on her machine but Jon's view still showed all ten as unacknowledged — and comparison of the two screens shows Jon's ENTIRE dashboard stale (Completed Tasks 20 vs 94, different payment totals), not just the acks. ROOT CAUSE: under v95 Supabase Auth, a long-open/slept tab whose token refresh fails starts erroring on EVERY read — and every sync path failed SILENTLY (silentSyncReminders: "if (error||!data) return;"), so the panel froze into a localStorage island while looking normal. The acknowledgements were in the shared store all along; the device had stopped reading. THREE FIXES: (1) SESSION SELF-HEAL: new supaSessionHealthCheck() rides the existing 30s reminder-sync cadence (self-throttled to 60s) — it proactively refreshes the token when <2 min from expiry, force-refreshes when the session is missing, and if recovery is impossible it shows a clear "Session expired — sign in to resume live sync" toast and opens the login modal instead of letting the tab rot in stale silence. A device can now never silently drift: it is either live or visibly asked to re-login. (2) SYNC ERRORS ARE LOGGED, not swallowed: silentSyncReminders now console.warns the exact Supabase error before returning. (3) PHONE-LESS ACK GAP CLOSED (the queued v96 idea): ack claims were keyed by worker PHONE and skipped entirely when the worker had no phone — those acks stayed local to the acking device forever. New _ackFallbackDigits(name) derives a stable numeric slug from the worker name; markWorkerAcknowledged/undoFullAck publish with it when no phone exists, and syncTicksFromClaims restores with the same fallback instead of skipping the shift. All existing phone-keyed claims remain valid — the fallback only engages when the phone is blank. NOTHING ELSE TOUCHED: alert builder, silentSync merge/sticky logic, DB writes, auth flow, MFA, relays, Stripe, FAB guard all byte-identical; node --check 2/2. Surgical diff: header + 2 new helper functions + 4 functions with 1-2 line edits each (silentSyncReminders gate+log, markWorkerAcknowledged, undoFullAck, syncTicksFromClaims). -->
 <!-- Build patch: v96 (FIX: FLOATING WIDGETS VANISH ON CLICK UNDER SUPABASE AUTH) — Worked from the live v95 build. Ops report (Jon, 18 Jul): clicking the AI chatbot, Team Chat, or Team Tasks FAB makes all three buttons DISAPPEAR instead of opening the panel. ROOT CAUSE: v95 moved login to Supabase Auth but the four security guards protecting the floating widgets — toggleAIChat, toggleTeamChat, toggleTeamTasks, and updateChatUnreadBadge — still call getValidInternalSession(), which only reads the LEGACY localStorage session ("internal_session"). In supa mode that key is never written, so the guard concludes "logged out", calls setAuthGateUI(false), and hides every FAB + panel — the exact reported behaviour. FIX (one function, one branch): getValidInternalSession() now returns a synthetic { user, expiresAt } session in supa mode whenever a Supabase login is active (currentInternalUser set by _supaApplyUser), and null when not signed in — so all four guards keep their security role verbatim: logged-out users still cannot reach the widgets (FABs stay hidden until login), and logged-in users get the panels back. No other logic touched: legacy-mode body byte-identical, guards unchanged, v95 auth flow, MFA, relay JWT wiring, Stripe v93/v94 features all untouched. node --check passes 2/2 script blocks. Surgical diff: exactly one function (getValidInternalSession) gained a 5-line branch + this header. -->
 <!-- Build patch: v95 (REAL LOGIN: SUPABASE AUTH + TOTP MFA FOR MONEY ROLES + RELAY JWT) — Worked from the v94 (July17_2index_v94) build. Ops request: secure the login now that the panel charges cards. REALITY FIXED: the old gate was client-side only — 7 passcodes hardcoded in this public file, sessions in localStorage, nothing verified server-side; the anon key could drive Supabase and both relays regardless of login. NEW (flag USE_SUPABASE_AUTH=true): (1) LOGIN is now Supabase Auth email+password (signInWithPassword). Username + role come from user_metadata {username, role} so every existing username-keyed behaviour (activity log authorship, USER_COUNTRY_SCOPE for Hiro, salary profiles, messaging selects, applyRoleVisibility) is unchanged. Session = Supabase JWT (auto-refresh, signOut on logout); the app no longer trusts localStorage for auth in supa mode (current_internal_user kept only as a display-name cache for boot-time logActivity). (2) TOTP MFA (authenticator app): owner + finance MUST enrol — on first login the modal shows the QR + secret from mfa.enroll(totp), verifies the 6-digit code, and thereafter every login for a TOTP-enrolled user goes through challenge/verify to AAL2 before the app opens. Ops/ph_partner stay password-only (enrolment optional later). (3) RELAY CALLS now send the LOGGED-IN USER'S JWT (authBearerToken(): session access_token, anon-key fallback in legacy mode) — stripeRelay + aspireRelay headers switched — so stripe-relay v3 (ships alongside) can verify the caller: auth.getUser(jwt), role/email allowlist (owner+finance only), optional country gate + daily cap; a drop-in auth guard snippet for aspire-relay ships too. (4) LEGACY FALLBACK: set USE_SUPABASE_AUTH=false to restore the old gate for a transition week — with ALL SEVEN PASSCODES ROTATED to fresh random values (old ones are burned: they lived in a public file). seedInternalUsers/select-fill skip in supa mode; the modal shows email+password (+MFA row/enrol panel) in supa mode and username+passcode in legacy. changeInternalPasscode is legacy-only (supa users reset via email). auth_migration_v1.sql ships with staged steps: A) create the 7 users with metadata, B) verify v95, C) revoke anon table access so the embedded anon key stops being a data key. node --check passes (2/2 inline script blocks). Surgical diff: login modal reworked + MFA/enrol rows added, INTERNAL_USER_ACCOUNTS passcodes rotated + flag const, requireInternalLogin/internalLogin/internalLogout branched (legacy bodies preserved), new self-contained supa-auth region (supaLogin/supaMfaVerify/supaEnrollStart/supaEnrollVerify/finishSupaLogin/supaRequireLogin/authBearerToken + _supaRole), currentUserRole one supa branch, seedInternalUsers one guard line, stripeRelay + aspireRelay auth header lines; zero function removals or renames; webhook untouched; v93/v94 features untouched. -->
@@ -3877,7 +3878,13 @@ async function loadReminders() {
     // If empty or error: keep the localStorage version already loaded above
   } catch(e) {}
 }
-async function persistReminder(shiftId) {
+async function persistReminder(shiftId, opts) {
+  // v98: merge-up semantics — routine persists may only RAISE the four progress
+  // flags. A locally-false flag is omitted from the payload so a true value in
+  // the database (e.g. a worker ack recorded by the webhook) can never be
+  // clobbered by a device with stale local state. Only an explicit undo passes
+  // { force: true } to write false over true.
+  const _forceFlags = !!(opts && opts.force);
   // Always save to localStorage immediately so current user never loses data
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
   // Save to Supabase so all other users can see it
@@ -3914,6 +3921,12 @@ async function persistReminder(shiftId) {
       pay_followup_sent_at: r.payFollowupSentAt || null,
       updated_at: new Date().toISOString()
     };
+    // v98: strip locally-false progress flags unless this is a forced undo.
+    if (!_forceFlags) {
+      ['night_sent','night_acked','clockin_sent','clockin_responded'].forEach(f => {
+        if (fullPayload[f] === false) delete fullPayload[f];
+      });
+    }
     let { error } = await supabaseClient.from('shift_reminders').upsert(fullPayload, { onConflict: 'shift_id' });
     // v87: DROP-AND-RETRY on a missing column. A SINGLE unknown column (e.g.
     // pay_followup_sent_at, or any offer_* not yet ALTERed into the table) makes
@@ -3938,6 +3951,12 @@ async function persistReminder(shiftId) {
           last_reminder_at: r.lastReminderAt || null,
           updated_at: new Date().toISOString()
         };
+        // v98: the fallback path must not clobber either.
+        if (!_forceFlags) {
+          ['night_sent','night_acked','clockin_sent','clockin_responded'].forEach(f => {
+            if (corePayload[f] === false) delete corePayload[f];
+          });
+        }
         const retry = await supabaseClient.from('shift_reminders').upsert(corePayload, { onConflict: 'shift_id' });
         error = retry.error;
         if (!error) console.warn('[persistReminder] full write hit a missing column; core reminder flags persisted via fallback. Run the shift_reminders SQL in Supabase to restore full team sync.');
@@ -4375,7 +4394,7 @@ async function resetReminderLifecycleForRefill(shiftId) {
     offerAcceptedBy: '', offerAcceptedAt: '', offerOutletInformed: ''
   };
   try { localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders)); } catch (e) {}
-  await persistReminder(shiftId);
+  await persistReminder(shiftId, { force: true }); // v98: slot recycle is an intentional downgrade — force-clear so the old occupant's flags can't haunt the new booking
 }
 // Quick "worker acknowledged" from a reminder alert banner. Ticks the relevant
 // acknowledgement: if a clock-in reminder was sent, mark clock-in responded;
@@ -4438,7 +4457,7 @@ async function undoFullAck(shiftId) {
   shiftReminders[shiftId] = { nightSent: false, nightAcked: false, clockinSent: false, clockinResponded: false, disputed: false, disputeKind: '', disputeReason: '', disputeAt: '', lateNotified: false, lateReason: '', lateAt: '', lateAck: false, outletInformed: false, needsReplacement: false, replacementAt: '', offeredNames: [], offerSentAt: '', offerAccepted: false, offerAcceptedBy: '', offerAcceptedAt: '', offerOutletInformed: false };
   updateReminderPanelInPlace(shiftId);
   checkReminderAlerts();
-  await persistReminder(shiftId);
+  await persistReminder(shiftId, { force: true }); // v98: explicit undo — the legitimate downgrade, force-writes the cleared flags
 }
 // Manually clear a dispute flag (ops resolved it) without wiping reminder progress
 async function clearDispute(shiftId) {
