@@ -3939,6 +3939,12 @@ async function persistReminder(shiftId, opts) {
   // clobbered by a device with stale local state. Only an explicit undo passes
   // { force: true } to write false over true.
   const _forceFlags = !!(opts && opts.force);
+  // v99.1: per-field force — an explicit hand-untick of ONE checkbox must write
+  // that one field's false to the DB while the other progress flags stay
+  // stripped (protected from stale-state clobber). Without this, toggleReminder's
+  // untick never left the device: the strip below removed the false, the DB kept
+  // true, and the 30s sync re-ticked the box everywhere ("can't un-send" bug).
+  const _forceCols = (opts && Array.isArray(opts.forceFields)) ? opts.forceFields : [];
   // Always save to localStorage immediately so current user never loses data
   localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
   // Save to Supabase so all other users can see it
@@ -3976,9 +3982,10 @@ async function persistReminder(shiftId, opts) {
       updated_at: new Date().toISOString()
     };
     // v98: strip locally-false progress flags unless this is a forced undo.
+    // v99.1: fields listed in opts.forceFields are exempt from the strip.
     if (!_forceFlags) {
       ['night_sent','night_acked','clockin_sent','clockin_responded'].forEach(f => {
-        if (fullPayload[f] === false) delete fullPayload[f];
+        if (fullPayload[f] === false && !_forceCols.includes(f)) delete fullPayload[f];
       });
     }
     let { error } = await supabaseClient.from('shift_reminders').upsert(fullPayload, { onConflict: 'shift_id' });
@@ -4006,9 +4013,10 @@ async function persistReminder(shiftId, opts) {
           updated_at: new Date().toISOString()
         };
         // v98: the fallback path must not clobber either.
+        // v99.1: same forceFields exemption as the full payload.
         if (!_forceFlags) {
           ['night_sent','night_acked','clockin_sent','clockin_responded'].forEach(f => {
-            if (corePayload[f] === false) delete corePayload[f];
+            if (corePayload[f] === false && !_forceCols.includes(f)) delete corePayload[f];
           });
         }
         const retry = await supabaseClient.from('shift_reminders').upsert(corePayload, { onConflict: 'shift_id' });
@@ -4412,7 +4420,12 @@ async function toggleReminder(shiftId, field, checked) {
   }
   updateReminderPanelInPlace(shiftId); // instant local update, no scroll jump
   checkReminderAlerts();
-  await persistReminder(shiftId);      // sync to Supabase for all other users
+  // v99.1: an UNTICK of a progress checkbox is an explicit undo of that one flag —
+  // force-write just that field's false so it persists to the DB and syncs to
+  // every device. (Without this, the v98 strip guard silently dropped the false:
+  // the DB row kept true and the next 30s sync re-ticked the box everywhere.)
+  const _undoCol = { nightSent: 'night_sent', clockinSent: 'clockin_sent', nightAcked: 'night_acked', clockinResponded: 'clockin_responded' }[field];
+  await persistReminder(shiftId, (!checked && _undoCol) ? { forceFields: [_undoCol] } : undefined); // sync to Supabase for all other users
 }
 // v71: a shift slot id is REUSED in place when an open slot is (re)filled, so a
 // prior worker's reminder send/ack flags can linger on the id and cause the NEW
