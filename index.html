@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<!-- Build patch: v101 (REMINDER TICKS DON'T SYNC CROSS-DEVICE: uuid/text KEY MISMATCH + fresh-load repaint) — Worked from the live v99.1 base (re-applies the confirmed-good v100 ledger-task cross-date fix). Ops report (Jon, 21 Jul): Jon ticks night_sent + night_acked on his device; a SECOND fresh laptop (and Yra's login) shows them UN-ticked, even though the DB row (shift 15c11f57…, 21 Jul 18:00) holds night_sent=true, night_acked=true. FORENSICS (SQL + live console on the broken device): (a) DB = true/true; (b) both RLS policies on shift_reminders are permissive ALL for anon AND authenticated — reads/writes open; (c) under the authenticated role the row IS returned true/true, so the data reaches the browser; (d) the reminder read is an unfiltered select('*'); (e) the DOM probe showed the row rendered with all four checkboxes checked:false and a '📲 Send' button (emitted only when !nightSent) — so at paint time shiftReminders[s.id] resolved empty. ROOT CAUSE: shifts.id is uuid, shift_reminders.shift_id is text (information_schema confirmed; the join even threw operator does not exist: text = uuid). loadReminders() keys the map by the row's text shift_id; every render reads shiftReminders[s.id] with the shift's uuid id. supabase-js can deserialize the two sides into strings that don't match as object keys, so on a device WITHOUT a warm localStorage cache (a fresh login) the lookup misses and every box renders false. Jon's own device looked right only because its sticky store + app_settings claims re-assert true regardless of the key — masking the defect until a genuinely fresh device was tested. FIX (client-only; NO schema change, so no risky live-table migration): (1) the shiftReminders map is wrapped in a Proxy (_wrapReminders) that canonicalizes the key — String().trim().toLowerCase() — on EVERY get/set/has/delete, so a uuid read and a text-stored key converge automatically. This is applied at the three (and only three) reassignment points (localStorage load, DB-read init, 30s sync replace) plus the `incoming` builder, so all ~140 existing shiftReminders[x] access sites are fixed WITHOUT being touched (zero regression surface). Symbol keys and array-method access pass through untouched. (2) belt-and-braces: after loadReminders()'s DB read repopulates the map, updateReminderPanelInPlace() repaints any reminder rows already in the DOM (no-op for rows not present), covering any first-paint/async ordering gap on a fresh device. Verified: node --check 2/2; a 9-case Proxy harness passes (uppercase-text write found by lowercase-uuid read = the exact bug, whitespace trim, has/delete, Object.keys canonical, JSON.stringify canonical, re-wrap preserve, numeric id). Sticky/claim/webhook/persist/undo logic all untouched — the Proxy only changes how keys are compared, never a flag's value, so v98 merge-up and v90/v91 stickiness still hold. Surgical diff: header + _ridKey/_wrapReminders helpers + 4 wrap-points + 1 repaint block + the v100 task-cache block; zero function removals or renames. NOTE (optional structural cleanup, separate track): align the column types by converting shift_reminders.shift_id to uuid so raw SQL joins work natively — the Proxy makes this non-urgent. -->
+<!-- Build patch: v100 (OPEN-SLOT OFFERS NOW GO OUT IN TWO RANKED GROUPS) — Worked from v99_2 (July20index_v99_2). Ops request (Jon, 30 Jul): when offering a vacant slot, offer FIRST to people who have actually worked at that outlet before, and only THEN to people who merely tend to work that weekday. NEW: the single "Show others likely to work <Dow>" toggle becomes TWO independent collapsibles inside the offer block — 1️⃣ "Show workers who've worked at this outlet" (green, listed first) and 2️⃣ "Show others likely to work <Dow>" (amber, second wave). Each has its own chips and its own 📣 Offer to all mass-send (offerSlotToOutletVeterans / offerSlotToLikely, both routed through the new massOfferSlotToGroup). GROUP 1 (outletVeteransForSlot) = workers with ≥1 attended, non-cancelled shift at THIS outlet inside the same 183-day history window the weekday cache already uses; ranked by shifts-at-outlet desc, then most-recently-there, then name; chip reads "Name · 9× here". Powered by a new per-worker per-outlet tally in buildDowFrequencyCache (the existing single query gains one column, `outlet`, keyed with normProfileKey — NO extra network round-trip, NO schema change). GROUP 2 (likelyWorkersForSlot) is unchanged in rule, but now takes an optional excludeKeys set and drops every Group-1 member, so a worker can NEVER receive two WhatsApps for one slot. BOTH groups now share ONE eligibility gate, offerGroupBlockReason — extracted verbatim (same checks, same order) from the old weekday-only body, so the two lists cannot drift apart on who is safe to offer: excluded are workers already on the standby list above, workers who self-declared unavailable that date, workers with an OVERLAPPING booked shift that day (authoritative DB windows, matched by normalised name OR phone), suspended workers, workers banned by the outlet, workers who marked the outlet as one they don't want (avoid), workers with no phone on file, and — belt-and-braces — the in-memory clash check. A soft requirements gate still does NOT block an offer (requirements are confirmed on assignment), and a same-day shift that does NOT overlap is still offered, both unchanged. New loadOfferGroupData memoises the two lookups per slot for 45s so expanding both groups doesn't double-query; the mass-send paths force a FRESH read (TTL 0) so a booking made since render still blocks the offer. BACK-COMPAT: toggleLikelyWorkers and offerSlotToLikely are retained as thin wrappers; renderLikelyWorkersPlaceholder keeps its name and signature so both call sites in renderOfferToStandbyBlock are untouched. Group 1 is suppressed entirely when the slot has no outlet. node --check passes (2/2 inline script blocks). Reverse-patch reproduces v99_2 byte-for-byte (sha256 83a578ad…c1ea). Surgical diff: 5 hunks, all inside the offer-suggestions region (lines ~10555–10845) — region doc comment, one added column + outlet tally in buildDowFrequencyCache, likelyWorkersForSlot refactor, renderLikelyWorkersPlaceholder, toggleLikelyWorkers→toggleOfferGroup, offerSlotToLikely→massOfferSlotToGroup. Zero function removals or renames (979→987, 8 added). NOTHING ELSE DISTURBED: standby list, offer-search box, offer/accept/confirm flow, buildSlotOfferMessage, Periskope webhook, reminders, payroll, billing and every other region byte-identical. -->
 <!-- Build patch: v98 (STOP THE ACK CLOBBER: PERSIST IS NOW MERGE-UP, NEVER DOWNGRADE) — Worked from v97. Live forensic evidence (Jon, 19 Jul, two SQL snapshots 3 minutes apart): shift_reminders rows for Joseph/Vicknesh/Aliff/Quan were night_acked=true, clockin_responded=true at 08:03 (recorded by the periskope-webhook when the workers replied OK on WhatsApp), and by 16:10 the SAME rows read false/false — a panel device OVERWROTE the acknowledged state. ROOT CAUSE: persistReminder() upserts the ENTIRE row from the device's LOCAL memory ("night_acked: !!r.nightAcked" etc.), so any device whose local flags are stale-false clobbers server-true the moment any sweep persists that shift (the 4:08pm clock-in reminder sends did exactly that). The v89/v90 sticky system only protects flags the SAME device set — webhook-recorded worker acks have no sticky anywhere and were defenseless. The clobber was MASKED for weeks because RLS rejected all panel writes to shift_reminders; the 17-Jul RLS fix restored panel writes and re-armed it. FIX: persistReminder gains MERGE-UP semantics for the four progress flags (night_sent, night_acked, clockin_sent, clockin_responded): when a flag is locally FALSE it is now OMITTED from the upsert payload (both the full payload and the v87 core-columns retry), so the database's true value survives; a true value still writes normally. PostgREST upserts only update provided columns, so this is a pure server-truth-preserving change. Explicit un-acking still works: persistReminder(shiftId, { force: true }) includes all four flags verbatim, and undoFullAck — the ONLY intentional downgrade path — now calls it with force. All 37 other persistReminder call sites keep their existing one-argument form and get merge-up automatically. Combined with v97 (session self-heal + phone-less ack claims), the ack pipeline is now: webhook/button sets true → nothing can silently flip it back → every device converges. NOTHING ELSE TOUCHED; node --check 2/2. Surgical diff: header + persistReminder (signature + 2 payload guards) + undoFullAck's one persist call. -->
 <!-- Build patch: v97 (LIVE-SYNC SELF-HEAL + NO MORE SILENT STALE + PHONE-LESS ACK SYNC) — Worked from the live v96 build (verified byte-identical to the audited v96). Ops report (Jon, 19 Jul): Yra acknowledged the morning clock-in alerts on her machine but Jon's view still showed all ten as unacknowledged — and comparison of the two screens shows Jon's ENTIRE dashboard stale (Completed Tasks 20 vs 94, different payment totals), not just the acks. ROOT CAUSE: under v95 Supabase Auth, a long-open/slept tab whose token refresh fails starts erroring on EVERY read — and every sync path failed SILENTLY (silentSyncReminders: "if (error||!data) return;"), so the panel froze into a localStorage island while looking normal. The acknowledgements were in the shared store all along; the device had stopped reading. THREE FIXES: (1) SESSION SELF-HEAL: new supaSessionHealthCheck() rides the existing 30s reminder-sync cadence (self-throttled to 60s) — it proactively refreshes the token when <2 min from expiry, force-refreshes when the session is missing, and if recovery is impossible it shows a clear "Session expired — sign in to resume live sync" toast and opens the login modal instead of letting the tab rot in stale silence. A device can now never silently drift: it is either live or visibly asked to re-login. (2) SYNC ERRORS ARE LOGGED, not swallowed: silentSyncReminders now console.warns the exact Supabase error before returning. (3) PHONE-LESS ACK GAP CLOSED (the queued v96 idea): ack claims were keyed by worker PHONE and skipped entirely when the worker had no phone — those acks stayed local to the acking device forever. New _ackFallbackDigits(name) derives a stable numeric slug from the worker name; markWorkerAcknowledged/undoFullAck publish with it when no phone exists, and syncTicksFromClaims restores with the same fallback instead of skipping the shift. All existing phone-keyed claims remain valid — the fallback only engages when the phone is blank. NOTHING ELSE TOUCHED: alert builder, silentSync merge/sticky logic, DB writes, auth flow, MFA, relays, Stripe, FAB guard all byte-identical; node --check 2/2. Surgical diff: header + 2 new helper functions + 4 functions with 1-2 line edits each (silentSyncReminders gate+log, markWorkerAcknowledged, undoFullAck, syncTicksFromClaims). -->
 <!-- Build patch: v96 (FIX: FLOATING WIDGETS VANISH ON CLICK UNDER SUPABASE AUTH) — Worked from the live v95 build. Ops report (Jon, 18 Jul): clicking the AI chatbot, Team Chat, or Team Tasks FAB makes all three buttons DISAPPEAR instead of opening the panel. ROOT CAUSE: v95 moved login to Supabase Auth but the four security guards protecting the floating widgets — toggleAIChat, toggleTeamChat, toggleTeamTasks, and updateChatUnreadBadge — still call getValidInternalSession(), which only reads the LEGACY localStorage session ("internal_session"). In supa mode that key is never written, so the guard concludes "logged out", calls setAuthGateUI(false), and hides every FAB + panel — the exact reported behaviour. FIX (one function, one branch): getValidInternalSession() now returns a synthetic { user, expiresAt } session in supa mode whenever a Supabase login is active (currentInternalUser set by _supaApplyUser), and null when not signed in — so all four guards keep their security role verbatim: logged-out users still cannot reach the widgets (FABs stay hidden until login), and logged-in users get the panels back. No other logic touched: legacy-mode body byte-identical, guards unchanged, v95 auth flow, MFA, relay JWT wiring, Stripe v93/v94 features all untouched. node --check passes 2/2 script blocks. Surgical diff: exactly one function (getValidInternalSession) gained a 5-line branch + this header. -->
@@ -2640,30 +2640,6 @@ const TASK_CARD_DONE_HIDE_HOURS = 18;        // hide a completed late task from 
 // Built-in WA fallback — used when localStorage has no saved config (e.g. different origin / first open)
 const WA_CONFIG_BUILTIN = { phone: '6583416027', apikey: '6771873', enabled: true };
 let shiftReminders = {}; // keyed by shift ID: { nightSent, nightAcked, clockinSent, clockinResponded, disputed, disputeKind, disputeReason, disputeAt, lateNotified, lateReason, lateAt, lateAck, outletInformed }
-// v101: canonical reminder-map key. shifts.id is uuid, shift_reminders.shift_id is
-// text; supabase-js can deserialize the two sides into strings that don't match as
-// object keys on a device without a localStorage warm-cache (fresh login), so
-// shiftReminders[s.id] misses and every checkbox renders false even though the DB
-// holds true. Rather than touch all ~140 access sites (regression-prone), the map
-// is wrapped in a Proxy that canonicalizes the key on EVERY get/set/has/delete, so
-// a uuid lookup and a text-stored key converge automatically. Symbol keys and
-// non-id property access (e.g. array methods) pass through untouched.
-function _ridKey(v) {
-  if (typeof v === 'symbol') return v;
-  return (v == null ? '' : String(v)).trim().toLowerCase();
-}
-function _wrapReminders(obj) {
-  const base = (obj && typeof obj === 'object') ? obj : {};
-  // Re-key any existing entries to canonical form so pre-wrap data stays reachable.
-  const norm = {};
-  for (const k of Object.keys(base)) norm[_ridKey(k)] = base[k];
-  return new Proxy(norm, {
-    get(t, prop) { return t[typeof prop === 'string' ? _ridKey(prop) : prop]; },
-    set(t, prop, val) { t[typeof prop === 'string' ? _ridKey(prop) : prop] = val; return true; },
-    has(t, prop) { return (typeof prop === 'string' ? _ridKey(prop) : prop) in t; },
-    deleteProperty(t, prop) { delete t[typeof prop === 'string' ? _ridKey(prop) : prop]; return true; }
-  });
-}
 let attendanceView = 'day';
 // Standby day panel starts collapsed (compact banner). Toggled per-session.
 let standbyPanelExpanded = false;
@@ -3900,12 +3876,12 @@ function formatDate(d) {
 // ─── Shift Reminder System (Supabase-backed, real-time synced) ───────────────
 async function loadReminders() {
   // Always load localStorage first so data is available instantly
-  try { shiftReminders = _wrapReminders(JSON.parse(localStorage.getItem('shift_reminders') || '{}')); } catch(e) { shiftReminders = _wrapReminders({}); }
+  try { shiftReminders = JSON.parse(localStorage.getItem('shift_reminders') || '{}'); } catch(e) { shiftReminders = {}; }
   // Then try Supabase — only override if it actually returns rows (empty array = table exists but nothing saved yet, keep localStorage)
   try {
     const { data, error } = await supabaseClient.from('shift_reminders').select('*');
     if (!error && data && data.length > 0) {
-      shiftReminders = _wrapReminders({});
+      shiftReminders = {};
       data.forEach(r => {
         shiftReminders[r.shift_id] = {
           nightSent: !!r.night_sent,
@@ -3953,18 +3929,6 @@ async function loadReminders() {
         applyStickyOverReminders(_bootReminderSnapshot);
       } catch(e) {}
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
-      // v101: repaint any reminder panels already in the DOM. On a fresh device
-      // (empty localStorage warm-cache) rows can paint from the pre-read map and
-      // never refresh — the DB says night_sent/acked=true but the checkboxes sit
-      // false. updateReminderPanelInPlace is a no-op for rows not in the DOM, so
-      // this is cheap and safe on every path (boot + any later reload).
-      try {
-        if (typeof updateReminderPanelInPlace === 'function') {
-          Object.keys(shiftReminders).forEach(id => {
-            try { updateReminderPanelInPlace(id); } catch(e) {}
-          });
-        }
-      } catch(e) {}
     }
     // If empty or error: keep the localStorage version already loaded above
   } catch(e) {}
@@ -4331,7 +4295,7 @@ async function silentSyncReminders() {
     const { data, error } = await supabaseClient.from('shift_reminders').select('*');
     if (error) { console.warn('[reminder-sync] shift_reminders read failed:', error); return; } // v97: never fail silently
     if (!data || data.length === 0) return;
-    const incoming = _wrapReminders({}); // v101: canonical keys, matches shiftReminders
+    const incoming = {};
     data.forEach(r => {
       incoming[r.shift_id] = {
         nightSent: !!r.night_sent,
@@ -4394,7 +4358,7 @@ async function silentSyncReminders() {
         const probe = applyStickySendFlags(id, { nightSent:false, clockinSent:false, nightAcked:false, clockinResponded:false });
         if (probe.nightSent || probe.clockinSent || probe.nightAcked || probe.clockinResponded) incoming[id] = cur;
       });
-      shiftReminders = _wrapReminders(incoming);
+      shiftReminders = incoming;
       localStorage.setItem('shift_reminders', JSON.stringify(shiftReminders));
       changed.forEach(id => updateReminderPanelInPlace(id));
       checkReminderAlerts();
@@ -7356,18 +7320,6 @@ async function loadTaskShiftCache() {
     if (!r) continue;
     if (r.disputed || r.lateNotified || r.needsReplacement || r.offerAccepted) ids.push(String(id));
   }
-  // v100 FIX: fold in the two LEDGER-driven task types (approval_ack v60,
-  // portal_deleted v79) so they're cross-date like every other task type.
-  try {
-    for (const [sid, e] of Object.entries(approvalAcks || {})) {
-      if (e && e.approvedAt && !e.acked) ids.push(String(sid));
-    }
-  } catch (e) {}
-  try {
-    for (const [sid, e] of Object.entries(portalDeleted || {})) {
-      if (e && !e.dismissed) ids.push(String(sid));
-    }
-  } catch (e) {}
   taskShiftCache = {};
   // Always fold in the currently-loaded shifts (so same-day items work even
   // before/without the cross-date fetch resolving).
@@ -10604,12 +10556,20 @@ function buildSlotOfferMessage(slot, workerName) {
   return `🆕 *Shift Available — Want it?*\n\nHi ${workerName}! A shift just opened up that matches your standby availability:\n\n📅 *${dateStr}*\n🏠 *${outlet}*${tRange ? `\n⏰ ${tRange}` : ''}${role ? `\n👔 ${role}` : ''}\n\nReply *YES* to grab it (first to confirm gets it), or ignore if you're no longer free. 🙌`;
 }
 
-// ── "Likely to work on this day" suggestions ─────────────────────────────────
-// Beyond the standby list, surface workers who HISTORICALLY tend to work the
-// slot's weekday (e.g. usual-Friday people) so ops can also offer them the slot.
+// ── Two ranked offer groups beyond the standby list ──────────────────────────
+// GROUP 1 — "worked at this outlet before": workers with attended shift history
+//   AT THIS OUTLET. Offered first, because they already know the outlet, so they
+//   convert best and need no briefing.
+// GROUP 2 — "likely to work this weekday": workers who HISTORICALLY tend to work
+//   the slot's weekday (e.g. usual-Friday people) but have NO history at this
+//   outlet. Second wave. Group 1 members are excluded from it, so no worker ever
+//   receives two WhatsApps for the same slot.
 //
-// A worker is suggested only if ALL of these hold:
-//   • they have worked the slot's weekday before (frequency > 0)
+// Both groups share ONE eligibility gate (offerGroupBlockReason), so they can
+// never drift apart on who is safe to offer. A worker is suggested in either group
+// only if ALL of these hold:
+//   • they have the relevant history (Group 1: ≥1 attended shift at this outlet;
+//     Group 2: weekday frequency > 0)
 //   • they are NOT already on the standby list for that date (shown separately)
 //   • they are NOT already assigned ANY non-cancelled shift that date
 //        — i.e. "not scheduled". This is the hard exclusion: if they already have
@@ -10631,7 +10591,7 @@ async function buildDowFrequencyCache(force) {
     const cutoffStr = cutoff.toISOString().slice(0,10);
     const { data, error } = await supabaseClient
       .from('shifts')
-      .select('worker_name, shift_date, scheduled_start, clock_in, cancelled')
+      .select('worker_name, shift_date, scheduled_start, clock_in, cancelled, outlet')
       .gte('shift_date', cutoffStr)
       .not('cancelled', 'is', true)
       .not('clock_in', 'is', null)   // we only count shifts they showed up for — filter server-side so the payload stays small
@@ -10642,10 +10602,20 @@ async function buildDowFrequencyCache(force) {
       if (!name || name.toLowerCase() === 'available') return;
       if (!s.shift_date || !s.clock_in) return;   // only count shifts they actually showed up for
       const key = name.toLowerCase();
-      if (!map[key]) map[key] = { name, dow:[0,0,0,0,0,0,0], total:0, lastWorked:'' };
+      if (!map[key]) map[key] = { name, dow:[0,0,0,0,0,0,0], total:0, lastWorked:'', outlets:{} };
+      if (!map[key].outlets) map[key].outlets = {};   // tolerate an older cached shape
       map[key].dow[new Date(s.shift_date + 'T00:00:00').getDay()]++;
       map[key].total++;
       if (s.shift_date > map[key].lastWorked) map[key].lastWorked = s.shift_date;
+      // Per-OUTLET attendance tally — this is what powers the "worked at this
+      // outlet before" offer group. Keyed with normProfileKey so it matches the
+      // outlet string on the slot regardless of case / stray whitespace.
+      const oKey = normProfileKey(s.outlet || '');
+      if (oKey) {
+        const o = map[key].outlets[oKey] || (map[key].outlets[oKey] = { name: String(s.outlet || '').trim(), count: 0, last: '' });
+        o.count++;
+        if (s.shift_date > o.last) o.last = s.shift_date;
+      }
     });
     _dowFreqCache = map;
     _dowFreqCacheAt = now;
@@ -10744,134 +10714,248 @@ function workerClashesInWindows(workerName, slot, windows) {
 // date: { ok, set, windows }. If scheduled.ok is false the DB lookup failed and we
 // CANNOT safely judge who's booked — callers must not offer in that case, but as a
 // last-ditch guard we still apply the in-memory clash check here.
-function likelyWorkersForSlot(slot, freqCache, scheduled) {
+// The eligibility gate shared by BOTH offer groups (outlet-history and
+// weekday-history), so the two lists can never drift apart on who is safe to
+// offer. Returns null when the worker MAY be offered, or a short reason string
+// when they must be excluded. Check order is preserved from the original
+// weekday-only implementation, so outcomes are unchanged for that group.
+function offerGroupBlockReason(name, slot, standbyKeys, windows) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key || key === 'available') return 'not a worker';
+  if (standbyKeys && standbyKeys.has(key)) return 'already in the standby list above';
+  if (isWorkerUnavailableOn(name, slot.date)) return 'said they are not available that date';
+  // Time-aware exclusion against AUTHORITATIVE DB data: if they already have a
+  // shift that day whose time overlaps this slot, never offer (double-book /
+  // clash). The window lookup matches by normalized name OR phone, so a spelling
+  // variant between history and schedule still collides. We do NOT gate on
+  // scheduled.set membership first — that exact-key precondition was the bug that
+  // let a misspelled-but-already-booked worker (e.g. "Tai Chiun" vs "Tai Chuin")
+  // skip the overlap check entirely.
+  if (workerClashesInWindows(name, slot, windows)) return 'overlapping shift that day';
+  if (isWorkerSuspended(name)) return 'suspended';
+  // Covers BOTH hard restrictions: banned by the outlet, and the worker having
+  // marked this outlet as one they don't want (avoid). A soft requirements gate
+  // does not block the offer — requirements are confirmed on assignment.
+  { const rstr = assignmentRestriction(name, slot.outlet || ''); if (rstr && !isRequirementGate(rstr)) return rstr; }
+  // Belt-and-braces: also drop any worker whose loaded shift that day clashes,
+  // in case the windows map is incomplete for some reason.
+  if (workerHasClashingShift(name, slot)) return 'overlapping shift that day';
+  if (!workerPhone(name)) return 'no phone number on file';
+  return null;
+}
+
+// ── GROUP 1: workers who have actually worked at THIS outlet before ──────────
+// Offer these first — they know the outlet, the SOP and the manager, so they are
+// the highest-conversion, lowest-risk fill. "Worked here before" means at least
+// one non-cancelled shift at this outlet that they clocked in for, inside the
+// same history window the weekday cache uses. Every exclusion in
+// offerGroupBlockReason applies: already scheduled with an OVERLAPPING shift that
+// day, banned from the outlet, avoiding the outlet, suspended, self-declared
+// unavailable, or no phone on file.
+function outletVeteransForSlot(slot, freqCache, scheduled) {
+  if (!slot || !slot.date) return [];
+  const outletKey = normProfileKey(slot.outlet || '');
+  if (!outletKey) return [];   // slot has no outlet → "worked here before" is undefined
+  const targetDow = new Date(slot.date + 'T00:00:00').getDay();
+  const standbyKeys = new Set(standbyForDay(slot.date).map(x => String(x.worker_name||'').trim().toLowerCase()));
+  const windows = (scheduled && scheduled.windows) ? scheduled.windows : new Map();
+  const out = [];
+  Object.values(freqCache || {}).forEach(entry => {
+    const name = entry.name;
+    const hist = (entry.outlets || {})[outletKey];
+    if (!hist || !hist.count) return;                        // never worked THIS outlet
+    if (offerGroupBlockReason(name, slot, standbyKeys, windows)) return;
+    out.push({ name, atOutlet: hist.count, lastAtOutlet: hist.last || '',
+               freq: entry.dow[targetDow] || 0, total: entry.total, lastWorked: entry.lastWorked });
+  });
+  // Most shifts at this outlet first, then most recently there, then by name.
+  out.sort((a,b) => (b.atOutlet - a.atOutlet)
+                 || String(b.lastAtOutlet).localeCompare(String(a.lastAtOutlet))
+                 || a.name.localeCompare(b.name));
+  return out;
+}
+
+// ── GROUP 2: workers who usually work this WEEKDAY (but not at this outlet) ──
+// Second wave. `excludeKeys` is the set of lowercased Group-1 names, so a worker
+// never appears in both lists and can never receive two WhatsApps for one slot.
+function likelyWorkersForSlot(slot, freqCache, scheduled, excludeKeys) {
   if (!slot || !slot.date) return [];
   const targetDow = new Date(slot.date + 'T00:00:00').getDay();
-  const outlet = slot.outlet || '';
   const standbyKeys = new Set(standbyForDay(slot.date).map(x => String(x.worker_name||'').trim().toLowerCase()));
-  const sched    = (scheduled && scheduled.set)     ? scheduled.set     : new Set();
   const windows  = (scheduled && scheduled.windows) ? scheduled.windows : new Map();
+  const skip = (excludeKeys && excludeKeys.has) ? excludeKeys : new Set();
   const out = [];
   Object.values(freqCache || {}).forEach(entry => {
     const name = entry.name;
     const key = name.toLowerCase();
     const freq = entry.dow[targetDow] || 0;
     if (freq <= 0) return;                                   // never worked this weekday
-    if (standbyKeys.has(key)) return;                        // already in standby section above
-    if (isWorkerUnavailableOn(name, slot.date)) return;      // worker said they're not free this date
-    // Time-aware exclusion against AUTHORITATIVE DB data: if they already have a
-    // shift that day whose time overlaps this slot, never offer (double-book /
-    // clash). The window lookup matches by normalized name OR phone, so a spelling
-    // variant between history and schedule still collides. We do NOT gate on
-    // sched.has(key) first — that exact-key precondition was the bug that let a
-    // misspelled-but-already-booked worker (e.g. "Tai Chiun" vs "Tai Chuin")
-    // skip the overlap check entirely.
-    if (workerClashesInWindows(name, slot, windows)) return;
-    if (isWorkerSuspended(name)) return;                     // suspended
-    { const rstr = assignmentRestriction(name, outlet); if (rstr && !isRequirementGate(rstr)) return; } // banned / not-wanted at outlet
-    // Belt-and-braces: also drop any worker whose loaded shift that day clashes,
-    // in case the windows map is incomplete for some reason.
-    if (workerHasClashingShift(name, slot)) return;
-    if (!workerPhone(name)) return;                          // no phone → can't WhatsApp
+    if (skip.has(key)) return;                               // already offered in Group 1
+    if (offerGroupBlockReason(name, slot, standbyKeys, windows)) return;
     out.push({ name, freq, total: entry.total, lastWorked: entry.lastWorked });
   });
   out.sort((a,b) => (b.freq - a.freq) || (b.total - a.total) || a.name.localeCompare(b.name));
   return out;
 }
 
-// Collapsible placeholder rendered inside the offer block. The DB-backed list
-// loads on first expand (kept collapsed so a long roster doesn't clutter cards).
+// Collapsible placeholders rendered inside the offer block, in the order ops
+// should work them: GROUP 1 = worked at this outlet before, GROUP 2 = usually
+// works this weekday. Each group loads its DB-backed list on first expand (kept
+// collapsed so a long roster doesn't clutter cards) and has its own mass-send.
+function offerGroupLabel(group, dowName, open) {
+  const caret = open ? '\u25be' : '\u25b8';
+  const verb  = open ? 'Hide' : 'Show';
+  return group === 'outlet'
+    ? `${caret} 1\ufe0f\u20e3 ${verb} workers who've worked at this outlet`
+    : `${caret} 2\ufe0f\u20e3 ${verb} others likely to work ${dowName}`;
+}
 function renderLikelyWorkersPlaceholder(slot) {
   if (!slot || !slot.date) return '';
   const DOW = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const dowName = DOW[new Date(slot.date + 'T00:00:00').getDay()];
   const idAttr = escapeAttr(String(slot.id));
-  const cid = 'likely-' + String(slot.id).replace(/[^a-zA-Z0-9_-]/g,'');
-  return `<div style="margin-top:8px;">
+  const cid = 'likely-' + String(slot.id).replace(/[^a-zA-Z0-9_-]/g,'');   // Group 2 keeps the original id
+  const vcid = cid + '-vet';                                              // Group 1
+  // Group 1 only makes sense when the slot has an outlet to have a history at.
+  const vetBlock = slot.outlet ? `<div style="margin-top:8px;">
+    <button class="btn btn-ghost btn-sm" id="${vcid}-btn"
+      onclick="toggleOfferGroup('${idAttr}','${vcid}','outlet')"
+      title="Offer these first — they've worked at ${escapeAttr(slot.outlet)} before, are free at this time, and aren't banned / avoiding it / suspended"
+      style="color:var(--green);">${offerGroupLabel('outlet', dowName, false)}</button>
+    <div id="${vcid}-body" style="display:none;margin-top:8px;"></div></div>` : '';
+  return `${vetBlock}<div style="margin-top:8px;">
     <button class="btn btn-ghost btn-sm" id="${cid}-btn"
-      onclick="toggleLikelyWorkers('${idAttr}','${cid}')"
-      title="Workers who usually work ${dowName} and aren't already scheduled or on standby"
-      style="color:var(--accent);">\u25b8 Show others likely to work ${dowName}</button>
+      onclick="toggleOfferGroup('${idAttr}','${cid}','dow')"
+      title="Second wave — workers who usually work ${dowName} and aren't already scheduled, on standby, or in Group 1"
+      style="color:var(--accent);">${offerGroupLabel('dow', dowName, false)}</button>
     <div id="${cid}-body" style="display:none;margin-top:8px;"></div></div>`;
 }
 
-async function toggleLikelyWorkers(shiftId, cid) {
+// Both groups need the SAME two lookups (weekday/outlet history + who's already
+// booked that day). Memoised per slot with a short TTL so expanding Group 1 then
+// Group 2 doesn't run the queries twice. Pass maxAgeMs 0 to force a fresh read —
+// the mass-send paths always do, so nobody gets offered a slot on stale clash data.
+let _offerGroupData = {};
+async function loadOfferGroupData(slot, maxAgeMs) {
+  const k = String(slot.id);
+  const ttl = (maxAgeMs === 0) ? 0 : (maxAgeMs || 45000);
+  const cached = _offerGroupData[k];
+  if (ttl && cached && (Date.now() - cached.at) < ttl) return cached;
+  const freq = await withTimeout(buildDowFrequencyCache(false), 8000, 'likely-worker history');
+  const scheduled = await withTimeout(fetchScheduledWorkerSetForDate(slot.date), 8000, 'scheduled-worker check');
+  const rec = { freq, scheduled, at: Date.now() };
+  _offerGroupData[k] = rec;
+  return rec;
+}
+
+// Build one group's list. Group 1 (outlet) is computed first either way, because
+// Group 2 must exclude its members so no worker is WhatsApped twice for one slot.
+function offerGroupList(slot, d, group) {
+  const vets = outletVeteransForSlot(slot, d.freq, d.scheduled);
+  if (group === 'outlet') return vets;
+  return likelyWorkersForSlot(slot, d.freq, d.scheduled, new Set(vets.map(v => v.name.toLowerCase())));
+}
+
+async function toggleOfferGroup(shiftId, cid, group) {
   const body = document.getElementById(cid + '-body');
   const btn = document.getElementById(cid + '-btn');
   if (!body) return;
   const slot = resolveOfferableSlot(shiftId);
   const DOW = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const dowName = slot ? DOW[new Date(slot.date + 'T00:00:00').getDay()] : 'this day';
+  const isVet = group === 'outlet';
   if (body.style.display !== 'none') {
     body.style.display = 'none';
-    if (btn) btn.innerHTML = `\u25b8 Show others likely to work ${dowName}`;
+    if (btn) btn.innerHTML = offerGroupLabel(group, dowName, false);
     return;
   }
   body.style.display = 'block';
-  if (btn) btn.innerHTML = `\u25be Hide others likely to work ${dowName}`;
-  body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Loading likely workers…</div>`;
+  if (btn) btn.innerHTML = offerGroupLabel(group, dowName, true);
+  body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Loading ${isVet ? 'workers who\'ve worked here' : 'likely workers'}…</div>`;
   if (!slot) { body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">Slot no longer open.</div>`; return; }
 
-  let freq, scheduled;
+  let d;
   try {
-    freq = await withTimeout(buildDowFrequencyCache(false), 8000, 'likely-worker history');
-    scheduled = await withTimeout(fetchScheduledWorkerSetForDate(slot.date), 8000, 'scheduled-worker check');
+    d = await loadOfferGroupData(slot);
   } catch (err) {
     console.warn('[Likely] load failed/timed out', err);
-    body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't load likely workers (the request timed out or was blocked). This doesn't affect the offers already sent above — tap <b>Hide</b> then <b>Show</b> again to retry.</div>`;
+    body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't load this list (the request timed out or was blocked). This doesn't affect the offers already sent above — tap <b>Hide</b> then <b>Show</b> again to retry.</div>`;
     return;
   }
-  if (!scheduled.ok) {
-    body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't check who's already scheduled that day (network/permissions). Not listing likely workers to avoid offering someone a clashing slot — try again in a moment.</div>`;
+  if (!d.scheduled.ok) {
+    body.innerHTML = `<div class="standby-meta" style="color:var(--amber);">Couldn't check who's already scheduled that day (network/permissions). Not listing anyone, to avoid offering someone a clashing slot — try again in a moment.</div>`;
     return;
   }
-  const likely = likelyWorkersForSlot(slot, freq, scheduled);
+  const list = offerGroupList(slot, d, group);
   const rem = shiftReminders[slot.id] || {};
   const offeredKeys = (Array.isArray(rem.offeredNames) ? rem.offeredNames : []).map(n => String(n).toLowerCase());
 
-  if (!likely.length) {
-    body.innerHTML = `<div class="standby-meta" style="color:var(--text3);">No other workers with a ${dowName} history are free and eligible for this slot.</div>`;
+  if (!list.length) {
+    body.innerHTML = isVet
+      ? `<div class="standby-meta" style="color:var(--text3);">Nobody with a work history at ${escapeHtml(slot.outlet || 'this outlet')} is free and eligible for this slot.</div>`
+      : `<div class="standby-meta" style="color:var(--text3);">No other workers with a ${dowName} history are free and eligible for this slot.</div>`;
     return;
   }
   const idAttr = escapeAttr(String(slot.id));
-  const chips = likely.map(w => {
+  const chips = list.map(w => {
     const already = offeredKeys.includes(w.name.toLowerCase());
-    const label = `${escapeHtml(w.name)} \u00b7 ${w.freq}\u00d7 ${dowName.slice(0,3)}`;
+    const label = isVet
+      ? `${escapeHtml(w.name)} \u00b7 ${w.atOutlet}\u00d7 here`
+      : `${escapeHtml(w.name)} \u00b7 ${w.freq}\u00d7 ${dowName.slice(0,3)}`;
+    const tip = isVet
+      ? `${escapeHtml(w.name)} \u2014 ${w.atOutlet} shift${w.atOutlet!==1?'s':''} at this outlet${w.lastAtOutlet ? `, last on ${escapeAttr(w.lastAtOutlet)}` : ''}`
+      : `Offer this slot to ${escapeHtml(w.name)} via WhatsApp`;
     if (already) {
       return `<button class="btn btn-ghost btn-sm" onclick="resendOfferToStandby('${idAttr}','${escapeAttr(w.name)}')" title="Already offered — re-send the WhatsApp">\u2713 ${label} \u00b7 re-send</button>`;
     }
-    return `<button class="btn btn-amber btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(w.name)}')" title="Offer this slot to ${escapeHtml(w.name)} via WhatsApp">\ud83d\udce4 ${label}</button>`;
+    return `<button class="btn ${isVet ? 'btn-primary' : 'btn-amber'} btn-sm" onclick="offerSlotToStandby('${idAttr}','${escapeAttr(w.name)}')" title="${tip}">\ud83d\udce4 ${label}</button>`;
   }).join('');
-  const offerAllBtn = likely.length > 1
-    ? `<button class="btn btn-primary btn-sm" onclick="offerSlotToLikely('${idAttr}')" title="Offer to all ${likely.length} likely workers; first YES gets it">\ud83d\udce3 Offer to all ${likely.length}</button>`
+  const massFn = isVet ? 'offerSlotToOutletVeterans' : 'offerSlotToLikely';
+  const offerAllBtn = list.length > 1
+    ? `<button class="btn btn-primary btn-sm" onclick="${massFn}('${idAttr}')" title="Offer to all ${list.length}; first YES gets it">\ud83d\udce3 Offer to all ${list.length}</button>`
     : '';
+  const header = isVet
+    ? `\ud83c\udfe0 <b>${list.length} worker${list.length!==1?'s':''}</b> have worked at ${escapeHtml(slot.outlet || 'this outlet')} before and are free at this time \u2014 not double-booked, not banned, not avoiding it, not suspended. <b>Offer this group first:</b>`
+    : `\ud83d\udcc5 ${list.length} other worker${list.length!==1?'s':''} usually work ${dowName}, aren't scheduled that day, and aren't suspended/banned (Group 1 excluded). Tap to offer via WhatsApp:`;
   body.innerHTML = `
-    <div class="standby-meta" style="margin-bottom:6px;color:var(--text2);">
-      ${likely.length} worker${likely.length!==1?'s':''} usually work ${dowName}, aren't scheduled that day, and aren't suspended/banned. Tap to offer via WhatsApp:
-    </div>
+    <div class="standby-meta" style="margin-bottom:6px;color:var(--text2);">${header}</div>
     <div class="standby-actions" style="margin-top:0;flex-wrap:wrap;">${chips}${offerAllBtn}</div>`;
 }
 
-async function offerSlotToLikely(shiftId) {
+// Back-compat: any older rendered markup still calling the weekday-only name.
+async function toggleLikelyWorkers(shiftId, cid) { return toggleOfferGroup(shiftId, cid, 'dow'); }
+
+// Mass-send for either group. The clash data is re-read fresh (TTL 0) so a
+// booking made since the list was rendered still blocks the offer.
+async function massOfferSlotToGroup(shiftId, group) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
-  let freq, scheduled;
+  const isVet = group === 'outlet';
+  if (isVet && !slot.outlet) { toast('This slot has no outlet, so there is no outlet work history to offer to.', 'error'); return; }
+  let d;
   try {
-    freq = await withTimeout(buildDowFrequencyCache(false), 8000, 'likely-worker history');
-    scheduled = await withTimeout(fetchScheduledWorkerSetForDate(slot.date), 8000, 'scheduled-worker check');
+    d = await loadOfferGroupData(slot, 0);
   } catch (err) {
     console.warn('[Likely] offer-all load failed/timed out', err);
-    toast('Could not load likely workers (timed out or blocked) — try again in a moment.', 'error');
+    toast('Could not load the worker list (timed out or blocked) — try again in a moment.', 'error');
     return;
   }
-  if (!scheduled.ok) { toast("Couldn't verify who's already scheduled that day — not offering, to avoid a clash. Try again in a moment.", 'error'); return; }
-  const likely = likelyWorkersForSlot(slot, freq, scheduled);
-  if (!confirm(`Offer this slot to ${likely.length} worker${likely.length!==1?'s':''} who usually work this weekday? First to reply YES gets it.`)) return;
+  if (!d.scheduled.ok) { toast("Couldn't verify who's already scheduled that day — not offering, to avoid a clash. Try again in a moment.", 'error'); return; }
+  const list = offerGroupList(slot, d, group);
+  if (!list.length) {
+    toast(isVet ? 'Nobody with a history at this outlet is eligible right now.' : 'No other workers with a history on this weekday are eligible right now.', 'info');
+    rerenderOfferPanels();
+    return;
+  }
+  const who = isVet
+    ? `${list.length} worker${list.length!==1?'s':''} who have worked at ${slot.outlet} before`
+    : `${list.length} worker${list.length!==1?'s':''} who usually work this weekday`;
+  if (!confirm(`Offer this slot to ${who}? First to reply YES gets it.`)) return;
   if (!shiftReminders[shiftId]) shiftReminders[shiftId] = {};
   const r = shiftReminders[shiftId];
   r.offeredNames = Array.isArray(r.offeredNames) ? r.offeredNames : [];
   let sent = 0, logged = 0;
-  for (const w of likely) {
+  for (const w of list) {
     const phone = workerPhone(w.name);
     let ok = false;
     if (phone) { try { ok = await sendPeriskopeMessage(phone, buildSlotOfferMessage(slot, w.name)); } catch(e) { ok = false; } }
@@ -10882,11 +10966,14 @@ async function offerSlotToLikely(shiftId) {
   r.offerSentAt = new Date().toISOString();
   r.lastReminderAt = r.offerSentAt;
   await persistReminder(shiftId);
-  if (sent === logged) toast(`✓ Slot offered to ${sent} likely worker${sent!==1?'s':''} via WhatsApp`);
+  const noun = isVet ? 'outlet-experienced worker' : 'likely worker';
+  if (sent === logged) toast(`✓ Slot offered to ${sent} ${noun}${sent!==1?'s':''} via WhatsApp`);
   else if (sent > 0) toast(`Offered to ${logged} (sent ${sent} via WhatsApp; rest need a manual message)`, 'info');
   else toast(`Logged offer to ${logged} — WhatsApp not sent (check Periskope)`, 'info');
   rerenderOfferPanels();
 }
+async function offerSlotToOutletVeterans(shiftId) { return massOfferSlotToGroup(shiftId, 'outlet'); }
+async function offerSlotToLikely(shiftId) { return massOfferSlotToGroup(shiftId, 'dow'); }
 
 // ── Shift-confirmed message builder ──────────────────────────────────────────
 // Sent to a worker the moment ops assigns them into a slot, so they know the
