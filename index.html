@@ -5543,9 +5543,17 @@ const OT_CAP_EFFECTIVE_FROM = (function () {
   return formatDate(d);   // 'YYYY-MM-DD' = yesterday in local time
 })();
 function shiftOtCapApplies(s) {
-  const d = String(s?.shift_date || '').slice(0, 10);
-  if (!d) return true;                      // no date → be safe, apply the cap
-  return d >= OT_CAP_EFFECTIVE_FROM;        // yesterday or later → cap; older → don't
+  // v103: OT CAP IS NOW UNIVERSAL (date scoping removed). Ops rule: a late
+  // clock-out is only billed/paid as overtime when it has been explicitly
+  // authorized (ot_approved=true, or an ot_end authorized time). Previously the
+  // cap only applied to shifts dated yesterday-or-later (OT_CAP_EFFECTIVE_FROM),
+  // so every older shift silently counted its raw late clock-out as OT and the
+  // approve/late→on-time controls were hidden — which is exactly what inflated
+  // historical (e.g. July) billing. The cap now applies to ALL shifts, so
+  // unauthorized late clock-outs cap at the scheduled end everywhere and the
+  // OT-approval controls are available on every shift for retroactive review.
+  // (OT_CAP_EFFECTIVE_FROM is retained above but no longer gates anything.)
+  return true;
 }
 // v69: AUTHORIZED OT END. When ops authorized overtime to a SPECIFIC time (e.g.
 // to 15:00) but the worker tapped out a bit later (15:13), the client should be
