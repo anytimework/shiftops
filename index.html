@@ -20407,6 +20407,11 @@ function renderImportMetrics() {
 }
 
 let _importInFlight = false;
+// Real writes (insert/merge/fill/stamp) in the CURRENT confirm pass. Set right
+// after the save loop and read by the OUTER confirmImportBookings() so the
+// page-leave fires even if a post-save step (reloads, re-tag) throws before the
+// inner function's own tail could run.
+let _importWroteCountLive = 0;
 async function confirmImportBookings() {
   if (!importRows.length) { toast('Nothing to import', 'error'); return; }
 
@@ -20443,11 +20448,28 @@ async function confirmImportBookings() {
       if (prevBtnHtml != null) confirmBtn.innerHTML = prevBtnHtml;
     }
   }
+
+  // GUARANTEED page-leave. If anything was actually written this pass, leave the
+  // Import Bookings section and land on Attendance — even if the inner function
+  // threw AFTER the save (e.g. a follow-up loadWorkers/loadOutlets/loadShifts or
+  // re-tag failed), which is what previously left a saved booking sitting on the
+  // import page. This runs in the OUTER function after the inner has fully
+  // settled, so no exception inside the save routine can suppress it. The nav
+  // mechanism (navButtonForPage + switchPage) is verified working in isolation;
+  // gating on _importWroteCountLive means we navigate only when a real write
+  // happened (never on an all-skipped / banned-worker "No changes" pass).
+  if (_importWroteCountLive > 0) {
+    try {
+      const attBtn = navButtonForPage('attendance');
+      if (attBtn) switchPage('attendance', attBtn);
+    } catch (e) { console.warn('post-import navigation failed:', e); }
+  }
 }
 
 async function _confirmImportBookingsInner() {
 
   let saved = 0, merged = 0, skipped = 0, stamped = 0;
+  _importWroteCountLive = 0;   // reset the outer-visible write tally for this pass
   // v62 — open slots already filled in THIS confirm pass, so two rows can't both
   // claim the same slot when several bookings target overlapping open slots.
   const _filledSlotIdsThisPass = new Set();
@@ -20874,8 +20896,16 @@ async function _confirmImportBookingsInner() {
     }
   }
 
-  await loadWorkers();
-  await loadOutlets();
+  // Record real writes BEFORE any further await can throw, so the OUTER function
+  // can still navigate away even if a post-save reload below fails. (Only real
+  // writes count — skipped/unmapped/banned rows do not.)
+  _importWroteCountLive = saved + merged + stamped;
+
+  // Roster/outlet cache refresh. A failure here must NOT abort the rest of the
+  // tail (WhatsApp enqueue, re-tag) — and can never block the page-leave, which
+  // now lives in the outer function keyed off _importWroteCountLive.
+  try { await loadWorkers(); } catch (e) { console.warn('post-import loadWorkers failed:', e); }
+  try { await loadOutlets(); } catch (e) { console.warn('post-import loadOutlets failed:', e); }
 
   // v80 — DELAYED WORKER CONFIRMATION (confirmed track): enqueue every booking
   // SAVED/MERGED/FILLED this pass that is a real named, CONFIRMED shift (not
@@ -20956,15 +20986,10 @@ async function _confirmImportBookingsInner() {
       const fileEl = document.getElementById('import-file');
       if (fileEl) fileEl.value = '';
     } catch (e) { console.warn('post-import re-tag/reload failed:', e); }
-
-    // Bookings are now in the ops panel — ALWAYS leave the Import Bookings section
-    // on a successful save (even if the re-tag/reload above threw) and land the
-    // user on Attendance so they see what just got imported. The success toast
-    // persists across the page switch.
-    try {
-      const attBtn = navButtonForPage('attendance');
-      if (attBtn) switchPage('attendance', attBtn);
-    } catch (e) { console.warn('post-import navigation failed:', e); }
+    // NOTE: the page-leave (switch to Attendance) is NOT done here anymore — it
+    // now lives in the OUTER confirmImportBookings() after the inner settles, so
+    // an exception anywhere above can no longer strand a saved booking on the
+    // import page. See _importWroteCountLive.
   }
 }
 
