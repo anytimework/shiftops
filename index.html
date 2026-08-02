@@ -16712,12 +16712,35 @@ async function tagExistingShifts(rows) {
       // slot hasn't already been claimed by an earlier row in this same pass.
       // If so, tag it to FILL that slot in place on Confirm (no duplicate insert)
       // — surfaced as a reviewable "🪑 Fills open slot" action, never auto-saved.
-      const openSlot = candidates.find(s =>
+      let openSlot = candidates.find(s =>
         isOpenSlot(s) &&
         importOutletKey(s.outlet) === oNorm &&
         importTimesOverlap(r.scheduled_start, r.scheduled_end, s.scheduled_start, s.scheduled_end) &&
         !_claimedOpenSlotIds.has(s.id)
       );
+      // v103 FALLBACK — same-start open slot. The strict check above needs the
+      // stored times to OVERLAP. But a portal open slot is sometimes saved with a
+      // drifted or missing END time (e.g. end blank → 00:00, or the portal
+      // resolved the end differently), so an 18:00–23:00 booking fails to overlap
+      // an 18:00–(blank) slot and a DUPLICATE gets inserted while the open slot
+      // lingers — exactly the "still shows 1 available slot but booking is saved"
+      // bug. So if no overlapping slot matched, accept a same-outlet + same-date
+      // open slot whose START time matches this booking's start (unclaimed). This
+      // stays scoped to one outlet/date, keys off the start time (strong same-slot
+      // signal), never crosses to a different-start slot, and is still surfaced as
+      // a reviewable "🪑 Fills open slot" with an "Add as new instead" toggle — so
+      // it can't silently grab the wrong slot.
+      if (!openSlot) {
+        const rStart = importHHMM(r.scheduled_start);
+        if (rStart) {
+          openSlot = candidates.find(s =>
+            isOpenSlot(s) &&
+            importOutletKey(s.outlet) === oNorm &&
+            importHHMM(s.scheduled_start) === rStart &&
+            !_claimedOpenSlotIds.has(s.id)
+          );
+        }
+      }
       if (openSlot) {
         _claimedOpenSlotIds.add(openSlot.id);
         r._existingShift   = openSlot;
@@ -16727,6 +16750,21 @@ async function tagExistingShifts(rows) {
         r._syncStampOnly   = false;
         continue;
       }
+      // Diagnostic (dev console only): a named booking found NO open slot to fill,
+      // yet this outlet/date DOES have open slots. Logs the outlet KEYS + times on
+      // both sides so an outlet-name mismatch (keys differ) or a time issue is
+      // immediately visible. Purely informational — no behaviour change.
+      try {
+        const _openHere = candidates.filter(s => isOpenSlot(s) && !_claimedOpenSlotIds.has(s.id));
+        if (_openHere.length) {
+          console.debug('[open-slot] no fill matched', {
+            booking: { worker: r.worker_name, outlet: r.outlet, outletKey: oNorm,
+                       start: r.scheduled_start, end: r.scheduled_end, date: r.shift_date },
+            openSlotsThisDate: _openHere.map(s => ({ id: s.id, outlet: s.outlet,
+                       outletKey: importOutletKey(s.outlet), start: s.scheduled_start, end: s.scheduled_end }))
+          });
+        }
+      } catch (_) {}
 
       // No time-overlap match — but a portal re-load (or paste) of the SAME
       // worker at the SAME outlet on the SAME date is almost certainly the same
@@ -20905,20 +20943,24 @@ async function _confirmImportBookingsInner() {
     );
     // Re-tag the remaining preview rows against the now-updated panel so saved/
     // merged/stamped rows flip to "already imported" and disappear from the
-    // unseen view, and so the attendance sync icons refresh.
-    await loadShifts();
-    await tagExistingShifts(importRows);
-    renderImportPreview();
+    // unseen view, and so the attendance sync icons refresh. ISOLATED in its own
+    // try/catch: if any of loadShifts/tagExistingShifts/renderImportPreview throws
+    // on a large/edge-case paste, it must NOT block the page-leave below — that
+    // was why a saved booking could linger on the import page.
+    try {
+      await loadShifts();
+      await tagExistingShifts(importRows);
+      renderImportPreview();
+      const pasteEl = document.getElementById('import-paste');
+      if (pasteEl) pasteEl.value = '';
+      const fileEl = document.getElementById('import-file');
+      if (fileEl) fileEl.value = '';
+    } catch (e) { console.warn('post-import re-tag/reload failed:', e); }
 
-    const pasteEl = document.getElementById('import-paste');
-    if (pasteEl) pasteEl.value = '';
-    const fileEl = document.getElementById('import-file');
-    if (fileEl) fileEl.value = '';
-
-    // Bookings are now in the ops panel — leave the Import Bookings section and
-    // land the user on Attendance so they can see what just got imported. The
-    // success toast persists across the page switch. Guard the nav in a try/catch
-    // so a missing nav button can never swallow the successful-import result.
+    // Bookings are now in the ops panel — ALWAYS leave the Import Bookings section
+    // on a successful save (even if the re-tag/reload above threw) and land the
+    // user on Attendance so they see what just got imported. The success toast
+    // persists across the page switch.
     try {
       const attBtn = navButtonForPage('attendance');
       if (attBtn) switchPage('attendance', attBtn);
