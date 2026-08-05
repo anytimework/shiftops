@@ -5140,7 +5140,13 @@ function switchPage(name, btn) {
   page.scrollTop = 0;
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  if (name === 'attendance') { loadShifts().then(() => renderAttendanceActivityBanner()); }
+  if (name === 'attendance') {
+    loadShifts().then(() => renderAttendanceActivityBanner());
+    // Pull fresh portal clock data whenever Attendance is opened. This makes a
+    // just-recorded clock-out move from Estimated/Pending clock-out to Total
+    // Payment without waiting for the next background interval.
+    try { if (typeof runAutoImport === 'function') runAutoImport(); } catch (e) {}
+  }
   if (name === 'workers') loadWorkerCards();
   if (name === 'outlets') loadOutletsList();
   if (name === 'shiftmap') initShiftMapPage();
@@ -19558,7 +19564,10 @@ function updateImportNavBadge() {
 // on their own.
 let _autoImportTimer = null;
 let _autoImportInFlight = false;
-const AUTO_IMPORT_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes while open
+// Clock-in/out is operationally live data. Five minutes left completed workers
+// sitting under Pending clock-out/Estimated Payment long after the portal had
+// recorded their clock-out. Reconcile every 30 seconds while a tab is open.
+const AUTO_IMPORT_INTERVAL_MS = 30 * 1000;
 
 async function runAutoImport() {
   if (_autoImportInFlight) return;          // don't overlap a slow run
@@ -19577,9 +19586,9 @@ async function runAutoImport() {
 
 function startAutoImport() {
   if (_autoImportTimer) return;
-  // First pass shortly after boot so the badge populates without waiting a full
-  // interval; then on the regular cadence.
-  setTimeout(() => { runAutoImport(); }, 8000);
+  // Run immediately at boot, then on the regular cadence. runAutoImport already
+  // has an in-flight lock, so this is safe alongside a manual portal refresh.
+  setTimeout(() => { runAutoImport(); }, 0);
   _autoImportTimer = setInterval(runAutoImport, AUTO_IMPORT_INTERVAL_MS);
 }
 
