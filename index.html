@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- Build patch: v102 (NO-ACK DEFAULT ON FOR EVERYONE + PER-WORKER "DO NOT SEND SHIFT OFFERS" PROFILE TICK) — Worked from the v101 build. Ops request: (1) make "No acknowledgement required" the DEFAULT for all members; (2) add a profile tick so a worker who doesn't want to be disturbed with shift offers never receives one. CHANGE 1 — workerNoAckRequired(name) now returns profile.no_ack_required !== false, so undefined (every worker never re-saved since v92, and every new worker) = no-ack; only an explicitly UNTICKED-and-saved profile restores the ack chase. Modal: resetWorkerModal ticks #wf-no-ack by default; editWorker populates with !== false; saveWorker unchanged (still writes the explicit boolean, so unticking writes false and sticks); sub-text updated to say the default is on. All downstream behaviour (night-message reply line, unacked alerts, panel checkboxes, badges) flows from the one helper — no other ack code touched. CHANGE 2 — new scalar profileMeta.workers[key].no_offers (helper workerNoOffers(name), default false, syncs via the existing profile_meta scalar merge, no schema change) + new modal row #wf-no-offers (🚫 Do not send shift offers) after the no-ack row, wired in resetWorkerModal / editWorker / saveWorker exactly like no_ack_required. ENFORCED AT EVERY OFFER PATH: offerGroupBlockReason gains an early 'opted out of shift offers' reason (covers Group 1 + Group 2 chips AND their Offer-to-all mass sends via offerGroupList); eligibleStandbyForSlot filters them out (covers standby chips + Offer to all (N)); onOfferSearchInput shows them disabled with the reason; and offerSlotToStandby — the single choke point all individual sends funnel through (standby chips, group chips, offerFromSearch) — hard-blocks with a toast, so even a stale rendered chip can't send. Reminders, confirmations and the webhook are NOT touched — only offers are silenced. node --check passes (2/2 inline script blocks). Surgical diff: 5 original lines changed (helper return, resetWorkerModal no-ack line, editWorker no-ack line, offer-search hardBan→blocked reason chain incl. blocked const, modal no-ack sub-text); everything else purely additive (1 helper, 1 modal row, 3 modal-wiring lines, 3 guards, 1 dropdown reason); zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v101 (REMINDER TICKS DON'T SYNC CROSS-DEVICE: uuid/text KEY MISMATCH + fresh-load repaint) — Worked from the live v99.1 base (re-applies the confirmed-good v100 ledger-task cross-date fix). Ops report (Jon, 21 Jul): Jon ticks night_sent + night_acked on his device; a SECOND fresh laptop (and Yra's login) shows them UN-ticked, even though the DB row (shift 15c11f57…, 21 Jul 18:00) holds night_sent=true, night_acked=true. FORENSICS (SQL + live console on the broken device): (a) DB = true/true; (b) both RLS policies on shift_reminders are permissive ALL for anon AND authenticated — reads/writes open; (c) under the authenticated role the row IS returned true/true, so the data reaches the browser; (d) the reminder read is an unfiltered select('*'); (e) the DOM probe showed the row rendered with all four checkboxes checked:false and a '📲 Send' button (emitted only when !nightSent) — so at paint time shiftReminders[s.id] resolved empty. ROOT CAUSE: shifts.id is uuid, shift_reminders.shift_id is text (information_schema confirmed; the join even threw operator does not exist: text = uuid). loadReminders() keys the map by the row's text shift_id; every render reads shiftReminders[s.id] with the shift's uuid id. supabase-js can deserialize the two sides into strings that don't match as object keys, so on a device WITHOUT a warm localStorage cache (a fresh login) the lookup misses and every box renders false. Jon's own device looked right only because its sticky store + app_settings claims re-assert true regardless of the key — masking the defect until a genuinely fresh device was tested. FIX (client-only; NO schema change, so no risky live-table migration): (1) the shiftReminders map is wrapped in a Proxy (_wrapReminders) that canonicalizes the key — String().trim().toLowerCase() — on EVERY get/set/has/delete, so a uuid read and a text-stored key converge automatically. This is applied at the three (and only three) reassignment points (localStorage load, DB-read init, 30s sync replace) plus the `incoming` builder, so all ~140 existing shiftReminders[x] access sites are fixed WITHOUT being touched (zero regression surface). Symbol keys and array-method access pass through untouched. (2) belt-and-braces: after loadReminders()'s DB read repopulates the map, updateReminderPanelInPlace() repaints any reminder rows already in the DOM (no-op for rows not present), covering any first-paint/async ordering gap on a fresh device. Verified: node --check 2/2; a 9-case Proxy harness passes (uppercase-text write found by lowercase-uuid read = the exact bug, whitespace trim, has/delete, Object.keys canonical, JSON.stringify canonical, re-wrap preserve, numeric id). Sticky/claim/webhook/persist/undo logic all untouched — the Proxy only changes how keys are compared, never a flag's value, so v98 merge-up and v90/v91 stickiness still hold. Surgical diff: header + _ridKey/_wrapReminders helpers + 4 wrap-points + 1 repaint block + the v100 task-cache block; zero function removals or renames. NOTE (optional structural cleanup, separate track): align the column types by converting shift_reminders.shift_id to uuid so raw SQL joins work natively — the Proxy makes this non-urgent. -->
 <!-- Build patch: v98 (STOP THE ACK CLOBBER: PERSIST IS NOW MERGE-UP, NEVER DOWNGRADE) — Worked from v97. Live forensic evidence (Jon, 19 Jul, two SQL snapshots 3 minutes apart): shift_reminders rows for Joseph/Vicknesh/Aliff/Quan were night_acked=true, clockin_responded=true at 08:03 (recorded by the periskope-webhook when the workers replied OK on WhatsApp), and by 16:10 the SAME rows read false/false — a panel device OVERWROTE the acknowledged state. ROOT CAUSE: persistReminder() upserts the ENTIRE row from the device's LOCAL memory ("night_acked: !!r.nightAcked" etc.), so any device whose local flags are stale-false clobbers server-true the moment any sweep persists that shift (the 4:08pm clock-in reminder sends did exactly that). The v89/v90 sticky system only protects flags the SAME device set — webhook-recorded worker acks have no sticky anywhere and were defenseless. The clobber was MASKED for weeks because RLS rejected all panel writes to shift_reminders; the 17-Jul RLS fix restored panel writes and re-armed it. FIX: persistReminder gains MERGE-UP semantics for the four progress flags (night_sent, night_acked, clockin_sent, clockin_responded): when a flag is locally FALSE it is now OMITTED from the upsert payload (both the full payload and the v87 core-columns retry), so the database's true value survives; a true value still writes normally. PostgREST upserts only update provided columns, so this is a pure server-truth-preserving change. Explicit un-acking still works: persistReminder(shiftId, { force: true }) includes all four flags verbatim, and undoFullAck — the ONLY intentional downgrade path — now calls it with force. All 37 other persistReminder call sites keep their existing one-argument form and get merge-up automatically. Combined with v97 (session self-heal + phone-less ack claims), the ack pipeline is now: webhook/button sets true → nothing can silently flip it back → every device converges. NOTHING ELSE TOUCHED; node --check 2/2. Surgical diff: header + persistReminder (signature + 2 payload guards) + undoFullAck's one persist call. -->
 <!-- Build patch: v97 (LIVE-SYNC SELF-HEAL + NO MORE SILENT STALE + PHONE-LESS ACK SYNC) — Worked from the live v96 build (verified byte-identical to the audited v96). Ops report (Jon, 19 Jul): Yra acknowledged the morning clock-in alerts on her machine but Jon's view still showed all ten as unacknowledged — and comparison of the two screens shows Jon's ENTIRE dashboard stale (Completed Tasks 20 vs 94, different payment totals), not just the acks. ROOT CAUSE: under v95 Supabase Auth, a long-open/slept tab whose token refresh fails starts erroring on EVERY read — and every sync path failed SILENTLY (silentSyncReminders: "if (error||!data) return;"), so the panel froze into a localStorage island while looking normal. The acknowledgements were in the shared store all along; the device had stopped reading. THREE FIXES: (1) SESSION SELF-HEAL: new supaSessionHealthCheck() rides the existing 30s reminder-sync cadence (self-throttled to 60s) — it proactively refreshes the token when <2 min from expiry, force-refreshes when the session is missing, and if recovery is impossible it shows a clear "Session expired — sign in to resume live sync" toast and opens the login modal instead of letting the tab rot in stale silence. A device can now never silently drift: it is either live or visibly asked to re-login. (2) SYNC ERRORS ARE LOGGED, not swallowed: silentSyncReminders now console.warns the exact Supabase error before returning. (3) PHONE-LESS ACK GAP CLOSED (the queued v96 idea): ack claims were keyed by worker PHONE and skipped entirely when the worker had no phone — those acks stayed local to the acking device forever. New _ackFallbackDigits(name) derives a stable numeric slug from the worker name; markWorkerAcknowledged/undoFullAck publish with it when no phone exists, and syncTicksFromClaims restores with the same fallback instead of skipping the shift. All existing phone-keyed claims remain valid — the fallback only engages when the phone is blank. NOTHING ELSE TOUCHED: alert builder, silentSync merge/sticky logic, DB writes, auth flow, MFA, relays, Stripe, FAB guard all byte-identical; node --check 2/2. Surgical diff: header + 2 new helper functions + 4 functions with 1-2 line edits each (silentSyncReminders gate+log, markWorkerAcknowledged, undoFullAck, syncTicksFromClaims). -->
@@ -2256,7 +2257,8 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div class="form-row"><label>Account / PayNow no.</label><input type="text" id="wf-bank" placeholder="e.g. 9xxx xxxx"></div>
     </div>
     <div class="form-row"><label>Profile notes</label><textarea id="wf-notes" rows="4" placeholder="e.g. Watch lateness; check location 1 hour before shift"></textarea></div>
-    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-ack" style="width:auto;margin:0;"> 🔕 No acknowledgement required</label><div class="sub-text">Reminders still send, but the night reminder won't ask this worker to reply and they never appear in the "hasn't acknowledged" alerts. Untick anytime to restore normal behaviour.</div></div>
+    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-ack" style="width:auto;margin:0;"> 🔕 No acknowledgement required</label><div class="sub-text">On by default for every worker. Reminders still send, but the night reminder won't ask this worker to reply and they never appear in the "hasn't acknowledged" alerts. Untick only if you DO want this worker chased for acknowledgements.</div></div>
+    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-offers" style="width:auto;margin:0;"> 🚫 Do not send shift offers</label><div class="sub-text">This worker won't be disturbed with slot offers: hidden from the offer groups, standby offer buttons, "Offer to all" and the offer search. Shift reminders and confirmations still send normally. Untick anytime to include them again.</div></div>
     <div class="form-row"><label>Outlets this worker should not be assigned to</label>
       <div class="ms-picker" id="wf-disliked-picker">
         <div class="ms-chips" id="wf-disliked-chips"></div>
@@ -3527,15 +3529,34 @@ function workerProfile(name) {
 function outletProfile(name) {
   return profileMeta.outlets[normProfileKey(name)] || {};
 }
-// v92: worker profile opt-out from reminder acknowledgements. When ticked in the
-// worker modal, reminders still SEND normally but (a) the night message drops the
-// "reply OK to confirm" line, (b) the worker never appears in the unacked alert
-// banners, and (c) the reminder panel hides the ack checkboxes / treats sent-only
-// as complete. Stored as a scalar on profileMeta.workers[key] so it syncs
-// team-wide through the existing profile_meta merge ({...se,...pe} keeps scalars)
-// and is reversible by simply unticking. No schema change.
+// v92: worker profile opt-out from reminder acknowledgements. When set, reminders
+// still SEND normally but (a) the night message drops the "reply OK to confirm"
+// line, (b) the worker never appears in the unacked alert banners, and (c) the
+// reminder panel hides the ack checkboxes / treats sent-only as complete. Stored
+// as a scalar on profileMeta.workers[key] so it syncs team-wide through the
+// existing profile_meta merge ({...se,...pe} keeps scalars). No schema change.
+// v102: DEFAULT FLIPPED TO ON FOR EVERYONE. A worker with no explicit setting
+// (undefined — i.e. every worker never re-saved since v92, and every new worker)
+// is now treated as no-ack-required. Only an explicit false (ops UNTICKED the box
+// in their profile and saved) restores the acknowledgement chase for that worker.
 function workerNoAckRequired(name) {
-  return !!workerProfile(name).no_ack_required;
+  return workerProfile(name).no_ack_required !== false;
+}
+
+// v102: worker profile opt-out from SHIFT OFFERS. When ticked, the worker is never
+// sent a slot offer and never appears as an offerable option anywhere: excluded
+// from offer Group 1 (worked at this outlet) and Group 2 (likely this weekday) and
+// their "Offer to all N" mass sends (via offerGroupBlockReason), excluded from the
+// standby offer chips and "Offer to all (N)" (via eligibleStandbyForSlot), shown
+// disabled with the reason in the "Search any worker to offer" dropdown, and
+// hard-blocked in offerSlotToStandby (the single choke point every individual
+// offer send goes through) in case a stale rendered chip is clicked. Reminders,
+// confirmations and all other WhatsApp messages are NOT affected — this only
+// silences offers. Default OFF (everyone receives offers unless ticked). Stored as
+// a scalar profileMeta.workers[key].no_offers so it syncs team-wide with no schema
+// change and is reversed by simply unticking.
+function workerNoOffers(name) {
+  return !!workerProfile(name).no_offers;
 }
 
 // ── Client Booking Requirements ───────────────────────────────────────────────
@@ -10596,6 +10617,8 @@ function eligibleStandbyForSlot(slot) {
       // A soft requirements gate does NOT hide a worker — they can pass the
       // checklist when assigned; only hard restrictions remove the option.
       { const rstr = assignmentRestriction(name, outlet); if (rstr && !isRequirementGate(rstr)) return false; }
+      // v102: profile tick "Do not send shift offers" — never show them as an option.
+      if (workerNoOffers(name)) return false;
       // Worker told us they're NOT free on this date — hide them from the offer.
       if (isWorkerUnavailableOn(name, slot.date)) return false;
       // Skip workers whose existing assigned shift that day clashes with this slot.
@@ -10813,6 +10836,8 @@ function offerCountryMismatch(workerName, slot) {
 function offerGroupBlockReason(name, slot, standbyKeys, windows, opts) {
   const key = String(name || '').trim().toLowerCase();
   if (!key || key === 'available') return 'not a worker';
+  // v102: profile tick "Do not send shift offers" — surfaced first so the reason is clear.
+  if (workerNoOffers(name)) return 'opted out of shift offers (profile tick)';
   if (standbyKeys && standbyKeys.has(key)) return 'already in the standby list above';
   // Country scope: never offer a Singapore slot to a Malaysia/Philippines worker
   // (or vice versa). Checked early so the reason surfaced is the country one.
@@ -11157,16 +11182,18 @@ function onOfferSearchInput(shiftId, inputId) {
     const phone = workerPhone(name);
     const rstr = assignmentRestriction(name, slot.outlet || '');
     const hardBan = rstr && !isRequirementGate(rstr);
+    const noOffers = workerNoOffers(name);   // v102: profile "Do not send shift offers" tick
     const unavail = isWorkerUnavailableOn(name, slot.date);
     const clash = workerHasClashingShift(name, slot);
     const already = offeredKeys.includes(key);
     let reason = '';
     if (hardBan) reason = rstr;
+    else if (noOffers) reason = 'Opted out of shift offers (profile tick)';
     else if (unavail) reason = workerUnavailabilityLabel(name, slot.date);
     else if (clash) reason = 'Already has a clashing shift that day';
     else if (!phone) reason = 'No phone number on file';
     const sub = phone ? `\u260e ${escapeHtml(phone)}` : 'No phone on file';
-    const blocked = hardBan || unavail || clash || !phone;
+    const blocked = hardBan || noOffers || unavail || clash || !phone;
     const click = blocked ? '' : ` onclick="offerFromSearch('${escapeAttr(String(slot.id))}','${escapeAttr(name)}','${escapeAttr(inputId)}')"`;
     const cursor = blocked ? 'default' : 'pointer';
     const opacity = blocked ? '0.55' : '1';
@@ -11251,6 +11278,13 @@ async function resendOfferToStandby(shiftId, workerName) {
 async function offerSlotToStandby(shiftId, workerName) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
+  // v102: hard block — every individual offer send funnels through here (standby
+  // chips, group chips, offer search), so a stale chip can never slip an offer to
+  // an opted-out worker.
+  if (workerNoOffers(workerName)) {
+    toast(`${workerName} has "Do not send shift offers" ticked in their profile — not offered. Untick it there to include them again.`, 'error');
+    return;
+  }
   if (isWorkerUnavailableOn(workerName, slot.date)) {
     toast(`${workerName} marked themselves unavailable that day (${workerUnavailabilityLabel(workerName, slot.date)}) — not offered. Clear it in their worker profile to override.`, 'error');
     return;
@@ -14283,7 +14317,8 @@ function resetWorkerModal() {
   document.getElementById('wf-method').value = 'PayNow';
   document.getElementById('wf-bank').value = '';
   document.getElementById('wf-notes').value = '';
-  document.getElementById('wf-no-ack').checked = false;
+  document.getElementById('wf-no-ack').checked = true;   // v102: no-ack is the default for every new worker
+  document.getElementById('wf-no-offers').checked = false;
   wfDislikedOutlets = [];
   renderDislikedOutletPicker();
   wfUnavailable = [];
@@ -14305,7 +14340,8 @@ function editWorker(id) {
   document.getElementById('wf-bank').value = w.bank_details || '';
   const meta = workerProfile(w.name);
   document.getElementById('wf-notes').value = meta.notes || '';
-  document.getElementById('wf-no-ack').checked = !!meta.no_ack_required;
+  document.getElementById('wf-no-ack').checked = meta.no_ack_required !== false;   // v102: undefined = no-ack (default on)
+  document.getElementById('wf-no-offers').checked = !!meta.no_offers;
   wfDislikedOutlets = Array.isArray(meta.disliked_outlets) ? meta.disliked_outlets.slice() : [];
   renderDislikedOutletPicker();
   wfUnavailable = Array.isArray(meta.unavailable)
@@ -14349,6 +14385,7 @@ async function saveWorker() {
     ...existingProfile,
     notes: document.getElementById('wf-notes').value.trim(),
     no_ack_required: document.getElementById('wf-no-ack').checked,
+    no_offers: document.getElementById('wf-no-offers').checked,
     ...listWithChangeStamps(existingProfile, 'disliked_outlets', wfDislikedOutlets),
     unavailable: wfUnavailable
       .filter(r => r && r.from && r.to)
