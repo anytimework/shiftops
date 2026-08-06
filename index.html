@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+<!-- Build patch: v111 (SENT TICKS NOW SURVIVE OVERNIGHT ON EVERY DEVICE — STALE-PENDING CLAIM RESTORE + AWAITED OUTCOME STAMPS + LOAD-TIME REPAINT) — Worked from the supplied Aug6 v110 build. Ops report (Jon, 6 Aug): night reminders sent the previous evening show "Reminder sent" UNTICKED the next day; same for clock-in reminders. ROOT CAUSE: the v88/v89 send sweep records the team-wide proof-of-send by upserting sent:true onto the app_settings rsent:* claim — but that outcome write was FIRE-AND-FORGET (markReminderClaimOutcome not awaited in the night branch, the clock-in branch, and manualSendReminder). A tab closed/backgrounded right after the 21:00 WhatsApp went out leaves the claim row WITHOUT sent:true; the chronic shift_reminders persist rejection means the DB row also stays false; the durable sticky store is per-device localStorage — so the NEXT DAY, on any other device (and after cache loss on the same one), syncTicksFromClaims' isOn (which required sent===true) restored nothing, the night window had closed so nothing re-sent, and the tick sat unticked forever despite a real send. THREE FIXES, all inside the existing claim machinery: (1) STALE-PENDING RESTORE — isOn is now type-aware: for the two SEND types (night/clockin) a claim that exists, is not undone, not failed, and is >10 min old with no recorded outcome now counts as sent for tick purposes. Safe because a genuine send FAILURE always records failed:true (releaseReminderClaim AWAITS that upsert before returning), so no-outcome-and-stale ≈ the send happened but its stamp was lost. Fresh (<10 min) pending claims stay unticked so an in-flight send isn't prematurely shown done, and resolveLostClaim/sweep dedup semantics are UNTOUCHED — this changes only what the tick DISPLAYS, never who sends. ACK claims (nightack/clockinack) still require explicit sent:true (they're only ever written as outcomes). (2) AWAITED OUTCOME STAMPS — the three send-outcome writes (night sweep, clock-in sweep, manualSendReminder) are now awaited, so closing the tab right after a send can no longer lose the team-wide sent:true stamp going forward. (3) LOAD-TIME REPAINT — loadShifts() now ends with syncTicksFromClaims(false) (rsent:% fetch cached 60s), so ticks for the just-loaded date restore immediately on boot AND on every date/week navigation instead of waiting up to 30s for the next silentSyncReminders pass. Webhook/Edge Function NOT touched; no schema change; v98 merge-up, v90/91 stickiness, v101 key Proxy all unchanged. node --check passes (2/2 inline script blocks). Surgical diff: isOn block + one call-site arg in syncTicksFromClaims, three await keywords, one additive call at loadShifts tail; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v110 (NO-ACK DEFAULT ON FOR ALL WORKERS + "DO NOT SEND SHIFT OFFERS" PROFILE TICK) — Worked from the supplied v109/fix-13 build. Two ops requests. (1) NO-ACK IS NOW THE DEFAULT: every worker — existing and new — is treated as "No acknowledgement required" unless explicitly opted back in. Implementation: the stored flag flips from no_ack_required (opt-out) to the inverse scalar profileMeta.workers[key].ack_required (opt back IN); workerNoAckRequired() now returns ack_required !== true, so legacy profiles with ANY old no_ack_required value (true, false or absent) all become no-ack immediately, matching "all workers by default". Unticking the modal box stores ack_required=true and restores the reply-to-confirm chase for that one worker. saveWorker still writes the legacy no_ack_required scalar in sync (never read again) so an older build open on another device stays sensible; resetWorkerModal ticks the box for new workers; editWorker populates from ack_required. All downstream behaviour (night-message OK line, unacked alerts, panel checkboxes, sent-only-complete banner, no-ack badge) unchanged — it keys off the same workerNoAckRequired() helper. (2) NEW "🚫 Do not send shift offers" TICK (profileMeta.workers[key].no_shift_offers, scalar, team-wide via existing profile_meta merge, no schema change): a ticked worker is excluded from EVERY offer surface — offerGroupBlockReason gains an early opt-out reason (covers Group 1 outlet veterans, Group 2 weekday likely, both mass offers, and the hidden-count path); eligibleStandbyForSlot filters them from standby chips and offer-to-all; onOfferSearchInput shows them greyed-out with the reason; and offerSlotToStandby hard-blocks with a toast as the final safety net for every single-send path (chips, re-send, offerFromSearch). Shift REMINDERS for booked shifts are NOT affected — the flag only stops unsolicited open-slot offers. Webhook/Edge Function NOT touched. node --check passes on all inline script blocks. Surgical diff: helper block rewritten (workerNoAckRequired body + new workerNoShiftOffers), modal gains one row + no-ack sub-text update, resetWorkerModal/editWorker/saveWorker gain one line each (plus the ack_required flip in saveWorker), offerGroupBlockReason + eligibleStandbyForSlot + offerSlotToStandby + onOfferSearchInput gain guards; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v109 / fix-13 (RECYCLED-SLOT CLOCK RESET + PORTAL-LINK CONFLICT GUARD) — Fixes the remaining live regression proven by Jonathan's 07:00–11:00 screenshot: the import correctly identified an Available slot, but the fill payload used `live.clock_in || portalClock` / `live.clock_out || portalClock`. If that slot id had ever been occupied or otherwise carried stale 00:10/00:30 values, those old values won and were transferred to the new worker even though the portal-clock plausibility guard had rejected them. New contract: (1) filling an Available slot starts a fresh worker occupancy — clock_in/out come ONLY from this exact imported portal booking after validation; old slot clocks are always discarded, `is_paid` is reset, and old worker penalties are not inherited. (2) A portal booking link cannot silently replace a different booking id on an active shift; replacement is allowed only in the explicit Available-slot refill path. (3) Manual merge is refused unless date and the complete scheduled start/end are identical, and it cannot steal a different portal booking link. (4) Portal clock-in accepts normal early arrival (up to 90 minutes) and lateness through the scheduled shift; portal clock-out cannot precede the scheduled start. This still recognises 06:45 or 08:00 for a 07:00 shift while refusing an earlier shift's clock pair. -->
 <!-- Build patch: v108 / fix-12 (MULTI-SHIFT ISOLATION + ATOMIC CLOCK SYNC + IGNORE RESTORATION) — Fixes the live regression where a new Jonathan 16:30–17:30 shift inherited 00:10/00:30 portal clocks and repeated the same history events. Root causes: legacy same-worker+same-day / overlapping-time fallbacks were still allowed to label a guessed shift as exact; syncPortalClockTimes then auto-linked that guess; and every open browser tab could update/log the same blank clock simultaneously. New safety contract: (1) automatic booking reconciliation requires the durable portal_booking_id, or an exact worker+outlet+date+scheduled-start+scheduled-end match; overlapping or same-day shifts are NEVER the same booking and remain separate/manual-review. (2) Background clock sync NEVER creates/backfills a portal link from a heuristic — the shift must already carry the matching portal_booking_id. (3) Clock fields are fill-once: an existing clock is never overwritten by a different portal value. Each field update is conditional on DB NULL and returns the winning row, so only one tab can log/notify. (4) Portal clocks implausibly far outside the scheduled window are quarantined and not copied during sync, merge, fill or insert. (5) Old ignored/deleted bookings are checked by both their portal id and a worker+date+exact-schedule+outlet fallback, so a reissued portal id cannot resurrect them. (6) Shift History collapses identical race-created log entries for display. -->
@@ -7384,6 +7385,11 @@ async function loadShifts() {
   renderAttendanceActivityBanner();
   try { renderAcceptedOffersBanner(); } catch(e){}
   checkReminderAlerts();
+  // v111: restore team-wide send/ack ticks for the JUST-loaded date immediately
+  // (fire-and-forget; repaints rows on arrival) instead of waiting up to 30s for
+  // the next silentSyncReminders pass. The rsent:% fetch is cached 60s, so date
+  // navigation stays cheap.
+  try { syncTicksFromClaims(false); } catch(e) {}
 }
 
 // v67: Load every WORKER-ASSIGNED, non-cancelled, pending-approval booking across
@@ -10333,7 +10339,27 @@ async function syncTicksFromClaims(forceFetch) {
       else { const m = {}; (data || []).forEach(r => { m[r.key] = r.value || {}; }); _claimTickCache.map = m; _claimTickCache.at = now; }
     }
     const map = _claimTickCache.map; if (!map) return;
-    const isOn = v => v && v.sent === true && v.undone !== true;
+    // v111: SEND ticks (night/clockin) now ALSO restore from a STALE-PENDING claim.
+    // The 21:00 sweep's outcome write (sent:true) was fire-and-forget, so a tab
+    // closed right after the WhatsApp went out could leave the claim WITHOUT
+    // sent:true — and since a genuine send FAILURE always records failed:true
+    // (releaseReminderClaim awaits it), a claim that is >10 min old with NO
+    // outcome, not failed and not undone means the send overwhelmingly happened
+    // but its outcome stamp was lost. Yesterday's night reminder therefore ticks
+    // today on every device instead of showing unticked forever (the send window
+    // closed, so nothing would ever re-send OR re-stamp it). Fresh (<10 min)
+    // pending claims stay unticked so an in-flight send isn't shown as done;
+    // ACK claims (nightack/clockinack) still require an explicit sent:true —
+    // they are only ever written as outcomes, never as pending claims.
+    const _STALE_CLAIM_MS = 10 * 60 * 1000;
+    const isOn = (v, type) => {
+      if (!v || v.undone === true) return false;
+      if (v.sent === true) return true;
+      if (type !== 'night' && type !== 'clockin') return false;
+      if (v.failed === true) return false;
+      const at = new Date(v.at || 0).getTime();
+      return !at || (Date.now() - at) > _STALE_CLAIM_MS;
+    };
     let changedIds = [];
     for (const s of (allShifts || [])) {
       if (!s || !s.worker_name || s.cancelled) continue;
@@ -10347,7 +10373,7 @@ async function syncTicksFromClaims(forceFetch) {
       ];
       let touched = false;
       for (const [type, field, set] of marks) {
-        if (!isOn(map[reminderClaimKey(type, phone, s)])) continue;
+        if (!isOn(map[reminderClaimKey(type, phone, s)], type)) continue;
         if (!set.has(lk)) { set.add(lk); }
         if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
         if (!shiftReminders[s.id][field]) { shiftReminders[s.id][field] = true; touched = true; }
@@ -10501,7 +10527,7 @@ async function autoSendShiftReminders() {
       if (!nProceed) continue;
       const ok = await sendPeriskopeMessage(phone, buildNightReminderMessage(s));
       // v89: record the OUTCOME on the claim so losers can trust it (see markReminderClaimOutcome).
-      markReminderClaimOutcome(nClaim.key, ok);
+      await markReminderClaimOutcome(nClaim.key, ok); // v111: awaited — a closing tab must not lose the sent:true stamp
       if (ok) {
         if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
         shiftReminders[s.id].nightSent = true;
@@ -10557,7 +10583,7 @@ async function autoSendShiftReminders() {
         if (!cProceed) continue;
         const ok = await sendPeriskopeMessage(phone, buildClockinReminderMessage(s));
         // v89: record the OUTCOME on the claim so losers can trust it.
-        markReminderClaimOutcome(cClaim.key, ok);
+        await markReminderClaimOutcome(cClaim.key, ok); // v111: awaited — a closing tab must not lose the sent:true stamp
         if (ok) {
           if (!shiftReminders[s.id]) shiftReminders[s.id] = {};
           shiftReminders[s.id].clockinSent = true;
@@ -10694,7 +10720,7 @@ async function manualSendReminder(shiftId, type) {
     try {
       const lk = reminderLogicalKey(s);
       (type === 'night' ? _nightSentSession : _clockinSentSession).add(lk); _stickySave();
-      markReminderClaimOutcome(reminderClaimKey(type === 'night' ? 'night' : 'clockin', phone, s), true);
+      await markReminderClaimOutcome(reminderClaimKey(type === 'night' ? 'night' : 'clockin', phone, s), true); // v111: awaited
     } catch(e) {}
     await persistReminder(shiftId);
     updateReminderPanelInPlace(shiftId);
