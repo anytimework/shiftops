@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+<!-- Build patch: v110 (NO-ACK DEFAULT ON FOR ALL WORKERS + "DO NOT SEND SHIFT OFFERS" PROFILE TICK) — Worked from the supplied v109/fix-13 build. Two ops requests. (1) NO-ACK IS NOW THE DEFAULT: every worker — existing and new — is treated as "No acknowledgement required" unless explicitly opted back in. Implementation: the stored flag flips from no_ack_required (opt-out) to the inverse scalar profileMeta.workers[key].ack_required (opt back IN); workerNoAckRequired() now returns ack_required !== true, so legacy profiles with ANY old no_ack_required value (true, false or absent) all become no-ack immediately, matching "all workers by default". Unticking the modal box stores ack_required=true and restores the reply-to-confirm chase for that one worker. saveWorker still writes the legacy no_ack_required scalar in sync (never read again) so an older build open on another device stays sensible; resetWorkerModal ticks the box for new workers; editWorker populates from ack_required. All downstream behaviour (night-message OK line, unacked alerts, panel checkboxes, sent-only-complete banner, no-ack badge) unchanged — it keys off the same workerNoAckRequired() helper. (2) NEW "🚫 Do not send shift offers" TICK (profileMeta.workers[key].no_shift_offers, scalar, team-wide via existing profile_meta merge, no schema change): a ticked worker is excluded from EVERY offer surface — offerGroupBlockReason gains an early opt-out reason (covers Group 1 outlet veterans, Group 2 weekday likely, both mass offers, and the hidden-count path); eligibleStandbyForSlot filters them from standby chips and offer-to-all; onOfferSearchInput shows them greyed-out with the reason; and offerSlotToStandby hard-blocks with a toast as the final safety net for every single-send path (chips, re-send, offerFromSearch). Shift REMINDERS for booked shifts are NOT affected — the flag only stops unsolicited open-slot offers. Webhook/Edge Function NOT touched. node --check passes on all inline script blocks. Surgical diff: helper block rewritten (workerNoAckRequired body + new workerNoShiftOffers), modal gains one row + no-ack sub-text update, resetWorkerModal/editWorker/saveWorker gain one line each (plus the ack_required flip in saveWorker), offerGroupBlockReason + eligibleStandbyForSlot + offerSlotToStandby + onOfferSearchInput gain guards; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v109 / fix-13 (RECYCLED-SLOT CLOCK RESET + PORTAL-LINK CONFLICT GUARD) — Fixes the remaining live regression proven by Jonathan's 07:00–11:00 screenshot: the import correctly identified an Available slot, but the fill payload used `live.clock_in || portalClock` / `live.clock_out || portalClock`. If that slot id had ever been occupied or otherwise carried stale 00:10/00:30 values, those old values won and were transferred to the new worker even though the portal-clock plausibility guard had rejected them. New contract: (1) filling an Available slot starts a fresh worker occupancy — clock_in/out come ONLY from this exact imported portal booking after validation; old slot clocks are always discarded, `is_paid` is reset, and old worker penalties are not inherited. (2) A portal booking link cannot silently replace a different booking id on an active shift; replacement is allowed only in the explicit Available-slot refill path. (3) Manual merge is refused unless date and the complete scheduled start/end are identical, and it cannot steal a different portal booking link. (4) Portal clock-in accepts normal early arrival (up to 90 minutes) and lateness through the scheduled shift; portal clock-out cannot precede the scheduled start. This still recognises 06:45 or 08:00 for a 07:00 shift while refusing an earlier shift's clock pair. -->
 <!-- Build patch: v108 / fix-12 (MULTI-SHIFT ISOLATION + ATOMIC CLOCK SYNC + IGNORE RESTORATION) — Fixes the live regression where a new Jonathan 16:30–17:30 shift inherited 00:10/00:30 portal clocks and repeated the same history events. Root causes: legacy same-worker+same-day / overlapping-time fallbacks were still allowed to label a guessed shift as exact; syncPortalClockTimes then auto-linked that guess; and every open browser tab could update/log the same blank clock simultaneously. New safety contract: (1) automatic booking reconciliation requires the durable portal_booking_id, or an exact worker+outlet+date+scheduled-start+scheduled-end match; overlapping or same-day shifts are NEVER the same booking and remain separate/manual-review. (2) Background clock sync NEVER creates/backfills a portal link from a heuristic — the shift must already carry the matching portal_booking_id. (3) Clock fields are fill-once: an existing clock is never overwritten by a different portal value. Each field update is conditional on DB NULL and returns the winning row, so only one tab can log/notify. (4) Portal clocks implausibly far outside the scheduled window are quarantined and not copied during sync, merge, fill or insert. (5) Old ignored/deleted bookings are checked by both their portal id and a worker+date+exact-schedule+outlet fallback, so a reissued portal id cannot resurrect them. (6) Shift History collapses identical race-created log entries for display. -->
 <!-- Build patch: v107 / fix-11 (DURABLE PORTAL BOOKING LINK + DETERMINISTIC IMPORT EXIT) — The prior portal reconciliation still depended on worker/outlet/date/time heuristics plus an app_settings ledger. That is unsafe when the same worker has multiple bookings or when the portal and panel outlet/schedule drift (the Jonathan screenshots show exactly that), and it lets clock-out miss even though the portal row is correct. This build adds first-class portal_booking_id / portal_shift_id links on shifts: imports, fills, merges, manual merges, no-op reconciliations and clock-sync backfills all persist the real portal identity; tagExistingShifts checks that identity before every heuristic; clock-in/out then follows the exact booking id even if names, outlets or times later change. A companion SQL migration adds the two nullable columns plus a unique portal-booking index. Import confirmation now remembers how many rows were selected at click-time, distinguishes genuine database failures from successful/no-op reconciliation, and always leaves Import Bookings for Attendance after a successful pass. Query/write failures stay on the page and are surfaced instead of silently falling through into a duplicate insert. Navigation has a verified direct-DOM fallback if switchPage or the sidebar button fails. -->
@@ -2260,7 +2261,8 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div class="form-row"><label>Account / PayNow no.</label><input type="text" id="wf-bank" placeholder="e.g. 9xxx xxxx"></div>
     </div>
     <div class="form-row"><label>Profile notes</label><textarea id="wf-notes" rows="4" placeholder="e.g. Watch lateness; check location 1 hour before shift"></textarea></div>
-    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-ack" style="width:auto;margin:0;"> 🔕 No acknowledgement required</label><div class="sub-text">Reminders still send, but the night reminder won't ask this worker to reply and they never appear in the "hasn't acknowledged" alerts. Untick anytime to restore normal behaviour.</div></div>
+    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-ack" style="width:auto;margin:0;"> 🔕 No acknowledgement required</label><div class="sub-text">On by default for every worker. Reminders still send, but the night reminder won't ask this worker to reply and they never appear in the "hasn't acknowledged" alerts. Untick to require acknowledgements from this worker.</div></div>
+    <div class="form-row"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:2px;"><input type="checkbox" id="wf-no-offers" style="width:auto;margin:0;"> 🚫 Do not send shift offers</label><div class="sub-text">This worker never receives open-slot offers — they're hidden from the standby / veteran / likely offer lists, excluded from "offer to all", and blocked in the search-to-offer box. Shift reminders for shifts they're booked on still send normally. Untick anytime to include them again.</div></div>
     <div class="form-row"><label>Outlets this worker should not be assigned to</label>
       <div class="ms-picker" id="wf-disliked-picker">
         <div class="ms-chips" id="wf-disliked-chips"></div>
@@ -3589,8 +3591,28 @@ function outletProfile(name) {
 // as complete. Stored as a scalar on profileMeta.workers[key] so it syncs
 // team-wide through the existing profile_meta merge ({...se,...pe} keeps scalars)
 // and is reversible by simply unticking. No schema change.
+// v110: no-ack is now the DEFAULT for EVERY worker. The stored flag flipped from
+// no_ack_required (opt OUT of acks) to the inverse scalar ack_required (opt back
+// IN): a worker with no ack_required value — including every legacy profile,
+// whatever its old no_ack_required scalar said — is treated as no-ack. Unticking
+// the modal box stores ack_required=true and restores the reply-to-confirm chase
+// for that worker only. The legacy no_ack_required scalar is still WRITTEN in
+// sync by saveWorker so an older build open on another device behaves sensibly,
+// but it is never read here again.
 function workerNoAckRequired(name) {
-  return !!workerProfile(name).no_ack_required;
+  return workerProfile(name).ack_required !== true;
+}
+// v110: per-worker opt-out from OPEN-SLOT OFFERS ("Do not send shift offers").
+// When ticked the worker is excluded from every offer surface — standby chips,
+// offer-to-all-standby, Group 1 (outlet veterans), Group 2 (weekday likely),
+// mass offers, and the search-any-worker box (shown greyed with the reason) —
+// and offerSlotToStandby hard-blocks as a final safety net for every single-send
+// path (chips, re-send, search). Shift REMINDERS for booked shifts are
+// unaffected: this only stops unsolicited offers. Stored as a scalar on
+// profileMeta.workers[key] (team-wide via the existing profile_meta merge, no
+// schema change), reversible by unticking.
+function workerNoShiftOffers(name) {
+  return !!workerProfile(name).no_shift_offers;
 }
 
 // ── Client Booking Requirements ───────────────────────────────────────────────
@@ -10747,6 +10769,8 @@ function eligibleStandbyForSlot(slot) {
       const key = name.toLowerCase();
       if (seen.has(key)) return false;       // de-dupe same worker listed twice
       seen.add(key);
+      // v110: profile opt-out — a "Do not send shift offers" worker never appears.
+      if (workerNoShiftOffers(name)) return false;
       // Skip banned / disliked-outlet workers entirely so the option never shows.
       // A soft requirements gate does NOT hide a worker — they can pass the
       // checklist when assigned; only hard restrictions remove the option.
@@ -10968,6 +10992,8 @@ function offerCountryMismatch(workerName, slot) {
 function offerGroupBlockReason(name, slot, standbyKeys, windows, opts) {
   const key = String(name || '').trim().toLowerCase();
   if (!key || key === 'available') return 'not a worker';
+  // v110: profile opt-out — never offer to a worker marked "Do not send shift offers".
+  if (workerNoShiftOffers(name)) return 'marked "Do not send shift offers" in their profile';
   if (standbyKeys && standbyKeys.has(key)) return 'already in the standby list above';
   // Country scope: never offer a Singapore slot to a Malaysia/Philippines worker
   // (or vice versa). Checked early so the reason surfaced is the country one.
@@ -11312,16 +11338,18 @@ function onOfferSearchInput(shiftId, inputId) {
     const phone = workerPhone(name);
     const rstr = assignmentRestriction(name, slot.outlet || '');
     const hardBan = rstr && !isRequirementGate(rstr);
+    const noOffers = workerNoShiftOffers(name);
     const unavail = isWorkerUnavailableOn(name, slot.date);
     const clash = workerHasClashingShift(name, slot);
     const already = offeredKeys.includes(key);
     let reason = '';
-    if (hardBan) reason = rstr;
+    if (noOffers) reason = 'Marked "Do not send shift offers" in their profile';
+    else if (hardBan) reason = rstr;
     else if (unavail) reason = workerUnavailabilityLabel(name, slot.date);
     else if (clash) reason = 'Already has a clashing shift that day';
     else if (!phone) reason = 'No phone number on file';
     const sub = phone ? `\u260e ${escapeHtml(phone)}` : 'No phone on file';
-    const blocked = hardBan || unavail || clash || !phone;
+    const blocked = noOffers || hardBan || unavail || clash || !phone;
     const click = blocked ? '' : ` onclick="offerFromSearch('${escapeAttr(String(slot.id))}','${escapeAttr(name)}','${escapeAttr(inputId)}')"`;
     const cursor = blocked ? 'default' : 'pointer';
     const opacity = blocked ? '0.55' : '1';
@@ -11406,6 +11434,11 @@ async function resendOfferToStandby(shiftId, workerName) {
 async function offerSlotToStandby(shiftId, workerName) {
   const slot = resolveOfferableSlot(shiftId);
   if (!slot) { toast('Slot no longer open', 'error'); return; }
+  // v110: profile opt-out — final safety net for every single-send path.
+  if (workerNoShiftOffers(workerName)) {
+    toast(`${workerName} is marked "Do not send shift offers" — not offered. Untick it in their worker profile to override.`, 'error');
+    return;
+  }
   if (isWorkerUnavailableOn(workerName, slot.date)) {
     toast(`${workerName} marked themselves unavailable that day (${workerUnavailabilityLabel(workerName, slot.date)}) — not offered. Clear it in their worker profile to override.`, 'error');
     return;
@@ -14464,7 +14497,8 @@ function resetWorkerModal() {
   document.getElementById('wf-method').value = 'PayNow';
   document.getElementById('wf-bank').value = '';
   document.getElementById('wf-notes').value = '';
-  document.getElementById('wf-no-ack').checked = false;
+  document.getElementById('wf-no-ack').checked = true;   // v110: no-ack is the default
+  document.getElementById('wf-no-offers').checked = false;
   wfDislikedOutlets = [];
   renderDislikedOutletPicker();
   wfUnavailable = [];
@@ -14486,7 +14520,8 @@ function editWorker(id) {
   document.getElementById('wf-bank').value = w.bank_details || '';
   const meta = workerProfile(w.name);
   document.getElementById('wf-notes').value = meta.notes || '';
-  document.getElementById('wf-no-ack').checked = !!meta.no_ack_required;
+  document.getElementById('wf-no-ack').checked = (meta.ack_required !== true); // v110: default ticked
+  document.getElementById('wf-no-offers').checked = !!meta.no_shift_offers;
   wfDislikedOutlets = Array.isArray(meta.disliked_outlets) ? meta.disliked_outlets.slice() : [];
   renderDislikedOutletPicker();
   wfUnavailable = Array.isArray(meta.unavailable)
@@ -14529,7 +14564,9 @@ async function saveWorker() {
   profileMeta.workers[normProfileKey(name)] = {
     ...existingProfile,
     notes: document.getElementById('wf-notes').value.trim(),
-    no_ack_required: document.getElementById('wf-no-ack').checked,
+    ack_required: !document.getElementById('wf-no-ack').checked,
+    no_ack_required: document.getElementById('wf-no-ack').checked, // legacy scalar kept in sync for older builds; no longer read
+    no_shift_offers: document.getElementById('wf-no-offers').checked,
     ...listWithChangeStamps(existingProfile, 'disliked_outlets', wfDislikedOutlets),
     unavailable: wfUnavailable
       .filter(r => r && r.from && r.to)
