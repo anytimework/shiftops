@@ -1514,12 +1514,15 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
     </div>
     <div id="tt-sop-extra" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:11px 13px;margin-bottom:14px;">
       <div class="form-row" style="margin-bottom:0;">
-        <label>Who is this about? <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional)</span></label>
-        <select id="tt-subject" onchange="onAssignSubjectChange()"></select>
-      </div>
-      <div class="form-row" id="tt-subject-other-row" style="display:none;margin-top:10px;margin-bottom:0;">
-        <label>Name</label>
-        <input type="text" id="tt-subject-other" placeholder="Type the name" oninput="applySopTaskTitle()">
+        <label>Who is this about? <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional — search by name or phone)</span></label>
+        <div class="tt-pick">
+          <input type="text" id="tt-subject-search" class="tt-pick-input" autocomplete="off" spellcheck="false"
+            placeholder="Start typing a name or phone number…"
+            oninput="onSubjectSearch()" onfocus="onSubjectSearch()" onblur="onSubjectBlur()" onkeydown="onSubjectKey(event)">
+          <button type="button" class="tt-pick-clear" id="tt-subject-clear" style="display:none;" onclick="clearSubjectPick()" title="Clear">✕</button>
+          <div class="tt-pick-list" id="tt-subject-list" style="display:none;"></div>
+        </div>
+        <div class="tt-pick-sel" id="tt-subject-selected" style="display:none;"></div>
       </div>
       <div id="tt-sop-steps-preview" style="margin-top:11px;"></div>
     </div>
@@ -28280,6 +28283,18 @@ function openAssignTaskModal() {
       .join('');
   }
   populateAssignSopPickers();
+  // The SOP library normally loads at boot; if that hasn't landed yet the picker
+  // would look empty for no reason, so pull it now and refill in place.
+  if (!sopLoaded) {
+    loadSopRemote().then(() => {
+      if (document.getElementById('assign-task-modal')?.classList.contains('open')) {
+        const keep = document.getElementById('tt-sop')?.value || '';
+        populateAssignSopPickers();
+        const sel = document.getElementById('tt-sop');
+        if (sel && keep) { sel.value = keep; onAssignSopChange(); }
+      }
+    }).catch(() => {});
+  }
   const t = document.getElementById('tt-title'); if (t) t.value = '';
   ttTitleTouched = false;
   const d = document.getElementById('tt-detail'); if (d) d.value = '';
@@ -28291,6 +28306,11 @@ function openAssignTaskModal() {
 }
 
 async function submitAssignTask() {
+  // Commit the generated title NOW. Clicking "Assign & notify" blurs the search
+  // box, but that blur handler runs on a timer — it would land after this read,
+  // so a free-typed name could be dropped from the title. Respects a title the
+  // agent typed themselves (applySopTaskTitle checks ttTitleTouched).
+  try { applySopTaskTitle(); } catch (e) {}
   const title = String(document.getElementById('tt-title')?.value || '').trim();
   const detail = String(document.getElementById('tt-detail')?.value || '').trim();
   const assignee = String(document.getElementById('tt-assignee')?.value || '').trim();
@@ -28298,7 +28318,8 @@ async function submitAssignTask() {
   const priority = String(document.getElementById('tt-priority')?.value || 'normal').trim();
   const sopId = String(document.getElementById('tt-sop')?.value || '').trim();
   const sop = sopId ? sopDocs[sopId] : null;
-  const subject = currentAssignSubject();
+  const subjectMeta = currentAssignSubjectMeta();
+  const subject = subjectMeta ? subjectMeta.name : '';
 
   if (!title) { toast('Give the task a title', 'error'); return; }
   if (!assignee) { toast('Pick someone to assign it to', 'error'); return; }
@@ -28318,6 +28339,10 @@ async function submitAssignTask() {
     task.sopId = sop.id;
     task.sopTitle = sop.title || '';
     task.subject = subject || '';
+    // The phone is what separates two members with the same name — keep it on
+    // the task so the record stays unambiguous long after the task is closed.
+    task.subjectPhone = subjectMeta ? (subjectMeta.phone || '') : '';
+    task.subjectId = subjectMeta ? (subjectMeta.id || '') : '';
     task.checklist = sop.steps.map(txt => ({ text: String(txt), done: false, doneBy: '', doneAt: '' }));
   }
   teamTasks[id] = task;
@@ -28351,6 +28376,10 @@ function buildTaskAssignedMessage(task) {
   lines.push('');
   lines.push(`*${task.title}*`);
   if (task.detail) lines.push(task.detail);
+  if (task.subject) {
+    lines.push('');
+    lines.push(`_Regarding:_ ${task.subject}${task.subjectPhone ? ' (' + task.subjectPhone + ')' : ''}`);
+  }
   if (Array.isArray(task.checklist) && task.checklist.length) {
     lines.push('');
     lines.push(`_Steps to complete (${task.checklist.length}):_`);
@@ -28481,12 +28510,14 @@ function teamTaskCardHtml(t) {
     const head = `<div class="tt-line tt-line-done" onclick="toggleTeamTaskCard('${idA}')">
       ${caret}<span class="tt-dot tt-dot-done"></span>
       <span class="tt-line-title">${escapeHtml(t.title)}</span>
+      ${progChip}
       <span class="tt-who">${escapeHtml(t.completedBy || '—')}</span>
     </div>`;
     if (!open) return `<div class="tt-card tt-done tt-collapsed">${head}</div>`;
     return `<div class="tt-card tt-done">${head}
       <div class="tt-body">
         ${t.detail ? `<div class="tt-detail">${escapeHtml(t.detail)}</div>` : ''}
+        ${taskChecklistHtml(t)}
         <div class="tt-meta">
           <span>👤 ${escapeHtml(t.assignee || '—')}</span>
           <span class="tt-done-by">✓ Completed by <strong>${escapeHtml(t.completedBy || '—')}</strong>${t.completedAt ? ` · ${fmtTaskWhen(t.completedAt)}` : ''}</span>
@@ -28647,18 +28678,26 @@ async function _loadSharedStore(key, lsKey, current) {
   try {
     const { data, error } = await supabaseClient
       .from('app_settings').select('value').eq('key', key).maybeSingle();
-    if (error) { console.warn(key + ' remote load failed:', error.message); return current; }
+    if (error) { console.warn('[' + key + '] remote load failed:', error.message || error); return current; }
     if (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) {
       const merged = Object.assign({}, current || {}, data.value);
       try { localStorage.setItem(lsKey, JSON.stringify(merged)); } catch (e) {}
       return merged;
     }
+    // No shared row yet: seed it from whatever this device already has, so the
+    // first entry written on a fresh database is not stranded in one browser.
+    if (current && Object.keys(current).length) {
+      try { await _saveSharedStore(key, lsKey, current); } catch (e) {}
+    }
     return current;
-  } catch (e) { console.warn(key + ' remote load error:', e); return current; }
+  } catch (e) { console.warn('[' + key + '] remote load error:', e); return current; }
 }
+// Returns { ok, error } — a save that only reached this browser must NOT be
+// reported to the user as "saved for the whole team". Callers surface `error`.
 async function _saveSharedStore(key, lsKey, obj) {
-  try { localStorage.setItem(lsKey, JSON.stringify(obj)); } catch (e) {}
-  if (!supabaseClient) return false;
+  let localOk = true;
+  try { localStorage.setItem(lsKey, JSON.stringify(obj)); } catch (e) { localOk = false; }
+  if (!supabaseClient) return { ok: false, error: 'No database connection', localOk };
   try {
     let merged = obj;
     try {
@@ -28670,9 +28709,15 @@ async function _saveSharedStore(key, lsKey, obj) {
     } catch (e) { /* fall back to writing our own copy */ }
     const { error } = await supabaseClient.from('app_settings')
       .upsert({ key, value: merged, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-    if (error) { console.warn(key + ' remote save failed:', error.message); return false; }
-    return true;
-  } catch (e) { console.warn(key + ' remote save error:', e); return false; }
+    if (error) {
+      console.warn('[' + key + '] remote save FAILED:', error.message || error, error);
+      return { ok: false, error: error.message || 'unknown database error', localOk };
+    }
+    return { ok: true, error: '', localOk };
+  } catch (e) {
+    console.warn('[' + key + '] remote save error:', e);
+    return { ok: false, error: (e && e.message) || 'network error', localOk };
+  }
 }
 function _readLocalStore(lsKey) {
   try {
@@ -28801,7 +28846,7 @@ function renderSopStepRows(steps) {
   wrap.innerHTML = steps.map((v, i) => `
     <div class="sop-step-row">
       <span class="sop-step-num">${i + 1}</span>
-      <input type="text" class="sop-step-input" value="${escapeAttr(v || '')}" placeholder="Describe step ${i + 1}…">
+      <input type="text" class="sop-step-input" value="${escapeHtml(v || '')}" placeholder="Describe step ${i + 1}…">
       <button type="button" class="btn btn-ghost btn-sm" onclick="removeSopStep(${i})" title="Remove this step">✕</button>
     </div>`).join('');
 }
@@ -28839,10 +28884,18 @@ async function saveSopDoc() {
       createdBy: me, createdAt: now, updatedBy: me, updatedAt: now, deleted: false };
     _sopEditingId = id;
   }
-  await saveSopDocs();
+  const res = await saveSopDocs();
   try { logActivity(_sopEditingId ? 'SOP updated' : 'SOP created', `${title} (${category}) — ${steps.length} steps`, 'sop', _sopEditingId); } catch (e) {}
   closeModal('sop-modal');
-  toast('SOP saved — the whole team can see it');
+  if (res && res.ok) {
+    toast('SOP saved — the whole team can see it');
+  } else {
+    // Don't claim a team-wide save that didn't happen. The SOP is still here on
+    // this device, so nothing the agent typed is lost.
+    const why = (res && res.error) ? res.error : 'unknown error';
+    toast('Saved on this device only — cloud sync failed: ' + why, 'error');
+    console.warn('[SOP] cloud save failed:', why, '— the SOP is in localStorage under sop_docs_v1');
+  }
   _sopEditingId = null;
   renderSopPage();
   updateSopNavBadge();
@@ -29192,7 +29245,7 @@ function openTransferTaskModal(id) {
   if (sel) {
     sel.innerHTML = (INTERNAL_USERS || [])
       .filter(u => u !== t.assignee)
-      .map(u => `<option value="${escapeAttr(u)}">${escapeHtml(u)}${TEAM_WHATSAPP[u] ? '' : ' (no WhatsApp)'}</option>`)
+      .map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}${TEAM_WHATSAPP[u] ? '' : ' (no WhatsApp)'}</option>`)
       .join('');
   }
   const n = document.getElementById('tt-transfer-note'); if (n) n.value = '';
@@ -29320,34 +29373,166 @@ function sopTaskTitle(sop, name) {
   return who ? `${sop.title} — ${who}` : String(sop.title || '');
 }
 
+// A worker ROW's phone, however it happens to be stored.
+// NOTE: deliberately NOT called workerPhone() — that name is already taken by an
+// existing helper that takes a NAME STRING and looks it up in allWorkers. A
+// second declaration would silently override it and break every phone lookup in
+// the panel (WhatsApp reminders, ack matching, attendance search).
+function workerRowPhone(w) {
+  return String((w && (w.phone || w.contact)) || '').trim();
+}
+// Compact label used in the picker, on the task card and in WhatsApp. The phone
+// is what tells two members with the SAME NAME apart, so it travels everywhere.
+function subjectLabel(name, phone) {
+  const n = String(name || '').trim();
+  const p = String(phone || '').trim();
+  return p ? `${n} · ${p}` : n;
+}
+
+// The member this task is about: { name, phone, id } once picked from the list,
+// or a free-typed name with no phone. Null when the field is empty.
+let _ttSubject = null;
+let _ttSubjectMatches = [];   // the rows currently rendered in the dropdown
+let _ttSubjectCursor = -1;    // keyboard highlight
+
 function populateAssignSopPickers() {
   const sel = document.getElementById('tt-sop');
   if (sel) {
     const rows = sopList().slice().sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
-    sel.innerHTML = '<option value="">— No SOP (free-form task) —</option>'
-      + rows.map(d => `<option value="${escapeAttr(d.id)}">${escapeHtml(d.title)} · ${(d.steps || []).length} steps</option>`).join('');
+    sel.innerHTML = (rows.length
+        ? '<option value="">— No SOP (free-form task) —</option>'
+        : '<option value="">— No SOPs written yet —</option>')
+      + rows.map(d => `<option value="${escapeHtml(d.id)}">${escapeHtml(d.title)} · ${(d.steps || []).length} steps</option>`).join('');
     sel.value = '';
   }
-  const subj = document.getElementById('tt-subject');
-  if (subj) {
-    const names = (allWorkers || []).map(w => String(w.name || '').trim()).filter(Boolean).sort((a, b) => a.localeCompare(b));
-    subj.innerHTML = '<option value="">— Not about a specific person —</option>'
-      + names.map(n => `<option value="${escapeAttr(n)}">${escapeHtml(n)}</option>`).join('')
-      + '<option value="__other__">✏️ Someone else / type manually…</option>';
-    subj.value = '';
-  }
-  const other = document.getElementById('tt-subject-other'); if (other) other.value = '';
-  const otherRow = document.getElementById('tt-subject-other-row'); if (otherRow) otherRow.style.display = 'none';
+  clearSubjectPick(true);
   const extra = document.getElementById('tt-sop-extra'); if (extra) extra.style.display = 'none';
   const prev = document.getElementById('tt-sop-steps-preview'); if (prev) prev.innerHTML = '';
 }
 
-// Whoever the task is about — the picked member, or the manually typed name.
+function clearSubjectPick(silent) {
+  _ttSubject = null; _ttSubjectMatches = []; _ttSubjectCursor = -1;
+  const inp = document.getElementById('tt-subject-search'); if (inp) inp.value = '';
+  const clr = document.getElementById('tt-subject-clear'); if (clr) clr.style.display = 'none';
+  const list = document.getElementById('tt-subject-list'); if (list) { list.style.display = 'none'; list.innerHTML = ''; }
+  const selBox = document.getElementById('tt-subject-selected'); if (selBox) { selBox.style.display = 'none'; selBox.innerHTML = ''; }
+  if (!silent) applySopTaskTitle();
+}
+
+// Matches on name OR phone, so "9824" finds the right Jayden when several share
+// the name. Ranked: name starts-with, then name contains, then phone contains.
+function searchWorkers(q) {
+  const rows = (allWorkers || []).filter(w => w && String(w.name || '').trim());
+  const needle = String(q || '').trim().toLowerCase();
+  if (!needle) return rows.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const digits = needle.replace(/\D/g, '');
+  const scored = [];
+  rows.forEach(w => {
+    const n = String(w.name || '').toLowerCase();
+    const ph = workerRowPhone(w).replace(/\D/g, '');
+    let rank = -1;
+    if (n.startsWith(needle)) rank = 0;
+    else if (n.includes(needle)) rank = 1;
+    else if (digits && ph && ph.includes(digits)) rank = 2;
+    if (rank >= 0) scored.push({ w, rank });
+  });
+  scored.sort((a, b) => a.rank - b.rank || String(a.w.name).localeCompare(String(b.w.name)));
+  return scored.map(x => x.w);
+}
+
+const TT_PICK_LIMIT = 50;
+
+function onSubjectSearch() {
+  const inp = document.getElementById('tt-subject-search');
+  const list = document.getElementById('tt-subject-list');
+  if (!inp || !list) return;
+  const q = inp.value;
+  const clr = document.getElementById('tt-subject-clear');
+  if (clr) clr.style.display = q ? 'flex' : 'none';
+  // Typing after a pick means they're choosing someone else.
+  if (_ttSubject && q !== subjectLabel(_ttSubject.name, _ttSubject.phone) && q !== _ttSubject.name) {
+    _ttSubject = null;
+    const selBox = document.getElementById('tt-subject-selected');
+    if (selBox) { selBox.style.display = 'none'; selBox.innerHTML = ''; }
+  }
+  const all = searchWorkers(q);
+  _ttSubjectMatches = all.slice(0, TT_PICK_LIMIT);
+  _ttSubjectCursor = -1;
+
+  if (!_ttSubjectMatches.length) {
+    list.innerHTML = `<div class="tt-pick-empty">No member matches that${q ? ' — it will be saved as typed' : ''}.</div>`;
+    list.style.display = 'block';
+    return;
+  }
+  // Flag same-name collisions so it's obvious why the phone matters.
+  const nameCount = {};
+  (allWorkers || []).forEach(w => { const k = String(w.name || '').trim().toLowerCase(); if (k) nameCount[k] = (nameCount[k] || 0) + 1; });
+
+  list.innerHTML = _ttSubjectMatches.map((w, i) => {
+    const ph = workerRowPhone(w);
+    const dup = nameCount[String(w.name || '').trim().toLowerCase()] > 1;
+    return `<div class="tt-pick-row" data-i="${i}" onmousedown="event.preventDefault();pickSubject(${i})">
+      <span class="tt-pick-name">${escapeHtml(w.name)}${dup ? '<span class="tt-pick-dup" title="More than one member has this name">same name</span>' : ''}</span>
+      <span class="tt-pick-meta">${ph ? escapeHtml(ph) : '<em>no phone on file</em>'}${w.country ? ' · ' + escapeHtml(normaliseCountry(w.country)) : ''}${w.suspended ? ' · <span style="color:var(--red);">suspended</span>' : ''}</span>
+    </div>`;
+  }).join('') + (all.length > TT_PICK_LIMIT
+      ? `<div class="tt-pick-empty">Showing ${TT_PICK_LIMIT} of ${all.length} — keep typing to narrow it down.</div>` : '');
+  list.style.display = 'block';
+}
+
+function pickSubject(i) {
+  const w = _ttSubjectMatches[i];
+  if (!w) return;
+  _ttSubject = { name: String(w.name || '').trim(), phone: workerRowPhone(w), id: w.id || '' };
+  const inp = document.getElementById('tt-subject-search');
+  if (inp) inp.value = subjectLabel(_ttSubject.name, _ttSubject.phone);
+  const list = document.getElementById('tt-subject-list');
+  if (list) { list.style.display = 'none'; list.innerHTML = ''; }
+  const clr = document.getElementById('tt-subject-clear'); if (clr) clr.style.display = 'flex';
+  const selBox = document.getElementById('tt-subject-selected');
+  if (selBox) {
+    selBox.style.display = 'flex';
+    selBox.innerHTML = `<span class="tt-pick-tick">✓</span><span>Task will be recorded against <strong>${escapeHtml(_ttSubject.name)}</strong>${_ttSubject.phone ? ' · <span class="tt-pick-phone">' + escapeHtml(_ttSubject.phone) + '</span>' : ' <em>(no phone on file)</em>'}</span>`;
+  }
+  applySopTaskTitle();
+}
+
+function onSubjectKey(e) {
+  const list = document.getElementById('tt-subject-list');
+  const open = list && list.style.display === 'block' && _ttSubjectMatches.length;
+  if (e.key === 'Escape') { if (list) list.style.display = 'none'; return; }
+  if (!open) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    _ttSubjectCursor += (e.key === 'ArrowDown' ? 1 : -1);
+    if (_ttSubjectCursor < 0) _ttSubjectCursor = _ttSubjectMatches.length - 1;
+    if (_ttSubjectCursor >= _ttSubjectMatches.length) _ttSubjectCursor = 0;
+    Array.from(list.querySelectorAll('.tt-pick-row')).forEach((el, i) => el.classList.toggle('on', i === _ttSubjectCursor));
+    list.querySelectorAll('.tt-pick-row')[_ttSubjectCursor]?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    pickSubject(_ttSubjectCursor >= 0 ? _ttSubjectCursor : 0);
+  }
+}
+// Delay the close so a click on a row still lands.
+function onSubjectBlur() {
+  setTimeout(() => {
+    const l = document.getElementById('tt-subject-list'); if (l) l.style.display = 'none';
+    // Left the field without picking anyone: treat whatever was typed as the name.
+    applySopTaskTitle();
+  }, 160);
+}
+
+// Name only — the title stays readable ("Permanently banning Jayden Ng").
 function currentAssignSubject() {
-  const sel = document.getElementById('tt-subject');
-  const v = String(sel?.value || '');
-  if (v === '__other__') return String(document.getElementById('tt-subject-other')?.value || '').trim();
-  return v.trim();
+  if (_ttSubject) return _ttSubject.name;
+  return String(document.getElementById('tt-subject-search')?.value || '').trim();
+}
+// Full identity, so a task against one of several same-named members is exact.
+function currentAssignSubjectMeta() {
+  if (_ttSubject) return { name: _ttSubject.name, phone: _ttSubject.phone, id: _ttSubject.id };
+  const typed = currentAssignSubject();
+  return typed ? { name: typed, phone: '', id: '' } : null;
 }
 
 function onAssignSopChange() {
@@ -29356,14 +29541,6 @@ function onAssignSopChange() {
   const extra = document.getElementById('tt-sop-extra');
   if (extra) extra.style.display = sop ? 'block' : 'none';
   renderSopStepsPreview(sop);
-  applySopTaskTitle();
-}
-
-function onAssignSubjectChange() {
-  const isOther = String(document.getElementById('tt-subject')?.value || '') === '__other__';
-  const row = document.getElementById('tt-subject-other-row');
-  if (row) row.style.display = isOther ? 'block' : 'none';
-  if (isOther) setTimeout(() => document.getElementById('tt-subject-other')?.focus(), 40);
   applySopTaskTitle();
 }
 
@@ -29394,7 +29571,7 @@ function startTaskFromSop(sopId) {
   openAssignTaskModal();
   const sel = document.getElementById('tt-sop');
   if (sel) { sel.value = sopId; onAssignSopChange(); }
-  setTimeout(() => document.getElementById('tt-subject')?.focus(), 60);
+  setTimeout(() => document.getElementById('tt-subject-search')?.focus(), 60);
 }
 
 // ── Tick-list on the task card ─────────────────────────────────────────────
@@ -29416,7 +29593,7 @@ function taskChecklistHtml(t) {
   }).join('');
   return `<div class="tt-steps" onclick="event.stopPropagation();">
     <div class="tt-steps-head">
-      <span>${t.sopTitle ? escapeHtml(t.sopTitle) : 'Steps'}${t.subject ? ' · ' + escapeHtml(t.subject) : ''}</span>
+      <span>${t.sopTitle ? escapeHtml(t.sopTitle) : 'Steps'}${t.subject ? ' · ' + escapeHtml(t.subject) : ''}${t.subjectPhone ? ' · <span class="tt-steps-phone">' + escapeHtml(t.subjectPhone) + '</span>' : ''}</span>
       <span class="tt-steps-count ${done === cl.length ? 'full' : ''}">${done}/${cl.length}</span>
     </div>
     <div class="tt-bar"><div class="tt-bar-fill" style="width:${pct}%;"></div></div>
@@ -29900,6 +30077,35 @@ function mergeTaskChecklists(a, b) {
   border-radius:var(--radius); padding:7px 10px; font-family:var(--font); font-size:13px; }
 .form-input:focus { outline:none; border-color:var(--accent); }
 .form-input::placeholder { color:var(--text3); }
+
+/* ── Member search picker (name or phone; duplicate names are common) ── */
+.tt-pick { position:relative; }
+.tt-pick-input { width:100%; box-sizing:border-box; padding:8px 30px 8px 11px; font-family:var(--font);
+  font-size:13px; background:var(--bg2); color:var(--text); border:1px solid var(--border2);
+  border-radius:var(--radius); }
+.tt-pick-input:focus { outline:none; border-color:var(--accent); }
+.tt-pick-input::placeholder { color:var(--text3); }
+.tt-pick-clear { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:20px; height:20px;
+  border-radius:50%; border:none; background:var(--bg3); color:var(--text3); cursor:pointer; font-size:11px;
+  display:flex; align-items:center; justify-content:center; }
+.tt-pick-clear:hover { background:var(--border2); color:var(--text); }
+.tt-pick-list { position:absolute; z-index:40; left:0; right:0; top:calc(100% + 4px); max-height:238px;
+  overflow-y:auto; background:var(--bg2); border:1px solid var(--border2); border-radius:var(--radius);
+  box-shadow:0 8px 26px rgba(0,0,0,0.5); }
+.tt-pick-row { padding:7px 11px; cursor:pointer; border-bottom:1px solid var(--border); }
+.tt-pick-row:last-child { border-bottom:none; }
+.tt-pick-row:hover, .tt-pick-row.on { background:var(--accent-dim); }
+.tt-pick-name { display:block; font-size:13px; color:var(--text); font-weight:550; }
+.tt-pick-dup { margin-left:7px; font-size:9.5px; font-weight:700; padding:1px 6px; border-radius:8px;
+  background:rgba(247,171,46,0.18); color:var(--amber); vertical-align:middle; }
+.tt-pick-meta { display:block; font-size:11px; color:var(--text3); font-family:var(--mono); margin-top:2px; }
+.tt-pick-empty { padding:9px 11px; font-size:12px; color:var(--text3); }
+.tt-pick-sel { align-items:center; gap:7px; margin-top:8px; font-size:12px; color:var(--text2);
+  background:rgba(40,180,99,0.10); border:1px solid rgba(40,180,99,0.30); border-radius:var(--radius);
+  padding:7px 10px; line-height:1.45; }
+.tt-pick-tick { color:var(--green); font-weight:700; flex-shrink:0; }
+.tt-pick-phone { font-family:var(--mono); color:var(--text); }
+.tt-steps-phone { font-family:var(--mono); color:var(--text2); }
 
 /* ── SOP-backed tasks: step tick-lists ── */
 .tt-prog { flex-shrink:0; font-family:var(--mono); font-size:10px; font-weight:700; padding:1px 6px;
