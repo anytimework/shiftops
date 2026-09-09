@@ -414,32 +414,7 @@ tr:hover td { background: rgba(91,148,249,0.045); }
 .alert-green { background: var(--green-dim); border: 1px solid rgba(52,199,123,0.2); color: var(--green); }
 .alert-blue { background: var(--accent-dim); border: 1px solid rgba(79,142,247,0.2); color: var(--accent); }
 
-/* Leave Calendar */
-.leave-cal-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; font-size: 11px; color: var(--text2); align-items: center; }
-.leave-cal-legend .lg-item { display: inline-flex; align-items: center; gap: 5px; }
-.leave-cal-legend .lg-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-.leave-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-.leave-cal-dow { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; text-align: center; padding: 4px 0; font-family: var(--mono); }
-.leave-cell { min-height: 92px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; display: flex; flex-direction: column; gap: 3px; cursor: pointer; transition: border-color 0.14s, background 0.14s; position: relative; overflow: hidden; }
-.leave-cell:hover { border-color: var(--border2); background: var(--bg3); }
-.leave-cell.is-empty { background: transparent; border-color: transparent; cursor: default; }
-.leave-cell.is-empty:hover { background: transparent; }
-.leave-cell.is-today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.leave-cell.is-weekend { background: rgba(255,255,255,0.015); }
-.leave-cell .lc-date { font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 1px; }
-.leave-cell.is-today .lc-date { color: var(--accent); }
-.leave-chip { font-size: 10px; line-height: 1.3; padding: 2px 6px; border-radius: 5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 1px solid transparent; }
-.leave-chip.approved { background: var(--green-dim); color: var(--green); border-color: rgba(46,208,128,0.25); }
-.leave-chip.pending { background: var(--amber-dim); color: var(--amber); border-color: rgba(247,171,46,0.3); }
-.leave-chip.owner { background: var(--purple-dim); color: var(--purple); border-color: rgba(171,142,252,0.3); }
-.leave-chip.mine { box-shadow: inset 0 0 0 1px currentColor; }
-.leave-cell .lc-more { font-size: 9px; color: var(--text3); font-weight: 600; }
-.leave-req-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.leave-req-card .lrc-main { flex: 1; min-width: 200px; }
-.leave-req-card .lrc-who { font-size: 13px; font-weight: 600; color: var(--text); }
-.leave-req-card .lrc-meta { font-size: 11px; color: var(--text2); margin-top: 3px; line-height: 1.5; }
-.leave-req-card .lrc-reason { font-size: 11px; color: var(--amber); margin-top: 5px; background: var(--amber-dim); border-radius: 6px; padding: 5px 8px; }
-.leave-req-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+
 
 /* Upload zone */
 .upload-zone { border: 1px dashed var(--border2); border-radius: var(--radius); padding: 18px; text-align: center; cursor: pointer; color: var(--text3); font-size: 13px; background: var(--bg); transition: all 0.15s; }
@@ -928,10 +903,6 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <button class="nav-item nav-item-chathistory" onclick="switchPage('chathistory',this)">
         <span class="nav-icon">💬</span> Chat History
       </button>
-      <button class="nav-item" onclick="switchPage('sop',this)">
-        <span class="nav-icon">📘</span><span class="nav-label">SOP</span><span class="nav-pill-new">NEW</span>
-        <span class="nav-badge" id="sop-nav-badge" style="background:var(--teal);display:none;" title="Published SOPs">0</span>
-      </button>
       <button class="nav-item" onclick="switchPage('knowledge',this)">
         <span class="nav-icon">📚</span> Business Knowledge
       </button>
@@ -949,9 +920,9 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <button class="nav-item" id="nav-expenses" onclick="switchPage('expenses',this)" style="display:none;">
         <span class="nav-icon">🧮</span><span class="nav-label">Expenses</span>
       </button>
-      <button class="nav-item" id="nav-leave" onclick="switchPage('leave',this)">
-        <span class="nav-icon">🌴</span><span class="nav-label">Leave Calendar</span>
-        <span class="nav-badge" id="leave-nav-badge" style="background:var(--amber);" title="Pending leave requests awaiting approval">0</span>
+      <button class="nav-item" onclick="switchPage('sop',this)">
+        <span class="nav-icon">📘</span><span class="nav-label">SOP</span><span class="nav-pill-new">NEW</span>
+        <span class="nav-badge" id="sop-nav-badge" style="background:var(--teal);display:none;" title="Published SOPs">0</span>
       </button>
       <button class="nav-item" id="nav-teamtasks" onclick="toggleTeamTasks()">
         <span class="nav-icon">🗒️</span><span class="nav-label">Team Task / Notes</span><span class="nav-pill-new">NEW</span>
@@ -1529,74 +1500,6 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       </div>
     </div>
 
-    <!-- LEAVE CALENDAR PAGE -->
-    <div id="page-leave" style="display:none;">
-      <div class="topbar">
-        <div class="topbar-left">
-          <h2>Leave Calendar</h2>
-          <p style="font-size:12px;color:var(--text2);margin-top:3px;" id="leave-subtitle">Shared team leave — request your days, see who's off, avoid clashes</p>
-        </div>
-        <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
-          <button class="btn btn-ghost btn-sm" onclick="leaveCalShift(-1)" title="Previous month">‹</button>
-          <span id="leave-cal-month-label" style="font-size:13px;font-weight:600;min-width:130px;text-align:center;"></span>
-          <button class="btn btn-ghost btn-sm" onclick="leaveCalShift(1)" title="Next month">›</button>
-          <button class="btn btn-primary btn-sm" onclick="openLeaveRequestModal()">＋ Request leave</button>
-        </div>
-      </div>
-      <div class="content">
-        <div id="leave-owner-pending-wrap" style="display:none;margin-bottom:16px;"></div>
-        <div class="leave-cal-legend" id="leave-cal-legend"></div>
-        <div id="leave-calendar-grid" class="leave-cal-grid"></div>
-        <div id="leave-mine-list" style="margin-top:22px;"></div>
-      </div>
-    </div>
-
-  </div>
-</div>
-
-<!-- LEAVE REQUEST MODAL -->
-<div class="modal-overlay" id="leave-request-modal">
-  <div class="modal" style="max-width:480px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <h3 style="margin:0;" id="leave-modal-title">Request leave</h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeModal('leave-request-modal')">✕</button>
-    </div>
-    <div id="leave-modal-owner-note" class="alert alert-blue" style="display:none;"><span class="alert-icon">ℹ️</span><span>As owner, your leave is plotted instantly with no approval needed.</span></div>
-    <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div class="form-row"><label>From date</label><input type="date" id="leave-from"></div>
-      <div class="form-row"><label>To date</label><input type="date" id="leave-to"></div>
-    </div>
-    <div class="form-row"><label>Type</label>
-      <select id="leave-type">
-        <option value="Annual leave">Annual leave</option>
-        <option value="Sick / MC">Sick / MC</option>
-        <option value="Personal">Personal</option>
-        <option value="Half day">Half day</option>
-        <option value="Unpaid">Unpaid</option>
-        <option value="Other">Other</option>
-      </select>
-    </div>
-    <div class="form-row"><label>Note (optional)</label><input type="text" id="leave-note" placeholder="e.g. Family event, flight out 7pm"></div>
-
-    <!-- Conflict warning block, shown dynamically -->
-    <div id="leave-conflict-block" style="display:none;">
-      <div class="alert alert-amber" style="margin-bottom:10px;">
-        <span class="alert-icon">⚠️</span>
-        <span id="leave-conflict-text"></span>
-      </div>
-      <div class="form-row" id="leave-conflict-reason-row" style="display:none;">
-        <label>Reason for insisting on these date(s)</label>
-        <textarea id="leave-conflict-reason" placeholder="Required — explain why you need these specific dates despite the clash. This will be sent to Jon for approval."></textarea>
-      </div>
-    </div>
-
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;flex-wrap:wrap;">
-      <button class="btn btn-ghost btn-sm" onclick="closeModal('leave-request-modal')">Cancel</button>
-      <button class="btn btn-ghost btn-sm" id="leave-pick-other-btn" style="display:none;" onclick="document.getElementById('leave-from').focus()">Pick another date</button>
-      <button class="btn btn-primary btn-sm" id="leave-submit-btn" onclick="submitLeaveRequest()">Submit request</button>
-    </div>
-  </div>
-</div>
 
 <!-- ASSIGN TASK MODAL -->
 <div class="modal-overlay" id="assign-task-modal">
@@ -1605,7 +1508,22 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <h3 style="margin:0;">Assign a task</h3>
       <button class="btn btn-ghost btn-sm" onclick="closeModal('assign-task-modal')">✕</button>
     </div>
-    <div class="form-row"><label>Task</label><input type="text" id="tt-title" placeholder="e.g. Call ONE°15 to confirm Sat booking"></div>
+    <div class="form-row">
+      <label>Use an SOP <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional — attaches its steps as a tick-list)</span></label>
+      <select id="tt-sop" onchange="onAssignSopChange()"></select>
+    </div>
+    <div id="tt-sop-extra" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:11px 13px;margin-bottom:14px;">
+      <div class="form-row" style="margin-bottom:0;">
+        <label>Who is this about? <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional)</span></label>
+        <select id="tt-subject" onchange="onAssignSubjectChange()"></select>
+      </div>
+      <div class="form-row" id="tt-subject-other-row" style="display:none;margin-top:10px;margin-bottom:0;">
+        <label>Name</label>
+        <input type="text" id="tt-subject-other" placeholder="Type the name" oninput="applySopTaskTitle()">
+      </div>
+      <div id="tt-sop-steps-preview" style="margin-top:11px;"></div>
+    </div>
+    <div class="form-row"><label>Task</label><input type="text" id="tt-title" placeholder="e.g. Call ONE°15 to confirm Sat booking" oninput="ttTitleTouched = true;"></div>
     <div class="form-row"><label>Details (optional)</label><textarea id="tt-detail" placeholder="Any context, links, or instructions"></textarea></div>
     <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-row"><label>Assign to</label><select id="tt-assignee"></select></div>
@@ -3982,10 +3900,6 @@ async function init() {
   updateSidebarDate();
   requireInternalLogin();
   subscribeToReminderChanges(); // live sync + 30s polling fallback
-  // Leave Calendar: pull shared team leave and start background sync so
-  // approvals / new requests appear cross-device without a reload.
-  loadLeaveRequests().then(() => { updateLeaveNavBadge(); }).catch(()=>{});
-  startLeavePolling();
   // Team chat: load history, wire dragging, start near-live polling + unread badge.
   initTeamChat().catch(()=>{});
   // v56: background auto-importer — silently pulls + reconciles portal bookings
@@ -5277,6 +5191,19 @@ function switchPage(name, btn) {
   }
   document.querySelectorAll('.main > div').forEach(d => d.style.display = 'none');
   const page = document.getElementById('page-' + name);
+  // Guard: a call for a page that no longer exists (e.g. the removed Leave
+  // Calendar, or a stale saved view) used to throw and leave the app on a blank
+  // screen. Fall back to Attendance instead.
+  if (!page) {
+    console.warn('[switchPage] unknown page:', name, '— falling back to attendance');
+    const fb = document.getElementById('page-attendance');
+    if (fb) fb.style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+    const fbBtn = navButtonForPage('attendance');
+    if (fbBtn) fbBtn.classList.add('active');
+    try { loadShifts(); } catch (e) {}
+    return;
+  }
   page.style.display = 'block';
   // Scroll the page itself to top (not .main which is now overflow:hidden)
   page.scrollTop = 0;
@@ -5311,7 +5238,6 @@ function switchPage(name, btn) {
   if (name === 'finance') { loadFinancePage(); }
   if (name === 'expenses') { renderExpensesPage(); }
   if (name === 'salary') { renderSalaryPage(); }
-  if (name === 'leave') { renderLeavePage(); }
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -26283,515 +26209,6 @@ setInterval(async () => {
 function closeModalSafe(id) { const m = document.getElementById(id); if (m) m.classList.remove('open'); }
 function openModalById(id) { const m = document.getElementById(id); if (m) m.classList.add('open'); }
 
-// ════════════════════════════════════════════════════════════════
-// LEAVE CALENDAR MODULE
-// ════════════════════════════════════════════════════════════════
-// Shared team leave board backed by Supabase table `leave_requests`.
-// Anyone on the internal team can request leave for themselves; it lands on a
-// shared monthly calendar so the team can avoid clashing on the same dates.
-//
-// Rules implemented:
-//  • Any staff member submits a request for one date or a date range (for self).
-//  • If their date(s) clash with ANOTHER person's leave, they are warned in the
-//    modal and nudged to pick another date. If they insist, a reason is required
-//    and the request is flagged conflict=true (still subject to approval).
-//  • Owner (Jon) leave is auto-approved (no approval needed) even on a clash —
-//    his role is to deconflict, so we just plot it. Everyone else's request is
-//    created as `pending` and must be approved/rejected by the owner.
-//  • On approve/reject the owner triggers a WhatsApp notification to that staff
-//    member via Periskope (TEAM_WHATSAPP number lookup).
-//  • New requests + approvals sync across devices via 30s polling.
-//
-// Supabase schema (run once in SQL editor — see LEAVE_SCHEMA_SQL string below):
-//   leave_requests( id uuid pk default gen_random_uuid(), staff text not null,
-//     start_date date not null, end_date date not null, type text,
-//     note text, status text default 'pending', conflict boolean default false,
-//     conflict_reason text, decided_by text, decided_at timestamptz,
-//     created_at timestamptz default now() )
-//   + RLS: enable, then a permissive policy for anon (this app uses the anon key
-//     like every other table here). If RLS blocks inserts you'll see a red toast.
-
-const LEAVE_SCHEMA_SQL = `create table if not exists leave_requests (
-  id uuid primary key default gen_random_uuid(),
-  staff text not null,
-  start_date date not null,
-  end_date date not null,
-  type text,
-  note text,
-  status text not null default 'pending',
-  conflict boolean not null default false,
-  conflict_reason text,
-  decided_by text,
-  decided_at timestamptz,
-  created_at timestamptz default now()
-);
-alter table leave_requests enable row level security;
-create policy "leave_all" on leave_requests for all using (true) with check (true);`;
-
-let leaveRequests = [];            // cached rows from Supabase
-let leaveCalCursor = new Date();   // month currently shown
-leaveCalCursor.setDate(1);
-let leavePollTimer = null;
-
-function isOwnerUser() { return currentUserRole() === 'owner'; }
-
-// ── Date helpers (local, no UTC drift) ───────────────────────────
-function leaveISO(d) {
-  const dt = (d instanceof Date) ? d : new Date(d);
-  return dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
-}
-function leaveParse(s) {
-  // 'YYYY-MM-DD' -> local Date at midnight
-  const [y,m,d] = String(s).split('-').map(Number);
-  return new Date(y, (m||1)-1, d||1);
-}
-function leaveEachDay(startISO, endISO, cb) {
-  let cur = leaveParse(startISO);
-  const end = leaveParse(endISO);
-  let guard = 0;
-  while (cur <= end && guard < 400) { cb(leaveISO(cur)); cur.setDate(cur.getDate()+1); guard++; }
-}
-function leaveDateRangeLabel(startISO, endISO) {
-  if (startISO === endISO) return leavePrettyDate(startISO);
-  return leavePrettyDate(startISO) + ' → ' + leavePrettyDate(endISO);
-}
-function leavePrettyDate(iso) {
-  const d = leaveParse(iso);
-  return d.toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' });
-}
-
-// ── Supabase load / sync ─────────────────────────────────────────
-async function loadLeaveRequests() {
-  if (!supabaseClient) { leaveRequests = []; return; }
-  try {
-    const { data, error } = await supabaseClient
-      .from('leave_requests')
-      .select('*')
-      .order('start_date', { ascending: true });
-    if (error) {
-      console.warn('[Leave] load error:', error.message || error);
-      // Honest surfacing per Jon's preference — no silent fallback.
-      if (/relation .*does not exist/i.test(error.message || '')) {
-        toast('Leave table missing — run the setup SQL (see console).', 'error');
-        console.log('%c[Leave] Run this SQL in Supabase, then reload:', 'font-weight:bold');
-        console.log(LEAVE_SCHEMA_SQL);
-      } else if (/row-level security|permission|policy/i.test(error.message || '')) {
-        toast('Leave blocked by RLS — add a permissive policy (see console).', 'error');
-        console.log(LEAVE_SCHEMA_SQL);
-      } else {
-        toast('Could not load leave: ' + (error.message || 'unknown error'), 'error');
-      }
-      return;
-    }
-    leaveRequests = data || [];
-  } catch(e) {
-    console.warn('[Leave] load exception:', e);
-    toast('Could not load leave (network).', 'error');
-  }
-}
-
-// ── Conflict detection ───────────────────────────────────────────
-// Returns array of { date, people:[names] } describing clashes between the
-// proposed range (for `me`) and OTHER people's leave that isn't rejected.
-function leaveFindConflicts(startISO, endISO, me) {
-  const byDate = {};
-  leaveRequests.forEach(r => {
-    if (r.status === 'rejected') return;
-    if ((r.staff || '') === me) return; // own leave never clashes with itself
-    leaveEachDay(r.start_date, r.end_date, d => {
-      (byDate[d] = byDate[d] || new Set()).add(r.staff);
-    });
-  });
-  const clashes = [];
-  leaveEachDay(startISO, endISO, d => {
-    if (byDate[d] && byDate[d].size) {
-      clashes.push({ date: d, people: Array.from(byDate[d]) });
-    }
-  });
-  return clashes;
-}
-
-// ── Modal: open / live conflict re-check ─────────────────────────
-function openLeaveRequestModal(prefillISO) {
-  const owner = isOwnerUser();
-  document.getElementById('leave-modal-title').textContent = owner ? 'Plot my leave' : 'Request leave';
-  document.getElementById('leave-modal-owner-note').style.display = owner ? 'flex' : 'none';
-  document.getElementById('leave-submit-btn').textContent = owner ? 'Plot leave' : 'Submit request';
-  const from = document.getElementById('leave-from');
-  const to = document.getElementById('leave-to');
-  const seed = prefillISO || leaveISO(new Date());
-  from.value = seed; to.value = seed;
-  document.getElementById('leave-type').value = 'Annual leave';
-  document.getElementById('leave-note').value = '';
-  document.getElementById('leave-conflict-reason').value = '';
-  document.getElementById('leave-conflict-block').style.display = 'none';
-  document.getElementById('leave-conflict-reason-row').style.display = 'none';
-  document.getElementById('leave-pick-other-btn').style.display = 'none';
-  from.oninput = leaveModalRecheck;
-  to.oninput = leaveModalRecheck;
-  openModalById('leave-request-modal');
-  leaveModalRecheck();
-}
-
-// Re-evaluates clashes whenever the dates change and updates the warning UI.
-function leaveModalRecheck() {
-  const from = document.getElementById('leave-from').value;
-  let to = document.getElementById('leave-to').value;
-  if (!from) return;
-  if (!to || to < from) { to = from; document.getElementById('leave-to').value = from; }
-  const me = currentInternalUser || 'Jon';
-  const clashes = leaveFindConflicts(from, to, me);
-  const block = document.getElementById('leave-conflict-block');
-  const txt = document.getElementById('leave-conflict-text');
-  const reasonRow = document.getElementById('leave-conflict-reason-row');
-  const pickOther = document.getElementById('leave-pick-other-btn');
-
-  if (!clashes.length) {
-    block.style.display = 'none';
-    reasonRow.style.display = 'none';
-    pickOther.style.display = 'none';
-    return;
-  }
-
-  // Build a readable summary of who is off on which clashing dates.
-  const peopleSet = new Set();
-  clashes.forEach(c => c.people.forEach(p => peopleSet.add(p)));
-  const dateList = clashes.map(c => leavePrettyDate(c.date)).join(', ');
-  const who = Array.from(peopleSet).join(', ');
-
-  block.style.display = 'block';
-  pickOther.style.display = 'inline-flex';
-
-  if (isOwnerUser()) {
-    // Owner is auto-approved; just inform, no reason required.
-    txt.innerHTML = `Heads up — <strong>${who}</strong> already has leave on <strong>${dateList}</strong>. Your leave will still be plotted (owner override).`;
-    reasonRow.style.display = 'none';
-  } else {
-    txt.innerHTML = `<strong>${who}</strong> already has leave on <strong>${dateList}</strong>. Consider picking another date to avoid being short-staffed. If you still need these dates, give a reason below — it'll be sent to Jon for approval.`;
-    reasonRow.style.display = 'block';
-  }
-}
-
-// ── Submit ───────────────────────────────────────────────────────
-async function submitLeaveRequest() {
-  const me = currentInternalUser || 'Jon';
-  const from = document.getElementById('leave-from').value;
-  let to = document.getElementById('leave-to').value;
-  const type = document.getElementById('leave-type').value;
-  const note = document.getElementById('leave-note').value.trim();
-  if (!from) { toast('Pick a start date', 'error'); return; }
-  if (!to || to < from) to = from;
-  if (!supabaseClient) { toast('No database connection', 'error'); return; }
-
-  const owner = isOwnerUser();
-  const clashes = leaveFindConflicts(from, to, me);
-  let conflict = clashes.length > 0;
-  let conflictReason = null;
-
-  if (conflict && !owner) {
-    conflictReason = document.getElementById('leave-conflict-reason').value.trim();
-    if (!conflictReason) {
-      toast('These dates clash — pick another date or give a reason to insist.', 'error');
-      document.getElementById('leave-conflict-reason').focus();
-      return;
-    }
-  }
-
-  // Owner = auto-approved & no approval flow. Everyone else = pending.
-  const status = owner ? 'approved' : 'pending';
-  const row = {
-    staff: me,
-    start_date: from,
-    end_date: to,
-    type,
-    note: note || null,
-    status,
-    conflict: conflict,
-    conflict_reason: conflictReason,
-    decided_by: owner ? me : null,
-    decided_at: owner ? new Date().toISOString() : null
-  };
-
-  const btn = document.getElementById('leave-submit-btn');
-  btn.disabled = true; btn.style.opacity = '0.6';
-  try {
-    const { error } = await supabaseClient.from('leave_requests').insert(row);
-    if (error) {
-      console.warn('[Leave] insert error:', error.message || error);
-      if (/relation .*does not exist/i.test(error.message || '')) {
-        toast('Leave table missing — run the setup SQL (see console).', 'error');
-        console.log(LEAVE_SCHEMA_SQL);
-      } else if (/row-level security|permission|policy/i.test(error.message || '')) {
-        toast('Insert blocked by RLS — add a permissive policy (see console).', 'error');
-        console.log(LEAVE_SCHEMA_SQL);
-      } else {
-        toast('Could not save leave: ' + (error.message || 'unknown error'), 'error');
-      }
-      return;
-    }
-    closeModalSafe('leave-request-modal');
-    if (owner) {
-      toast('Leave plotted ✓');
-    } else if (conflict) {
-      toast('Request submitted (clashing dates) — awaiting Jon\'s approval.');
-    } else {
-      toast('Leave request submitted — awaiting approval.');
-    }
-    try { logActivity && logActivity('leave_request', `${me} requested ${type} ${leaveDateRangeLabel(from,to)}${conflict ? ' (conflict)' : ''}`); } catch(e){}
-    await loadLeaveRequests();
-    renderLeavePage();
-    updateLeaveNavBadge();
-  } catch(e) {
-    console.warn('[Leave] submit exception:', e);
-    toast('Could not save leave (network).', 'error');
-  } finally {
-    btn.disabled = false; btn.style.opacity = '';
-  }
-}
-
-// ── Owner approve / reject ───────────────────────────────────────
-async function decideLeave(id, decision) {
-  if (!isOwnerUser()) { toast('Only Jon can approve or reject leave.', 'error'); return; }
-  const req = leaveRequests.find(r => String(r.id) === String(id));
-  if (!req) { toast('Request not found', 'error'); return; }
-  const me = currentInternalUser || 'Jon';
-  try {
-    const { error } = await supabaseClient.from('leave_requests')
-      .update({ status: decision, decided_by: me, decided_at: new Date().toISOString() })
-      .eq('id', id);
-    if (error) {
-      toast('Could not update: ' + (error.message || 'error'), 'error');
-      return;
-    }
-    toast(decision === 'approved' ? 'Leave approved ✓' : 'Leave rejected');
-    try { logActivity && logActivity('leave_decision', `${me} ${decision} ${req.staff}'s ${req.type} ${leaveDateRangeLabel(req.start_date, req.end_date)}`); } catch(e){}
-    // Fire WhatsApp notification to the staff member.
-    notifyLeaveDecision(req, decision).catch(e => console.warn('[Leave] notify failed', e));
-    await loadLeaveRequests();
-    renderLeavePage();
-    updateLeaveNavBadge();
-  } catch(e) {
-    console.warn('[Leave] decide exception:', e);
-    toast('Could not update leave (network).', 'error');
-  }
-}
-
-// WhatsApp the affected staff member that their request was approved/rejected.
-async function notifyLeaveDecision(req, decision) {
-  const phone = (typeof TEAM_WHATSAPP !== 'undefined' && TEAM_WHATSAPP[req.staff]) ? TEAM_WHATSAPP[req.staff] : '';
-  if (!phone) { console.log('[Leave] no WhatsApp number for', req.staff, '— skipped notify'); return; }
-  const range = leaveDateRangeLabel(req.start_date, req.end_date);
-  let msg;
-  if (decision === 'approved') {
-    msg = `✅ Leave APPROVED\n\nHi ${req.staff}, your ${req.type} for ${range} has been approved by Jon.\n\nEnjoy your time off!`;
-  } else {
-    msg = `❌ Leave REJECTED\n\nHi ${req.staff}, your ${req.type} request for ${range} was not approved by Jon.${req.conflict ? '\n\n(These dates clashed with another team member\'s leave.)' : ''}\n\nPlease reach out to Jon if you'd like to discuss alternative dates.`;
-  }
-  const ok = await sendPeriskopeMessage(phone, msg);
-  if (ok) toast(`WhatsApp sent to ${req.staff}`);
-  else toast(`Leave ${decision}, but WhatsApp to ${req.staff} didn't send — check WhatsApp Alerts.`, 'error');
-}
-
-// ── Delete / cancel own request ──────────────────────────────────
-async function cancelLeave(id) {
-  const req = leaveRequests.find(r => String(r.id) === String(id));
-  if (!req) return;
-  const me = currentInternalUser || 'Jon';
-  if (req.staff !== me && !isOwnerUser()) { toast('You can only cancel your own leave.', 'error'); return; }
-  if (!confirm(`Remove this leave (${req.type} · ${leaveDateRangeLabel(req.start_date, req.end_date)})?`)) return;
-  try {
-    const { error } = await supabaseClient.from('leave_requests').delete().eq('id', id);
-    if (error) { toast('Could not remove: ' + (error.message || 'error'), 'error'); return; }
-    toast('Leave removed');
-    await loadLeaveRequests();
-    renderLeavePage();
-    updateLeaveNavBadge();
-  } catch(e) { toast('Could not remove (network).', 'error'); }
-}
-
-// ── Month navigation ─────────────────────────────────────────────
-function leaveCalShift(delta) {
-  leaveCalCursor.setMonth(leaveCalCursor.getMonth() + delta);
-  renderLeaveCalendar();
-}
-
-// ── Render: page (load + calendar + lists) ───────────────────────
-async function renderLeavePage() {
-  await loadLeaveRequests();
-  renderLeaveCalendar();
-  renderLeaveOwnerPending();
-  renderLeaveMineList();
-  updateLeaveNavBadge();
-}
-
-// Build the colour legend + month grid.
-function renderLeaveCalendar() {
-  const label = document.getElementById('leave-cal-month-label');
-  if (label) label.textContent = leaveCalCursor.toLocaleDateString(undefined, { month:'long', year:'numeric' });
-
-  const legend = document.getElementById('leave-cal-legend');
-  if (legend) legend.innerHTML = `
-    <span class="lg-item"><span class="lg-dot" style="background:var(--green);"></span> Approved</span>
-    <span class="lg-item"><span class="lg-dot" style="background:var(--amber);"></span> Pending</span>
-    <span class="lg-item"><span class="lg-dot" style="background:var(--purple);"></span> Owner (Jon)</span>
-    <span class="lg-item" style="color:var(--text3);">Tap a day to request leave</span>`;
-
-  const grid = document.getElementById('leave-calendar-grid');
-  if (!grid) return;
-
-  const me = currentInternalUser || 'Jon';
-  const year = leaveCalCursor.getFullYear();
-  const month = leaveCalCursor.getMonth();
-  const first = new Date(year, month, 1);
-  const startDow = first.getDay(); // 0 Sun
-  const daysInMonth = new Date(year, month+1, 0).getDate();
-  const todayISO = leaveISO(new Date());
-
-  // Map ISO date -> [{staff,status,conflict,type,id}] (non-rejected only on grid)
-  const byDate = {};
-  leaveRequests.forEach(r => {
-    if (r.status === 'rejected') return;
-    leaveEachDay(r.start_date, r.end_date, d => {
-      (byDate[d] = byDate[d] || []).push(r);
-    });
-  });
-
-  const dows = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  let html = dows.map(d => `<div class="leave-cal-dow">${d}</div>`).join('');
-
-  // leading blanks
-  for (let i=0; i<startDow; i++) html += `<div class="leave-cell is-empty"></div>`;
-
-  for (let day=1; day<=daysInMonth; day++) {
-    const iso = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-    const dow = new Date(year, month, day).getDay();
-    const weekend = (dow === 0 || dow === 6);
-    const entries = byDate[iso] || [];
-    const classes = ['leave-cell'];
-    if (iso === todayISO) classes.push('is-today');
-    if (weekend) classes.push('is-weekend');
-
-    let chips = '';
-    const shown = entries.slice(0, 3);
-    shown.forEach(r => {
-      const isOwnerLeave = roleForUser(r.staff) === 'owner';
-      let chipClass = isOwnerLeave ? 'owner' : (r.status === 'approved' ? 'approved' : 'pending');
-      if (r.staff === me) chipClass += ' mine';
-      const mark = r.conflict ? '⚠' : '';
-      chips += `<div class="leave-chip ${chipClass}" title="${r.staff} · ${r.type} · ${r.status}${r.conflict ? ' · conflict' : ''}">${mark}${r.staff}</div>`;
-    });
-    if (entries.length > shown.length) chips += `<div class="lc-more">+${entries.length - shown.length} more</div>`;
-
-    html += `<div class="${classes.join(' ')}" onclick="openLeaveRequestModal('${iso}')">
-      <div class="lc-date">${day}</div>${chips}</div>`;
-  }
-
-  grid.innerHTML = html;
-}
-
-// Owner-only panel: pending requests awaiting approve/reject.
-function renderLeaveOwnerPending() {
-  const wrap = document.getElementById('leave-owner-pending-wrap');
-  if (!wrap) return;
-  if (!isOwnerUser()) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
-  const pending = leaveRequests.filter(r => r.status === 'pending')
-    .sort((a,b) => (a.start_date < b.start_date ? -1 : 1));
-  if (!pending.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
-
-  wrap.style.display = 'block';
-  let html = `<div style="font-size:12px;font-weight:700;color:var(--amber);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;font-family:var(--mono);">⏳ ${pending.length} request${pending.length>1?'s':''} awaiting your approval</div>`;
-  pending.forEach(r => {
-    html += `<div class="leave-req-card">
-      <div class="lrc-main">
-        <div class="lrc-who">${r.staff} <span class="badge badge-amber" style="margin-left:6px;">Pending</span>${r.conflict ? ' <span class="badge badge-red">⚠ Clash</span>' : ''}</div>
-        <div class="lrc-meta">${r.type} · ${leaveDateRangeLabel(r.start_date, r.end_date)}${r.note ? ' · ' + escapeLeave(r.note) : ''}</div>
-        ${r.conflict && r.conflict_reason ? `<div class="lrc-reason"><strong>Reason given:</strong> ${escapeLeave(r.conflict_reason)}</div>` : ''}
-      </div>
-      <div class="leave-req-actions">
-        <button class="btn btn-primary btn-sm" style="background:var(--green);box-shadow:none;" onclick="decideLeave('${r.id}','approved')">Approve</button>
-        <button class="btn btn-ghost btn-sm" onclick="decideLeave('${r.id}','rejected')">Reject</button>
-      </div>
-    </div>`;
-  });
-  wrap.innerHTML = html;
-}
-
-// Lower list: the logged-in user's own upcoming/past leave (or, for owner, all
-// approved upcoming leave so he sees the team picture).
-function renderLeaveMineList() {
-  const el = document.getElementById('leave-mine-list');
-  if (!el) return;
-  const me = currentInternalUser || 'Jon';
-  const owner = isOwnerUser();
-  const todayISO = leaveISO(new Date());
-
-  let rows, heading;
-  if (owner) {
-    heading = 'Upcoming team leave';
-    rows = leaveRequests.filter(r => r.status !== 'rejected' && r.end_date >= todayISO)
-      .sort((a,b) => (a.start_date < b.start_date ? -1 : 1));
-  } else {
-    heading = 'My leave';
-    rows = leaveRequests.filter(r => r.staff === me)
-      .sort((a,b) => (a.start_date < b.start_date ? -1 : 1));
-  }
-
-  let html = `<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;font-family:var(--mono);">${heading}</div>`;
-  if (!rows.length) {
-    html += `<div style="font-size:12px;color:var(--text3);padding:8px 0;">No leave yet. Tap a day on the calendar or use "Request leave".</div>`;
-    el.innerHTML = html;
-    return;
-  }
-  rows.forEach(r => {
-    const badge = r.status === 'approved'
-      ? '<span class="badge badge-green">Approved</span>'
-      : r.status === 'pending'
-        ? '<span class="badge badge-amber">Pending</span>'
-        : '<span class="badge badge-gray">Rejected</span>';
-    const canRemove = (r.staff === me) || owner;
-    html += `<div class="leave-req-card">
-      <div class="lrc-main">
-        <div class="lrc-who">${owner ? r.staff + ' · ' : ''}${r.type} ${badge}${r.conflict ? ' <span class="badge badge-red">⚠ Clash</span>' : ''}</div>
-        <div class="lrc-meta">${leaveDateRangeLabel(r.start_date, r.end_date)}${r.note ? ' · ' + escapeLeave(r.note) : ''}${r.decided_by ? ' · decided by ' + r.decided_by : ''}</div>
-        ${r.conflict && r.conflict_reason ? `<div class="lrc-reason"><strong>Reason:</strong> ${escapeLeave(r.conflict_reason)}</div>` : ''}
-      </div>
-      <div class="leave-req-actions">
-        ${canRemove ? `<button class="btn btn-ghost btn-sm" onclick="cancelLeave('${r.id}')" title="Remove this leave">Remove</button>` : ''}
-      </div>
-    </div>`;
-  });
-  el.innerHTML = html;
-}
-
-function escapeLeave(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-// Sidebar badge: number of pending requests (owner only — it's his action queue).
-function updateLeaveNavBadge() {
-  const badge = document.getElementById('leave-nav-badge');
-  if (!badge) return;
-  // Clear the inline display:none baked into the markup so the .show class can win.
-  badge.style.display = '';
-  if (!isOwnerUser()) { badge.classList.remove('show'); return; }
-  const n = leaveRequests.filter(r => r.status === 'pending').length;
-  badge.textContent = n;
-  badge.classList.toggle('show', n > 0);
-}
-
-// Background sync so approvals/new requests appear without a manual reload.
-function startLeavePolling() {
-  if (leavePollTimer) clearInterval(leavePollTimer);
-  leavePollTimer = setInterval(async () => {
-    if (!currentInternalUser || !supabaseClient) return;
-    await loadLeaveRequests();
-    updateLeaveNavBadge();
-    // Only re-render the calendar if the page is actually visible.
-    const active = document.getElementById('page-leave')?.style.display !== 'none';
-    if (active) { renderLeaveCalendar(); renderLeaveOwnerPending(); renderLeaveMineList(); }
-  }, 30000);
-}
-
 // ── Role-based nav + page visibility ─────────────────────────────
 // Ops pages that the finance role should NOT see.
 const OPS_ONLY_PAGES = ['attendance','completed','workers','outlets','rates','standby','import','reports','analytics','incidents','messages','activity','chathistory','knowledge','billing'];
@@ -26829,12 +26246,8 @@ function applyRoleVisibility() {
       const b = navButtonForPage(p);
       if (b) b.style.display = PH_PARTNER_PAGES.includes(p) ? '' : 'none';
     });
-    // Leave nav (separate id) — allowed.
-    const leaveNav = document.getElementById('nav-leave');
-    if (leaveNav) leaveNav.style.display = PH_PARTNER_PAGES.includes('leave') ? '' : 'none';
     // No cross-country team chat history for the PH partner.
     try { const chNav = document.querySelector('.nav-item-chathistory'); if (chNav) chNav.style.display = 'none'; } catch(e){}
-    try { updateLeaveNavBadge(); } catch(e){}
     // Redirect to a safe PH page if the current page isn't allowed.
     const visiblePage = Array.from(document.querySelectorAll('.main > div')).find(d => d.style.display === 'block');
     const currentPageId = visiblePage ? visiblePage.id.replace('page-','') : null;
@@ -26863,7 +26276,6 @@ function applyRoleVisibility() {
   if (waNav) waNav.style.display = hideOps ? 'none' : '';
   if (tasksNav) tasksNav.style.display = hideOps ? 'none' : '';
   // Leave Calendar is available to everyone; its pending-count badge is owner-only.
-  try { updateLeaveNavBadge(); } catch(e){}
   // Team chat widget + Chat History are ops/owner only; hide for finance.
   try { updateChatUnreadBadge(); } catch(e){}
   try {
@@ -28809,7 +28221,11 @@ function mergeTeamTasks(a, b) {
       completed,
       completedAt: completer.completedAt || prev.completedAt || v.completedAt || '',
       completedBy: completer.completedBy || prev.completedBy || v.completedBy || '',
+      // Step tick-lists merge per step, DONE wins — otherwise two teammates
+      // ticking different steps at the same time would each wipe the other's.
+      checklist: mergeTaskChecklists(prev.checklist, v.checklist),
     };
+    if (!out[k].checklist) delete out[k].checklist;
   }
   return out;
 }
@@ -28863,7 +28279,9 @@ function openAssignTaskModal() {
       .map(u => `<option value="${escapeAttr(u)}">${escapeHtml(u)}${TEAM_WHATSAPP[u] ? '' : ' (no WhatsApp)'}</option>`)
       .join('');
   }
+  populateAssignSopPickers();
   const t = document.getElementById('tt-title'); if (t) t.value = '';
+  ttTitleTouched = false;
   const d = document.getElementById('tt-detail'); if (d) d.value = '';
   const due = document.getElementById('tt-due'); if (due) due.value = '';
   const pr = document.getElementById('tt-priority'); if (pr) pr.value = 'normal';
@@ -28878,6 +28296,9 @@ async function submitAssignTask() {
   const assignee = String(document.getElementById('tt-assignee')?.value || '').trim();
   const due = String(document.getElementById('tt-due')?.value || '').trim();
   const priority = String(document.getElementById('tt-priority')?.value || 'normal').trim();
+  const sopId = String(document.getElementById('tt-sop')?.value || '').trim();
+  const sop = sopId ? sopDocs[sopId] : null;
+  const subject = currentAssignSubject();
 
   if (!title) { toast('Give the task a title', 'error'); return; }
   if (!assignee) { toast('Pick someone to assign it to', 'error'); return; }
@@ -28892,6 +28313,13 @@ async function submitAssignTask() {
     completed: false, completedAt: '', completedBy: '',
     notifiedAt: '',
   };
+  // An SOP-backed task carries its steps as a tick-list the owner works through.
+  if (sop && Array.isArray(sop.steps) && sop.steps.length) {
+    task.sopId = sop.id;
+    task.sopTitle = sop.title || '';
+    task.subject = subject || '';
+    task.checklist = sop.steps.map(txt => ({ text: String(txt), done: false, doneBy: '', doneAt: '' }));
+  }
   teamTasks[id] = task;
   await saveTeamTasks();
 
@@ -28923,6 +28351,11 @@ function buildTaskAssignedMessage(task) {
   lines.push('');
   lines.push(`*${task.title}*`);
   if (task.detail) lines.push(task.detail);
+  if (Array.isArray(task.checklist) && task.checklist.length) {
+    lines.push('');
+    lines.push(`_Steps to complete (${task.checklist.length}):_`);
+    task.checklist.forEach((c, i) => lines.push(`${i + 1}. ${c.text}`));
+  }
   const meta = [];
   if (task.priority === 'high') meta.push('Priority: 🔴 High');
   else if (task.priority === 'low') meta.push('Priority: Low');
@@ -28934,9 +28367,18 @@ function buildTaskAssignedMessage(task) {
 }
 
 // ── Complete / reopen / delete ───────────────────────────────────────────────
-async function completeTeamTask(id) {
+async function completeTeamTask(id, opts) {
   const t = teamTasks[id];
   if (!t || t.completed) return;
+  // SOP-backed task with steps left: confirm rather than silently closing it.
+  // Skipped when the last tick already completed it.
+  if (!(opts && opts.skipStepCheck) && Array.isArray(t.checklist)) {
+    const left = t.checklist.filter(c => c && !c.done);
+    if (left.length) {
+      const preview = left.slice(0, 4).map(c => '  • ' + c.text).join('\n');
+      if (!confirm(`${left.length} step${left.length === 1 ? '' : 's'} still unticked on "${t.title}":\n\n${preview}${left.length > 4 ? '\n  • …' : ''}\n\nComplete it anyway?`)) return;
+    }
+  }
   t.completed = true;
   t.completedAt = new Date().toISOString();
   t.completedBy = currentInternalUser || '—';
@@ -29005,48 +28447,91 @@ function fmtTaskWhen(iso) {
   } catch (e) { return ''; }
 }
 
+// Cards render COLLAPSED by default — one compact line each — so a list of ten
+// tasks stays scannable in the floating panel. Clicking the row (or its caret)
+// expands that one task to show the detail and the full action row.
+let teamTaskOpenIds = {};
+function toggleTeamTaskCard(id) {
+  teamTaskOpenIds[id] = !teamTaskOpenIds[id];
+  renderTeamTasksPage();
+}
+function setAllTeamTaskCards(open) {
+  teamTaskList().filter(t => t && !t.deleted).forEach(t => { teamTaskOpenIds[t.id] = !!open; });
+  renderTeamTasksPage();
+}
+
 function teamTaskCardHtml(t) {
-  const pr = t.priority === 'high'
-    ? '<span class="tt-pill tt-pill-high">🔴 High</span>'
-    : (t.priority === 'low' ? '<span class="tt-pill tt-pill-low">Low</span>' : '');
-  const duePill = t.due ? `<span class="tt-pill tt-pill-due">📅 Due ${escapeHtml(t.due)}</span>` : '';
   const idA = escapeAttr(t.id);
+  const open = !!teamTaskOpenIds[t.id];
+  const caret = `<span class="tt-caret">${open ? '▾' : '▸'}</span>`;
+
+  // ── Collapsed line: everything that matters at a glance ──
+  const dot = t.priority === 'high' ? '<span class="tt-dot tt-dot-high" title="High priority"></span>'
+            : (t.priority === 'low' ? '<span class="tt-dot tt-dot-low" title="Low priority"></span>'
+                                    : '<span class="tt-dot"></span>');
+  // Keep the collapsed row lean — in a 380px panel every icon steals width from
+  // the title. Due date and handover detail are one click away in the body.
+  const cl = Array.isArray(t.checklist) ? t.checklist : null;
+  const doneN = cl ? cl.filter(c => c && c.done).length : 0;
+  const progChip = cl ? `<span class="tt-prog ${doneN === cl.length ? 'tt-prog-full' : ''}" title="${doneN} of ${cl.length} steps ticked">${doneN}/${cl.length}</span>` : '';
+  const flags = (t.source === 'cancellation' ? '<span class="tt-mini" title="Raised by a cancellation checklist">🚫</span>' : '')
+              + ((t.transferHistory && t.transferHistory.length) ? '<span class="tt-mini" title="Handed over">⇄</span>' : '');
+
   if (t.completed) {
-    return `<div class="tt-card tt-done">
-      <div class="tt-card-main">
-        <div class="tt-title">✅ ${escapeHtml(t.title)}</div>
+    const head = `<div class="tt-line tt-line-done" onclick="toggleTeamTaskCard('${idA}')">
+      ${caret}<span class="tt-dot tt-dot-done"></span>
+      <span class="tt-line-title">${escapeHtml(t.title)}</span>
+      <span class="tt-who">${escapeHtml(t.completedBy || '—')}</span>
+    </div>`;
+    if (!open) return `<div class="tt-card tt-done tt-collapsed">${head}</div>`;
+    return `<div class="tt-card tt-done">${head}
+      <div class="tt-body">
         ${t.detail ? `<div class="tt-detail">${escapeHtml(t.detail)}</div>` : ''}
         <div class="tt-meta">
           <span>👤 ${escapeHtml(t.assignee || '—')}</span>
           <span class="tt-done-by">✓ Completed by <strong>${escapeHtml(t.completedBy || '—')}</strong>${t.completedAt ? ` · ${fmtTaskWhen(t.completedAt)}` : ''}</span>
         </div>
-      </div>
-      <div class="tt-card-actions">
-        <button class="btn btn-ghost btn-sm" onclick="reopenTeamTask('${idA}')" title="Reopen this task">↩ Reopen</button>
-        <button class="btn btn-ghost btn-sm" onclick="deleteTeamTask('${idA}')" title="Delete">🗑</button>
+        <div class="tt-card-actions">
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();reopenTeamTask('${idA}')" title="Reopen this task">↩ Reopen</button>
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();deleteTeamTask('${idA}')" title="Delete">🗑</button>
+        </div>
       </div>
     </div>`;
   }
+
+  const head = `<div class="tt-line" onclick="toggleTeamTaskCard('${idA}')">
+    ${caret}${dot}
+    <span class="tt-line-title">${escapeHtml(t.title)}</span>
+    ${progChip}${flags}
+    <span class="tt-who">${escapeHtml(t.assignee || '—')}</span>
+    <button class="tt-tick" title="Mark complete" onclick="event.stopPropagation();completeTeamTask('${idA}')">✓</button>
+  </div>`;
+  if (!open) return `<div class="tt-card tt-collapsed">${head}</div>`;
+
+  const pr = t.priority === 'high' ? '<span class="tt-pill tt-pill-high">🔴 High</span>'
+           : (t.priority === 'low' ? '<span class="tt-pill tt-pill-low">Low</span>' : '');
+  const duePill = t.due ? `<span class="tt-pill tt-pill-due">📅 Due ${escapeHtml(t.due)}</span>` : '';
   const originPill = t.source === 'cancellation'
     ? '<span class="tt-pill tt-pill-origin">🚫 From cancellation</span>' : '';
   const handoff = (t.transferHistory && t.transferHistory.length)
     ? `<span class="tt-handoff">⇄ handed over ${t.transferHistory.length}× · last by ${escapeHtml(t.transferHistory[t.transferHistory.length-1].by || '—')}</span>`
     : '';
-  return `<div class="tt-card">
-    <div class="tt-card-main">
-      <div class="tt-title">${escapeHtml(t.title)} ${pr} ${duePill} ${originPill}</div>
+  return `<div class="tt-card">${head}
+    <div class="tt-body">
+      ${(pr || duePill || originPill) ? `<div class="tt-pills">${pr} ${duePill} ${originPill}</div>` : ''}
       ${t.detail ? `<div class="tt-detail">${escapeHtml(t.detail)}</div>` : ''}
+      ${taskChecklistHtml(t)}
       <div class="tt-meta">
         <span>👤 Assigned to <strong>${escapeHtml(t.assignee || '—')}</strong></span>
         <span>· by ${escapeHtml(t.assignedBy || '—')}${t.assignedAt ? ` · ${fmtTaskWhen(t.assignedAt)}` : ''}</span>
         ${t.notifiedAt ? '<span class="tt-wa">· 💬 notified</span>' : ''}
         ${handoff}
       </div>
-    </div>
-    <div class="tt-card-actions">
-      <button class="btn btn-primary btn-sm" onclick="completeTeamTask('${idA}')" title="Mark this task complete">✓ Mark complete</button>
-      <button class="btn btn-ghost btn-sm" onclick="openTransferTaskModal('${idA}')" title="Hand this task to a teammate — e.g. before you end your shift">⇄ Transfer</button>
-      <button class="btn btn-ghost btn-sm" onclick="deleteTeamTask('${idA}')" title="Delete">🗑</button>
+      <div class="tt-card-actions">
+        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();completeTeamTask('${idA}')" title="Mark this task complete">✓ Mark complete</button>
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openTransferTaskModal('${idA}')" title="Hand this task to a teammate — e.g. before you end your shift">⇄ Transfer</button>
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();deleteTeamTask('${idA}')" title="Delete">🗑</button>
+      </div>
     </div>
   </div>`;
 }
@@ -29075,7 +28560,10 @@ function renderTeamTasksPage() {
   const archShown = filter === 'mine' ? archived.filter(t => t.assignee === me) : archived;
 
   let html = '';
-  html += `<div class="tt-section-head">Open tasks <span class="tt-count">${openShown.length}</span></div>`;
+  const anyOpen = openShown.some(t => teamTaskOpenIds[t.id]);
+  html += `<div class="tt-section-head">Open tasks <span class="tt-count">${openShown.length}</span>`
+        + (openShown.length ? `<button class="tt-expand-all" onclick="setAllTeamTaskCards(${anyOpen ? 'false' : 'true'})">${anyOpen ? 'Collapse all' : 'Expand all'}</button>` : '')
+        + `</div>`;
   if (!openShown.length) {
     html += `<div class="tt-empty">No open tasks${filter === 'mine' ? ' assigned to you' : ''}. Assign one with the button above.</div>`;
   } else {
@@ -29203,9 +28691,33 @@ let sopDocs = _readLocalStore('sop_docs_v1');
 let sopLoaded = false;
 let _sopEditingId = null;
 
+const EXAMPLE_SOP_ID = 'sop-example-ban-member';
+function maybeSeedExampleSop() {
+  // Only when the library has never had anything in it — including the example
+  // itself, so deleting it (which leaves a tombstone) doesn't bring it back.
+  if (Object.keys(sopDocs || {}).length) return false;
+  const now = new Date().toISOString();
+  sopDocs[EXAMPLE_SOP_ID] = {
+    id: EXAMPLE_SOP_ID,
+    title: 'Banning a member',
+    category: 'Workers',
+    purpose: 'Example SOP — edit or delete it, then add your own. Use this when a member has to be banned from taking further shifts.',
+    steps: [
+      'Disapprove the member from the admin panel.',
+      'Notify the PT so they stop assigning the member.',
+      'Mark the member as suspended / do-not-assign in the Workers page.',
+      'Cancel and re-fill any shifts they are already booked on.',
+      'Record the reason in Business Knowledge or Incidents so the team has the history.'
+    ],
+    createdBy: 'Example', createdAt: now, updatedBy: 'Example', updatedAt: now, deleted: false
+  };
+  return true;
+}
+
 async function loadSopRemote() {
   sopDocs = await _loadSharedStore('sop_docs', 'sop_docs_v1', sopDocs);
   sopLoaded = true;
+  if (maybeSeedExampleSop()) { try { await saveSopDocs(); } catch (e) {} }
   try { updateSopNavBadge(); } catch (e) {}
   try { if (document.getElementById('page-sop')?.style.display !== 'none') renderSopPage(); } catch (e) {}
   return sopDocs;
@@ -29257,6 +28769,7 @@ function renderSopPage() {
           </div>
         </div>
         <div class="sop-card-actions">
+          <button class="btn btn-primary btn-sm" onclick="startTaskFromSop('${idA}')" title="Turn this SOP into a task with tickable steps">＋ Use as task</button>
           <button class="btn btn-ghost btn-sm" onclick="openSopModal('${idA}')" title="Edit this SOP">✎ Edit</button>
           <button class="btn btn-ghost btn-sm" onclick="deleteSopDoc('${idA}')" title="Delete">\u{1F5D1}</button>
         </div>
@@ -29276,6 +28789,7 @@ function openSopModal(id) {
   document.getElementById('sop-f-title').value = d ? (d.title || '') : '';
   document.getElementById('sop-f-cat').value = d ? (d.category || 'General') : 'General';
   document.getElementById('sop-f-purpose').value = d ? (d.purpose || '') : '';
+  document.getElementById('sop-f-title-tpl').value = d ? (d.titleTemplate || '') : '';
   const steps = (d && Array.isArray(d.steps) && d.steps.length) ? d.steps.slice() : [''];
   renderSopStepRows(steps);
   document.getElementById('sop-modal').classList.add('open');
@@ -29310,6 +28824,7 @@ async function saveSopDoc() {
   const title = String(document.getElementById('sop-f-title')?.value || '').trim();
   const category = String(document.getElementById('sop-f-cat')?.value || 'General');
   const purpose = String(document.getElementById('sop-f-purpose')?.value || '').trim();
+  const titleTemplate = String(document.getElementById('sop-f-title-tpl')?.value || '').trim();
   const steps = currentSopSteps().map(x => String(x || '').trim()).filter(Boolean);
   if (!title) { toast('Give the SOP a title', 'error'); return; }
   if (!steps.length) { toast('Add at least one step', 'error'); return; }
@@ -29317,10 +28832,10 @@ async function saveSopDoc() {
   const me = currentInternalUser || '—';
   if (_sopEditingId && sopDocs[_sopEditingId]) {
     sopDocs[_sopEditingId] = Object.assign({}, sopDocs[_sopEditingId],
-      { title, category, purpose, steps, updatedBy: me, updatedAt: now });
+      { title, category, purpose, titleTemplate, steps, updatedBy: me, updatedAt: now });
   } else {
     const id = `sop-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    sopDocs[id] = { id, title, category, purpose, steps,
+    sopDocs[id] = { id, title, category, purpose, titleTemplate, steps,
       createdBy: me, createdAt: now, updatedBy: me, updatedAt: now, deleted: false };
     _sopEditingId = id;
   }
@@ -29778,6 +29293,182 @@ function aiCancelChecklistGate(a, shift) {
   };
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// SOP-BACKED TASKS — turn an SOP into a task with tickable steps
+// ════════════════════════════════════════════════════════════════════════════
+// Assign a task → pick an SOP → pick who it's about → the title writes itself
+// from the SOP's title template ("Permanently banning {name}") and the SOP's
+// steps ride along on the task as a tick-list. Ticking the last step completes
+// the task. Purely additive: a task with no SOP behaves exactly as before, and
+// the steps live on the existing team_tasks ledger (no schema change).
+
+let ttTitleTouched = false;   // true once the agent edits the title by hand
+
+// Fill "Permanently banning {name}" → "Permanently banning Jayden".
+function sopTaskTitle(sop, name) {
+  if (!sop) return '';
+  const tpl = String(sop.titleTemplate || '').trim();
+  const who = String(name || '').trim();
+  if (tpl) {
+    // {name} is the documented placeholder; when there's no name, drop the
+    // placeholder and tidy up any dangling joining words/punctuation.
+    return who
+      ? tpl.replace(/\{name\}/gi, who)
+      : tpl.replace(/\{name\}/gi, '').replace(/\s{2,}/g, ' ').replace(/[\s\-–—:·,]+$/, '').trim();
+  }
+  return who ? `${sop.title} — ${who}` : String(sop.title || '');
+}
+
+function populateAssignSopPickers() {
+  const sel = document.getElementById('tt-sop');
+  if (sel) {
+    const rows = sopList().slice().sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    sel.innerHTML = '<option value="">— No SOP (free-form task) —</option>'
+      + rows.map(d => `<option value="${escapeAttr(d.id)}">${escapeHtml(d.title)} · ${(d.steps || []).length} steps</option>`).join('');
+    sel.value = '';
+  }
+  const subj = document.getElementById('tt-subject');
+  if (subj) {
+    const names = (allWorkers || []).map(w => String(w.name || '').trim()).filter(Boolean).sort((a, b) => a.localeCompare(b));
+    subj.innerHTML = '<option value="">— Not about a specific person —</option>'
+      + names.map(n => `<option value="${escapeAttr(n)}">${escapeHtml(n)}</option>`).join('')
+      + '<option value="__other__">✏️ Someone else / type manually…</option>';
+    subj.value = '';
+  }
+  const other = document.getElementById('tt-subject-other'); if (other) other.value = '';
+  const otherRow = document.getElementById('tt-subject-other-row'); if (otherRow) otherRow.style.display = 'none';
+  const extra = document.getElementById('tt-sop-extra'); if (extra) extra.style.display = 'none';
+  const prev = document.getElementById('tt-sop-steps-preview'); if (prev) prev.innerHTML = '';
+}
+
+// Whoever the task is about — the picked member, or the manually typed name.
+function currentAssignSubject() {
+  const sel = document.getElementById('tt-subject');
+  const v = String(sel?.value || '');
+  if (v === '__other__') return String(document.getElementById('tt-subject-other')?.value || '').trim();
+  return v.trim();
+}
+
+function onAssignSopChange() {
+  const id = String(document.getElementById('tt-sop')?.value || '');
+  const sop = id ? sopDocs[id] : null;
+  const extra = document.getElementById('tt-sop-extra');
+  if (extra) extra.style.display = sop ? 'block' : 'none';
+  renderSopStepsPreview(sop);
+  applySopTaskTitle();
+}
+
+function onAssignSubjectChange() {
+  const isOther = String(document.getElementById('tt-subject')?.value || '') === '__other__';
+  const row = document.getElementById('tt-subject-other-row');
+  if (row) row.style.display = isOther ? 'block' : 'none';
+  if (isOther) setTimeout(() => document.getElementById('tt-subject-other')?.focus(), 40);
+  applySopTaskTitle();
+}
+
+// Write the generated title into the field — but never stomp on a title the
+// agent has typed themselves.
+function applySopTaskTitle() {
+  const id = String(document.getElementById('tt-sop')?.value || '');
+  const sop = id ? sopDocs[id] : null;
+  const input = document.getElementById('tt-title');
+  if (!input || !sop) return;
+  if (ttTitleTouched && input.value.trim()) return;
+  input.value = sopTaskTitle(sop, currentAssignSubject());
+}
+
+function renderSopStepsPreview(sop) {
+  const el = document.getElementById('tt-sop-steps-preview');
+  if (!el) return;
+  const steps = (sop && Array.isArray(sop.steps)) ? sop.steps.filter(x => String(x || '').trim()) : [];
+  if (!steps.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="tt-prev-head">${steps.length} step${steps.length === 1 ? '' : 's'} will be attached — tick them off as you go</div>`
+    + `<ol class="tt-prev-list">${steps.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>`;
+}
+
+// "＋ Use as task" on an SOP card — opens Assign a task with that SOP selected.
+function startTaskFromSop(sopId) {
+  const sop = sopDocs[sopId];
+  if (!sop) { toast('SOP not found', 'error'); return; }
+  openAssignTaskModal();
+  const sel = document.getElementById('tt-sop');
+  if (sel) { sel.value = sopId; onAssignSopChange(); }
+  setTimeout(() => document.getElementById('tt-subject')?.focus(), 60);
+}
+
+// ── Tick-list on the task card ─────────────────────────────────────────────
+function taskChecklistHtml(t) {
+  const cl = Array.isArray(t.checklist) ? t.checklist : null;
+  if (!cl || !cl.length) return '';
+  const done = cl.filter(c => c && c.done).length;
+  const pct = Math.round(done / cl.length * 100);
+  const idA = escapeAttr(t.id);
+  const rows = cl.map((c, i) => {
+    const on = !!(c && c.done);
+    const by = on && c.doneBy ? `<span class="tt-step-by">${escapeHtml(c.doneBy)}</span>` : '';
+    return `<div class="tt-step ${on ? 'on' : ''}" onclick="event.stopPropagation();toggleTaskStep('${idA}',${i})" title="${on ? 'Untick this step' : 'Tick this step'}">
+      <span class="tt-step-box">${on ? '✓' : ''}</span>
+      <span class="tt-step-num">${i + 1}</span>
+      <span class="tt-step-text">${escapeHtml(c.text || '')}</span>
+      ${by}
+    </div>`;
+  }).join('');
+  return `<div class="tt-steps" onclick="event.stopPropagation();">
+    <div class="tt-steps-head">
+      <span>${t.sopTitle ? escapeHtml(t.sopTitle) : 'Steps'}${t.subject ? ' · ' + escapeHtml(t.subject) : ''}</span>
+      <span class="tt-steps-count ${done === cl.length ? 'full' : ''}">${done}/${cl.length}</span>
+    </div>
+    <div class="tt-bar"><div class="tt-bar-fill" style="width:${pct}%;"></div></div>
+    ${rows}
+    ${done < cl.length ? '<div class="tt-steps-foot">Ticking every step completes this task.</div>' : ''}
+  </div>`;
+}
+
+async function toggleTaskStep(taskId, idx) {
+  const t = teamTasks[taskId];
+  if (!t || !Array.isArray(t.checklist) || !t.checklist[idx]) return;
+  if (t.completed) { toast('Reopen the task before changing its steps', 'error'); return; }
+  const step = t.checklist[idx];
+  const nowOn = !step.done;
+  step.done = nowOn;
+  step.doneBy = nowOn ? (currentInternalUser || '—') : '';
+  step.doneAt = nowOn ? new Date().toISOString() : '';
+  await saveTeamTasks();
+
+  const remaining = t.checklist.filter(c => !c.done).length;
+  if (nowOn && remaining === 0) {
+    // Last step ticked — the task is done by definition, so close it out.
+    toast('All steps ticked — completing the task');
+    await completeTeamTask(taskId, { skipStepCheck: true });
+    return;
+  }
+  renderTeamTasksPage();
+  updateTeamTasksNavBadge();
+}
+
+// Union two step lists by position; a step ticked by ANYONE stays ticked, so a
+// teammate's older copy can't untick work that was already done.
+function mergeTaskChecklists(a, b) {
+  if (!Array.isArray(a) && !Array.isArray(b)) return undefined;
+  if (!Array.isArray(a)) return b;
+  if (!Array.isArray(b)) return a;
+  const len = Math.max(a.length, b.length);
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    const x = a[i] || {}, y = b[i] || {};
+    const done = !!(x.done || y.done);
+    const src = x.done ? x : (y.done ? y : (y.text ? y : x));
+    out.push({
+      text: y.text || x.text || '',
+      done,
+      doneBy: done ? (src.doneBy || x.doneBy || y.doneBy || '') : '',
+      doneAt: done ? (src.doneAt || x.doneAt || y.doneAt || '') : '',
+    });
+  }
+  return out;
+}
+
 </script>
 
 <!-- Cancellation log modal -->
@@ -30121,6 +29812,11 @@ function aiCancelChecklistGate(a, shift) {
       </div>
     </div>
     <div class="form-row"><label>When to use this <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional)</span></label><textarea id="sop-f-purpose" placeholder="One or two lines on when this SOP applies"></textarea></div>
+    <div class="form-row">
+      <label>Task title when this SOP is turned into a task <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(optional)</span></label>
+      <input type="text" id="sop-f-title-tpl" placeholder="e.g. Permanently banning {name}">
+      <div class="sub-text" style="margin-top:6px;line-height:1.5;">Use <strong>{name}</strong> where the member's name should go. Leave blank and the task is just titled after the SOP.</div>
+    </div>
     <div class="form-row" style="margin-bottom:6px;">
       <label>Steps</label>
       <div id="sop-steps-wrap"></div>
@@ -30204,6 +29900,71 @@ function aiCancelChecklistGate(a, shift) {
   border-radius:var(--radius); padding:7px 10px; font-family:var(--font); font-size:13px; }
 .form-input:focus { outline:none; border-color:var(--accent); }
 .form-input::placeholder { color:var(--text3); }
+
+/* ── SOP-backed tasks: step tick-lists ── */
+.tt-prog { flex-shrink:0; font-family:var(--mono); font-size:10px; font-weight:700; padding:1px 6px;
+  border-radius:9px; background:var(--bg3); border:1px solid var(--border2); color:var(--text2); }
+.tt-prog-full { background:rgba(40,180,99,0.18); border-color:var(--green); color:var(--green); }
+.tt-steps { margin:9px 0 4px; border:1px solid var(--border); border-radius:var(--radius);
+  background:var(--bg3); padding:9px 10px; }
+.tt-steps-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  font-size:10.5px; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.05em;
+  color:var(--text3); margin-bottom:7px; }
+.tt-steps-count { font-weight:700; color:var(--text2); }
+.tt-steps-count.full { color:var(--green); }
+.tt-bar { height:3px; border-radius:2px; background:var(--border2); overflow:hidden; margin-bottom:9px; }
+.tt-bar-fill { height:100%; background:var(--accent); border-radius:2px; transition:width 0.25s ease; }
+.tt-step { display:flex; align-items:flex-start; gap:8px; padding:5px 4px; border-radius:6px;
+  cursor:pointer; transition:background 0.13s ease; }
+.tt-step:hover { background:var(--bg2); }
+.tt-step-box { flex-shrink:0; width:15px; height:15px; margin-top:1px; border-radius:4px;
+  border:1.5px solid var(--border2); display:flex; align-items:center; justify-content:center;
+  font-size:10px; font-weight:700; color:transparent; transition:background 0.13s, border-color 0.13s; }
+.tt-step.on .tt-step-box { background:var(--green); border-color:var(--green); color:#06210f; }
+.tt-step-num { flex-shrink:0; font-family:var(--mono); font-size:10px; color:var(--text3); margin-top:1px; }
+.tt-step-text { flex:1; min-width:0; font-size:12px; line-height:1.45; color:var(--text2); }
+.tt-step.on .tt-step-text { color:var(--text3); text-decoration:line-through; }
+.tt-step-by { flex-shrink:0; font-size:9.5px; font-family:var(--mono); color:var(--text3); margin-top:2px; }
+.tt-steps-foot { font-size:10.5px; color:var(--text3); margin-top:7px; font-style:italic; }
+.tt-prev-head { font-size:10.5px; font-family:var(--mono); text-transform:uppercase; letter-spacing:0.05em;
+  color:var(--accent); margin-bottom:6px; }
+.tt-prev-list { margin:0; padding-left:20px; }
+.tt-prev-list li { font-size:12px; color:var(--text2); line-height:1.5; margin-bottom:3px; }
+
+/* ── Team tasks: collapsed one-line rows, expand on click ── */
+/* The original .tt-card is display:flex (title column + action column). The
+   collapsed layout stacks a header row over an optional body instead, so the
+   card becomes a block — otherwise the header row sizes to its content and the
+   title never truncates, pushing the owner + tick off the right edge. */
+.tt-card { display:block; padding:0; overflow:hidden; }
+.tt-card .tt-card-actions { flex-direction:row; flex-wrap:wrap; }
+.tt-line { min-width:0; }
+.tt-card.tt-collapsed { padding:0; }
+.tt-line { display:flex; align-items:center; gap:8px; padding:9px 10px; cursor:pointer;
+  border-radius:var(--radius); transition:background 0.14s ease; }
+.tt-line:hover { background:var(--bg3); }
+.tt-caret { color:var(--text3); font-size:10px; width:9px; flex-shrink:0; }
+.tt-dot { width:7px; height:7px; border-radius:50%; background:var(--border2); flex-shrink:0; }
+.tt-dot-high { background:var(--red); box-shadow:0 0 0 3px rgba(232,64,64,0.15); }
+.tt-dot-low { background:var(--text3); }
+.tt-dot-done { background:var(--green); }
+.tt-line-title { flex:1; min-width:0; font-size:12.5px; font-weight:550; color:var(--text);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tt-line-done .tt-line-title { color:var(--text3); text-decoration:line-through; font-weight:500; }
+.tt-mini { font-size:10.5px; flex-shrink:0; opacity:0.75; }
+.tt-who { font-size:10.5px; color:var(--text3); font-family:var(--mono); flex-shrink:0;
+  max-width:74px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tt-tick { flex-shrink:0; width:22px; height:22px; border-radius:50%; cursor:pointer;
+  background:var(--bg3); border:1px solid var(--border2); color:var(--text3);
+  font-size:11px; line-height:1; display:flex; align-items:center; justify-content:center;
+  transition:background 0.14s ease, color 0.14s ease, border-color 0.14s ease; }
+.tt-tick:hover { background:rgba(40,180,99,0.18); border-color:var(--green); color:var(--green); }
+.tt-body { padding:2px 12px 11px 27px; }
+.tt-pills { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:7px; }
+.tt-expand-all { margin-left:auto; background:none; border:none; cursor:pointer; padding:0;
+  font-family:var(--font); font-size:10.5px; font-weight:600; color:var(--accent); }
+.tt-expand-all:hover { text-decoration:underline; }
+.tt-section-head { display:flex; align-items:center; gap:7px; }
 
 /* ── Team task extras ── */
 .tt-pill-origin { background:rgba(232,64,64,0.16); color:var(--red); }
