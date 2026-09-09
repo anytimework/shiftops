@@ -14077,14 +14077,17 @@ async function confirmCancel() {
   // button is already disabled until then; this is the belt-and-braces check so
   // no path (keyboard, console, stale DOM) can slip a cancellation through.
   {
-    const gate = cancelChecklistStatus();
+    let gate;
+    try { gate = cancelChecklistStatus(); }
+    catch (e) { console.error('[cancel checklist] gate failed — allowing cancellation:', e); gate = { complete: true, missing: [] }; }
     if (!gate.complete) {
       toast('Answer the cancellation checklist first: ' + gate.missing[0], 'error');
       renderCancelChecklist();
       return;
     }
   }
-  const _checklistSnapshot = cancelChecklistSnapshot();
+  let _checklistSnapshot = null;
+  try { _checklistSnapshot = cancelChecklistSnapshot(); } catch (e) { console.warn('[cancel checklist] snapshot failed:', e); }
   // v67-fix: the Pending-Approval card can now list bookings from OTHER dates
   // (via pendingApprovalAll), but allShifts only holds the viewed day — so a
   // cross-date cancel used to fail with "Shift not found". Resolve from allShifts
@@ -29395,10 +29398,12 @@ function thirdPartyRecordFor(shiftId) {
 function isThirdPartyShift(s) {
   if (!s) return false;
   if (thirdPartyRecordFor(s.id)) return true;
-  const name = String(s.sr_worker || '').trim();
+  const name = String(s.sr_worker || '').trim().toLowerCase();
   if (name) {
-    const isMember = (allWorkers || []).some(w => String(w.name || '').toLowerCase() === name.toLowerCase());
-    if (!isMember) return true;
+    const isMember = (allWorkers || []).some(w => String(w.name || '').trim().toLowerCase() === name);
+    // Only treat an unknown SR name as 3rd party once the worker list is actually
+    // loaded — an empty allWorkers would otherwise flag every SR shift.
+    if (!isMember && (allWorkers || []).length) return true;
   }
   return /3rd.?party|third.?party|platform|agency|outsourc/i.test(
     [s.payroll_notes, s.notes, s.sr_worker].filter(Boolean).join(' ')
@@ -29512,6 +29517,18 @@ const CANCEL_BRANCH_LABEL = {
 };
 
 function renderCancelChecklist() {
+  try { _renderCancelChecklistInner(); }
+  catch (e) {
+    console.error('[cancel checklist] render failed — failing open:', e);
+    const wrap = document.getElementById('cancel-checklist-wrap');
+    if (wrap) wrap.innerHTML = '<div class="alert alert-amber" style="margin-top:12px;"><span class="alert-icon">\u26A0\uFE0F</span><span>The cancellation checklist could not load. Confirm the usual steps manually before cancelling.</span></div>';
+    const btn = document.getElementById('cancel-confirm-btn');
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = ''; }
+    const note = document.getElementById('cancel-gate-note');
+    if (note) note.style.display = 'none';
+  }
+}
+function _renderCancelChecklistInner() {
   const wrap = document.getElementById('cancel-checklist-wrap');
   if (!wrap) return;
   const branch = cancelChecklistBranch();
