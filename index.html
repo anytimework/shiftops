@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+<!-- Build patch: v116b (SOP SHIFT PICKER — MULTI-SELECT, TODAY + UPCOMING ONLY) — Ops feedback (Jon, 10 Sep): "it doesn't allow me to select multiple shifts; cancellation is only for current day and future shifts, not past shifts." (1) The picker is now a tick-list: tick as many shifts as needed, across dates/searches (selections persist while you change the date or member); each can be removed from the summary. Task stores shifts:[snapshots] + shiftIds; card + WhatsApp list every shift; title summarises ("3 shifts, Thu 10 – Sat 12 Sep"). (2) Past shifts are never offered: member view lists today onward, the date box has min=today and refuses earlier dates. Tasks saved by v116 with a single `shift` still render. -->
 <!-- Build patch: v116 (SOP → TASK: PICK THE SHIFT) — Ops request (Jon, 10 Sep): "for PT cancelling a shift, we can select the shift that was cancelled." SOPs gain an opt-in "Ask which shift" flag (linksShift). Existing SOPs whose title mentions cancel + shift (e.g. "Cancellation of Shift by PT") get it automatically until someone edits the flag. When such an SOP is used as a task, Assign a task shows a shift picker: pick a member → their shifts from 14 days ago onward; or pick a date → every shift that day, filterable by name/outlet (cancelled + open slots shown and flagged). Picking a shift fills in the member if blank. The task stores a SNAPSHOT of the shift (id, worker, outlet, date, times) so it survives step 2 deleting the shift from the ops panel, shows it on the card with a View shift jump, includes it in the WhatsApp to the assignee, and title templates accept {outlet} {date} {time}. Additive only: no schema change, tasks/SOPs without a shift behave exactly as before. -->
 <!-- Build patch: v115 / fix-17 (VIEW ANCHOR v2 — NOW COVERS THE CLASS-ONLY SCROLLERS AND THE WINDOW; CLAMP ECHOES NO LONGER MISTAKEN FOR USER SCROLLS) — Ops report (Jon, 28 Aug): still auto-scrolling to top every ~5s after fix-16. ROOT CAUSE, twofold: (1) fix-16 only recorded elements WITH an id — but the Attendance log scrolls inside .attendance-scroll, a CLASS-ONLY div that renderTable() destroys and recreates at position 0 inside #table-body-wrap on every repaint (innerHTML = …), so the main scroller was never anchored; same gap for .week-grid-wrap, class-only .modal bodies, and — on mobile, where .main > div becomes overflow:visible — the window itself (document.scrollingElement, no id). (2) LOGIC FLAW: the rebuild’s clamp-to-top fires a scroll event within fix-16’s 2.5s “recent user input” window, so the jump was RECORDED as the user’s position (wiping the memory), and the restore pass stood down for 2.5s after any user scroll — precisely when the 5s refreshes land. FIX — fix-16 module replaced wholesale: stable keys that survive element recreation (__doc__ for the window; #id; else nearest-id-ancestor|TAG|className|index, so the recreated .attendance-scroll resolves to the same key); recording accepts ALL scrolls except our own restores and scrolls within 150ms of a DOM mutation (the MutationObserver microtask runs BEFORE the clamp’s scroll event reaches the rendering step, so clamp echoes are reliably filtered with no input heuristics); restore always runs after mutations (rAF-coalesced + one 150ms follow-up for late layout) and puts back BOTH scrollTop and scrollLeft (the attendance table is 1280px wide), clamped to the new content size. Stick-to-bottom feeds (#chat-messages, #ai-messages) stay excluded; switchPage’s viewAnchorForget now also clears the window anchor and any class-only keys under the opened page, so an explicit page open still starts at the top. No schema change; no timer cadence changed; fix-14 untouched. node --check passes on all inline script blocks. Surgical diff: the fix-16 module block replaced by the fix-17 module, build stamp, this header; the two viewAnchorForget call sites from fix-16 are unchanged (same signature); zero function removals or renames elsewhere; nothing else touched. -->
 <!-- Build patch: v114 / fix-16 (GLOBAL VIEW ANCHOR — EVERY PAGE KEEPS ITS SCROLL POSITION ACROSS BACKGROUND REFRESHES) — Ops report (Jon, 28 Aug): "it keeps switching my view every ~5 seconds — I'm viewing the bottom of the page and it auto-scrolls up. Anchor the current view on ALL pages even though the system refreshes." ROOT CAUSE: the background timers (5s team-chat poll re-rendering Chat History, 30s auto-import + silentSync passes, 30s activity-banner refresh, realtime shift events calling loadShifts…) rebuild the visible page with innerHTML = …; during the rebuild the container's content momentarily shrinks, so the browser clamps its scrollTop to 0 — the jump to top. fix-14 protected Import Bookings only. FIX (one additive module, zero render-function changes): (1) RECORD — a capture-phase scroll listener stores scrollTop/scrollLeft per element id, but ONLY for user-initiated scrolls (recent wheel/key/touch input within 2.5s, or a held pointer for scrollbar drags), so the programmatic clamp-to-top a rebuild causes is never mistaken for the user's position. (2) RESTORE — a single MutationObserver on body (coalesced to one pass per animation frame) puts every visible id'd scroller back to its remembered position after any DOM rebuild, clamped to the new content height, flagged so restores are not re-recorded, and skipped while the user is mid-gesture so the anchor never fights live scrolling. (3) INTENTIONAL scroll-to-top still wins — switchPage (and the import-save direct-attendance fallback) now forget the target page's anchor so a fresh page open still starts at the top, and the stick-to-bottom feeds (team chat #chat-messages, AI chat #ai-messages) are excluded so they keep following new messages. No schema change; no timer cadence changed; fix-14's Import Bookings snapshot/restore untouched and simply reinforced by this. node --check passes on all inline script blocks. Surgical diff: one additive fix-16 module before the Start section, one forget line in switchPage, one forget line in the import-save attendance fallback, build stamp; zero function removals or renames; nothing else touched. -->
@@ -1528,7 +1529,7 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
         <div class="tt-pick-sel" id="tt-subject-selected" style="display:none;"></div>
       </div>
       <div id="tt-shift-wrap" class="form-row" style="display:none;margin:12px 0 0;">
-        <label>Which shift? <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(pick the shift that was cancelled)</span></label>
+        <label>Which shifts? <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(tick every shift being cancelled — today or upcoming)</span></label>
         <div class="tt-shift-controls">
           <input type="date" id="tt-shift-date" class="tt-pick-input" onchange="loadSopShiftOptions()" title="Show every shift on this date">
           <input type="text" id="tt-shift-filter" class="tt-pick-input" placeholder="Filter by name or outlet…" oninput="renderSopShiftOptions()" autocomplete="off" spellcheck="false">
@@ -28419,8 +28420,8 @@ async function submitAssignTask() {
 
   if (!title) { toast('Give the task a title', 'error'); return; }
   if (!assignee) { toast('Pick someone to assign it to', 'error'); return; }
-  if (sop && sopLinksShift(sop) && !_ttShift
-      && !confirm('This SOP is about a specific shift, but no shift is selected.\n\nAssign the task without a shift?')) return;
+  if (sop && sopLinksShift(sop) && !sopPickedShifts().length
+      && !confirm('This SOP is about specific shifts, but no shift is ticked.\n\nAssign the task without a shift?')) return;
 
   const id = `tt-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const now = new Date().toISOString();
@@ -28445,9 +28446,11 @@ async function submitAssignTask() {
     // Shift-specific SOP (e.g. PT cancelled a shift): keep a SNAPSHOT of the
     // shift on the task. Step 2 of such SOPs deletes the shift from the panel,
     // so the task has to carry its own copy of the outlet/date/time.
-    if (sopLinksShift(sop) && _ttShift) {
-      task.shiftId = String(_ttShift.id || '');
-      task.shift = Object.assign({}, _ttShift);
+    const picked = sopLinksShift(sop) ? sopPickedShifts() : [];
+    if (picked.length) {
+      task.shifts = picked.map(x => Object.assign({}, x));
+      task.shiftIds = picked.map(x => String(x.id || ''));
+      task.shiftId = task.shiftIds[0];
     }
   }
   teamTasks[id] = task;
@@ -28485,9 +28488,14 @@ function buildTaskAssignedMessage(task) {
     lines.push('');
     lines.push(`_Regarding:_ ${task.subject}${task.subjectPhone ? ' (' + task.subjectPhone + ')' : ''}`);
   }
-  if (task.shift) {
+  const taskShifts = taskShiftList(task);
+  if (taskShifts.length) {
     if (!task.subject) lines.push('');
-    lines.push(`_Shift:_ ${sopShiftLine(task.shift, true)}`);
+    if (taskShifts.length === 1) lines.push(`_Shift:_ ${sopShiftLine(taskShifts[0], true)}`);
+    else {
+      lines.push(`_Shifts (${taskShifts.length}):_`);
+      taskShifts.forEach(x => lines.push(`• ${sopShiftLine(x, true)}`));
+    }
   }
   if (Array.isArray(task.checklist) && task.checklist.length) {
     lines.push('');
@@ -29512,16 +29520,33 @@ function sopTaskTitle(sop, name, shift) {
   if (!sop) return '';
   const tpl = String(sop.titleTemplate || '').trim();
   const who = String(name || '').trim();
-  const sh = shift || null;
+  // One shift or several. With several, {outlet}/{date} list the distinct
+  // values and {time} only fills in when every shift has the same hours.
+  const list = (Array.isArray(shift) ? shift : (shift ? [shift] : [])).filter(Boolean)
+    .slice().sort((a, b) => String(a.shift_date || '').localeCompare(String(b.shift_date || ''))
+      || String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')));
+  const uniq = arr => arr.filter((v, i) => v && arr.indexOf(v) === i);
+  const sh = list.length === 1 ? list[0] : null;
+  const multi = list.length > 1 ? {
+    outlets: uniq(list.map(x => String(x.outlet || ''))),
+    dates: uniq(list.map(x => x.shift_date || '')),
+    times: uniq(list.map(x => fmtSopShiftTime(x))),
+  } : null;
+  if (tpl && !/\{(outlet|date|time)\}/i.test(tpl)) {
+    // Name-only template: exactly the original behaviour.
+    return who
+      ? tpl.replace(/\{name\}/gi, who)
+      : tpl.replace(/\{name\}/gi, '').replace(/\s{2,}/g, ' ').replace(/[\s\-–—:·,]+$/, '').trim();
+  }
   if (tpl) {
     // {name} is the documented placeholder; shift SOPs add {outlet} {date}
     // {time}. Any placeholder with nothing to fill it is dropped and dangling
     // joining words/punctuation tidied up.
     const vals = {
       name: who,
-      outlet: sh ? String(sh.outlet || '') : '',
-      date: sh ? fmtSopShiftDate(sh.shift_date) : '',
-      time: sh ? fmtSopShiftTime(sh) : '',
+      outlet: sh ? String(sh.outlet || '') : (multi ? multi.outlets.join(' & ') : ''),
+      date: sh ? fmtSopShiftDate(sh.shift_date) : (multi ? sopShiftDateSpan(multi.dates) : ''),
+      time: sh ? fmtSopShiftTime(sh) : (multi && multi.times.length === 1 ? multi.times[0] : ''),
     };
     let out = tpl;
     // An empty placeholder takes its joining word with it: "at {outlet}" → "".
@@ -29534,6 +29559,9 @@ function sopTaskTitle(sop, name, shift) {
   }
   let out = who ? `${sop.title} — ${who}` : String(sop.title || '');
   if (sh) { const when = [fmtSopShiftDate(sh.shift_date), fmtSopShiftTime(sh)].filter(Boolean).join(' '); out += ` · ${[sh.outlet, when].filter(Boolean).join(', ')}`; }
+  else if (multi) {
+    out += ` · ${multi.outlets.length === 1 ? multi.outlets[0] + ', ' : ''}${list.length} shifts, ${sopShiftDateSpan(multi.dates)}`;
+  }
   return out;
 }
 
@@ -29719,7 +29747,7 @@ function applySopTaskTitle() {
   const input = document.getElementById('tt-title');
   if (!input || !sop) return;
   if (ttTitleTouched && input.value.trim()) return;
-  input.value = sopTaskTitle(sop, currentAssignSubject(), (_ttShift && sopLinksShift(sop)) ? _ttShift : null);
+  input.value = sopTaskTitle(sop, currentAssignSubject(), sopLinksShift(sop) ? sopPickedShifts() : null);
 }
 
 function renderSopStepsPreview(sop) {
@@ -29742,21 +29770,33 @@ function startTaskFromSop(sopId) {
 }
 
 // ── Shift picker (SOPs flagged "ask which shift", e.g. PT cancelled a shift) ──
-// Two ways in: pick the member → their shifts from 14 days back onward; or pick
-// a date → every shift that day, narrowed by the name/outlet filter. Cancelled
-// shifts and open slots are listed too (flagged) because the cancellation may
-// already have been processed by the time the task is raised.
-let _ttShift = null;          // snapshot of the picked shift, or null
+// A tick-list: tick every shift the task covers. Two ways to find them — pick
+// the member → their shifts from TODAY onward; or pick a date (today or later)
+// → every shift that day, narrowed by the name/outlet filter. Ticks persist
+// while the date/member changes, so shifts on different days can be combined.
+// Past shifts are never offered: a cancellation is only for today or upcoming.
+let _ttShiftPicks = {};       // { [shiftId]: snapshot } — the ticked shifts
 let _ttShiftRows = [];        // rows fetched for the current query
 let _ttShiftShown = [];       // rows currently rendered (after the text filter)
 let _ttShiftQuerySeq = 0;     // drops stale responses when the query changes fast
-const SOP_SHIFT_LOOKBACK_DAYS = 14;
 
+function sopPickedShifts() {
+  return Object.values(_ttShiftPicks || {}).sort((a, b) =>
+    String(a.shift_date || '').localeCompare(String(b.shift_date || ''))
+    || String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')));
+}
 function fmtSopShiftDate(d) {
   if (!d) return '';
   const x = new Date(String(d).slice(0, 10) + 'T00:00:00');
   if (isNaN(x)) return String(d);
   return `${DAYS_SHORT[x.getDay()]} ${x.getDate()} ${MONTHS[x.getMonth()]}`;
+}
+// ["2026-09-10","2026-09-12"] → "Thu 10 Sep, Sat 12 Sep"; 4+ dates → "Thu 10 – Mon 14 Sep"
+function sopShiftDateSpan(dates) {
+  const ds = (dates || []).filter(Boolean).slice().sort();
+  if (!ds.length) return '';
+  if (ds.length <= 3) return ds.map(fmtSopShiftDate).join(', ');
+  return `${fmtSopShiftDate(ds[0])} – ${fmtSopShiftDate(ds[ds.length - 1])}`;
 }
 function fmtSopShiftTime(s) {
   const a = s && s.scheduled_start ? String(s.scheduled_start).slice(0, 5) : '';
@@ -29783,11 +29823,16 @@ function sopShiftSnapshot(s) {
     scheduled_end: s.scheduled_end || '', cancelled: !!s.cancelled
   };
 }
+// Shifts on a task: v116b stores shifts[], v116 stored a single shift.
+function taskShiftList(t) {
+  if (!t) return [];
+  if (Array.isArray(t.shifts) && t.shifts.length) return t.shifts.filter(Boolean);
+  return t.shift ? [t.shift] : [];
+}
 
 function resetSopShiftPicker() {
-  _ttShift = null; _ttShiftRows = []; _ttShiftShown = []; _ttShiftQuerySeq++;
-  const ids = ['tt-shift-list', 'tt-shift-note', 'tt-shift-selected'];
-  ids.forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+  _ttShiftPicks = {}; _ttShiftRows = []; _ttShiftShown = []; _ttShiftQuerySeq++;
+  ['tt-shift-list', 'tt-shift-note', 'tt-shift-selected'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
   const sel = document.getElementById('tt-shift-selected'); if (sel) sel.style.display = 'none';
   const f = document.getElementById('tt-shift-filter'); if (f) f.value = '';
   const d = document.getElementById('tt-shift-date'); if (d) d.value = '';
@@ -29801,18 +29846,19 @@ function syncSopShiftPicker(sop) {
   if (!sop || !sopLinksShift(sop)) { resetSopShiftPicker(); return; }
   const wasHidden = wrap.style.display === 'none';
   wrap.style.display = 'block';
-  if (wasHidden && !_ttShift) {
+  const d = document.getElementById('tt-shift-date');
+  if (d) d.min = formatDate(new Date());
+  if (wasHidden) {
     // No member yet → start on today's shifts; a member pick switches to theirs.
-    const d = document.getElementById('tt-shift-date');
     if (d && !d.value && !currentAssignSubject()) d.value = formatDate(new Date());
     loadSopShiftOptions();
   }
 }
 
-// A member was picked/cleared: show THEIR shifts (unless a shift is already chosen).
+// A member was picked/cleared: show THEIR upcoming shifts. Ticks are kept.
 function refreshSopShiftsForSubject() {
   const wrap = document.getElementById('tt-shift-wrap');
-  if (!wrap || wrap.style.display === 'none' || _ttShift) return;
+  if (!wrap || wrap.style.display === 'none') return;
   const d = document.getElementById('tt-shift-date');
   if (d && currentAssignSubject()) d.value = '';
   else if (d && !d.value) d.value = formatDate(new Date());
@@ -29823,7 +29869,15 @@ async function loadSopShiftOptions() {
   const list = document.getElementById('tt-shift-list');
   const note = document.getElementById('tt-shift-note');
   if (!list) return;
-  const date = String(document.getElementById('tt-shift-date')?.value || '').trim();
+  const today = formatDate(new Date());
+  const dEl = document.getElementById('tt-shift-date');
+  let date = String(dEl?.value || '').trim();
+  if (date && date < today) {
+    // Past dates aren't cancellable — snap back to today and say why.
+    if (dEl) dEl.value = today;
+    date = today;
+    toast('Cancellations are only for today or upcoming shifts', 'error');
+  }
   const who = currentAssignSubject();
   const seq = ++_ttShiftQuerySeq;
   if (!supabaseClient) { list.innerHTML = '<div class="tt-pick-empty">Not connected — can\'t load shifts.</div>'; return; }
@@ -29834,21 +29888,16 @@ async function loadSopShiftOptions() {
     return;
   }
   list.innerHTML = '<div class="tt-pick-empty">Loading shifts…</div>';
-  let from = '';
   try {
     let q = supabaseClient.from('shifts').select('*');
-    if (date) {
-      q = q.eq('shift_date', date);
-    } else {
-      const start = new Date(); start.setDate(start.getDate() - SOP_SHIFT_LOOKBACK_DAYS);
-      from = formatDate(start);
-      q = q.ilike('worker_name', who.replace(/[%_\\]/g, m => '\\' + m)).gte('shift_date', from);
-    }
+    if (date) q = q.eq('shift_date', date);
+    else q = q.ilike('worker_name', who.replace(/[%_\\]/g, m => '\\' + m)).gte('shift_date', today);
     q = q.order('shift_date', { ascending: true }).order('scheduled_start', { ascending: true }).limit(300);
     const { data, error } = await q;
     if (seq !== _ttShiftQuerySeq) return;          // a newer query has taken over
     if (error) throw error;
-    _ttShiftRows = scopeShiftsToCountry(data || []);
+    // Belt and braces: never list anything before today.
+    _ttShiftRows = scopeShiftsToCountry(data || []).filter(s => String(s.shift_date || '') >= today);
   } catch (e) {
     if (seq !== _ttShiftQuerySeq) return;
     console.warn('[SOP shift picker] load failed:', e);
@@ -29858,8 +29907,8 @@ async function loadSopShiftOptions() {
   }
   if (note) {
     note.textContent = date
-      ? `All shifts on ${fmtSopShiftDate(date)} — type below to narrow down, or clear the date to see ${who ? who + '’s' : 'a member’s'} shifts.`
-      : `${who}’s shifts from ${fmtSopShiftDate(from)} onward — pick a date to see everyone’s shifts that day.`;
+      ? `All shifts on ${fmtSopShiftDate(date)} — tick every one being cancelled. Change the date to add shifts from another day, or clear it to see ${who ? who + '’s' : 'a member’s'} upcoming shifts.`
+      : `${who}’s shifts from today onward — tick every one being cancelled. Pick a date to see everyone’s shifts that day.`;
   }
   renderSopShiftOptions();
 }
@@ -29871,17 +29920,18 @@ function renderSopShiftOptions() {
   _ttShiftShown = _ttShiftRows.filter(s => !q ||
     [s.worker_name, s.outlet, s.sr_worker].some(v => String(v || '').toLowerCase().includes(q)));
   if (!_ttShiftShown.length) {
-    list.innerHTML = `<div class="tt-pick-empty">${_ttShiftRows.length ? 'No shift matches that filter.' : 'No shifts found.'}</div>`;
+    list.innerHTML = `<div class="tt-pick-empty">${_ttShiftRows.length ? 'No shift matches that filter.' : 'No shifts found for today or later.'}</div>`;
     return;
   }
   const today = formatDate(new Date());
   list.innerHTML = _ttShiftShown.map((s, i) => {
     const w = sopShiftWorker(s);
-    const on = _ttShift && String(_ttShift.id) === String(s.id);
+    const on = !!_ttShiftPicks[String(s.id)];
     const tags = (s.cancelled ? '<span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : '')
       + (!w ? '<span class="tt-shift-tag">open slot</span>' : '')
       + (s.shift_date === today ? '<span class="tt-shift-tag tt-shift-tag-today">today</span>' : '');
-    return `<div class="tt-shift-row ${on ? 'on' : ''} ${s.cancelled ? 'is-x' : ''}" onclick="pickSopShift(${i})">
+    return `<div class="tt-shift-row ${on ? 'on' : ''} ${s.cancelled ? 'is-x' : ''}" onclick="toggleSopShift(${i})" title="${on ? 'Untick' : 'Tick'} this shift">
+      <span class="tt-step-box tt-shift-box">${on ? '✓' : ''}</span>
       <span class="tt-shift-when">${escapeHtml(fmtSopShiftDate(s.shift_date))}<br><span>${escapeHtml(fmtSopShiftTime(s) || '—')}</span></span>
       <span class="tt-shift-what"><span class="tt-shift-outlet">${escapeHtml(s.outlet || '—')}</span>
         <span class="tt-shift-worker">${w ? escapeHtml(w) : '<em>no worker</em>'}${tags}</span></span>
@@ -29889,64 +29939,77 @@ function renderSopShiftOptions() {
   }).join('');
 }
 
-function pickSopShift(i) {
+function toggleSopShift(i) {
   const s = _ttShiftShown[i];
   if (!s) return;
-  _ttShift = sopShiftSnapshot(s);
-  // Fill in who it's about from the shift when the agent hasn't picked anyone.
-  const w = sopShiftWorker(s);
-  if (w && !currentAssignSubject()) {
-    const same = (allWorkers || []).filter(x => String(x.name || '').trim().toLowerCase() === w.toLowerCase());
-    // Only attach a phone when the name is unambiguous — never guess between two same-named members.
-    const row = same.length === 1 ? same[0] : null;
-    _ttSubject = { name: row ? String(row.name).trim() : w, phone: row ? workerRowPhone(row) : '', id: row ? (row.id || '') : '' };
-    const inp = document.getElementById('tt-subject-search');
-    if (inp) inp.value = subjectLabel(_ttSubject.name, _ttSubject.phone);
-    const clr = document.getElementById('tt-subject-clear'); if (clr) clr.style.display = 'flex';
-    const selBox = document.getElementById('tt-subject-selected');
-    if (selBox) {
-      selBox.style.display = 'flex';
-      selBox.innerHTML = `<span class="tt-pick-tick">✓</span><span>Task will be recorded against <strong>${escapeHtml(_ttSubject.name)}</strong>${_ttSubject.phone ? ' · <span class="tt-pick-phone">' + escapeHtml(_ttSubject.phone) + '</span>' : (same.length > 1 ? ' <em>(more than one member has this name — search above to pick the right one)</em>' : ' <em>(no phone on file)</em>')}</span>`;
+  const k = String(s.id);
+  if (_ttShiftPicks[k]) { delete _ttShiftPicks[k]; }
+  else {
+    _ttShiftPicks[k] = sopShiftSnapshot(s);
+    // Fill in who it's about from the shift when the agent hasn't picked anyone.
+    const w = sopShiftWorker(s);
+    if (w && !currentAssignSubject()) {
+      const same = (allWorkers || []).filter(x => String(x.name || '').trim().toLowerCase() === w.toLowerCase());
+      // Only attach a phone when the name is unambiguous — never guess between two same-named members.
+      const row = same.length === 1 ? same[0] : null;
+      _ttSubject = { name: row ? String(row.name).trim() : w, phone: row ? workerRowPhone(row) : '', id: row ? (row.id || '') : '' };
+      const inp = document.getElementById('tt-subject-search');
+      if (inp) inp.value = subjectLabel(_ttSubject.name, _ttSubject.phone);
+      const clr = document.getElementById('tt-subject-clear'); if (clr) clr.style.display = 'flex';
+      const selBox = document.getElementById('tt-subject-selected');
+      if (selBox) {
+        selBox.style.display = 'flex';
+        selBox.innerHTML = `<span class="tt-pick-tick">✓</span><span>Task will be recorded against <strong>${escapeHtml(_ttSubject.name)}</strong>${_ttSubject.phone ? ' · <span class="tt-pick-phone">' + escapeHtml(_ttSubject.phone) + '</span>' : (same.length > 1 ? ' <em>(more than one member has this name — search above to pick the right one)</em>' : ' <em>(no phone on file)</em>')}</span>`;
+      }
     }
   }
+  renderSopShiftOptions();
   renderSopShiftSelected();
   applySopTaskTitle();
 }
 
-function clearSopShiftPick() {
-  _ttShift = null;
+function removeSopShiftPick(id) {
+  delete _ttShiftPicks[String(id)];
+  renderSopShiftOptions();
+  renderSopShiftSelected();
+  applySopTaskTitle();
+}
+function clearSopShiftPicks() {
+  _ttShiftPicks = {};
+  renderSopShiftOptions();
   renderSopShiftSelected();
   applySopTaskTitle();
 }
 
 function renderSopShiftSelected() {
   const box = document.getElementById('tt-shift-selected');
-  const list = document.getElementById('tt-shift-list');
-  const controls = document.querySelector('#tt-shift-wrap .tt-shift-controls');
-  const note = document.getElementById('tt-shift-note');
-  const picked = !!_ttShift;
-  // Collapse the list once a shift is chosen so the modal stays short.
-  if (list) list.style.display = picked ? 'none' : '';
-  if (controls) controls.style.display = picked ? 'none' : '';
-  if (note) note.style.display = picked ? 'none' : '';
   if (!box) return;
-  if (!picked) { box.style.display = 'none'; box.innerHTML = ''; renderSopShiftOptions(); return; }
-  box.style.display = 'flex';
-  box.innerHTML = `<span class="tt-pick-tick">✓</span>
-    <span style="flex:1;min-width:0;">Shift: <strong>${escapeHtml(sopShiftLine(_ttShift, true))}</strong>${_ttShift.cancelled ? ' <span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : ''}</span>
-    <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 8px;" onclick="clearSopShiftPick()">Change</button>`;
+  const picked = sopPickedShifts();
+  if (!picked.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML = `<div class="tt-shift-sel-head"><span><span class="tt-pick-tick">✓</span> ${picked.length} shift${picked.length === 1 ? '' : 's'} selected</span>
+      ${picked.length > 1 ? '<button type="button" class="btn btn-ghost btn-sm" style="padding:2px 8px;" onclick="clearSopShiftPicks()">Clear all</button>' : ''}</div>`
+    + picked.map(x => `<div class="tt-shift-sel-row">
+      <span style="flex:1;min-width:0;"><strong>${escapeHtml(sopShiftLine(x, true))}</strong>${x.cancelled ? ' <span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : ''}</span>
+      <button type="button" class="tt-shift-x" onclick="removeSopShiftPick('${escapeAttr(String(x.id))}')" title="Remove this shift">✕</button>
+    </div>`).join('');
 }
 
-// Shift strip on the task card. Reads the snapshot, so it still shows after
-// the shift itself has been deleted from the panel.
+// Shift strip on the task card. Reads the snapshots, so it still shows after
+// the shifts themselves have been deleted from the panel.
 function taskShiftHtml(t) {
-  const s = t && t.shift;
-  if (!s) return '';
-  const live = t.shiftId ? findShiftAnywhere(t.shiftId) : null;
+  const list = taskShiftList(t);
+  if (!list.length) return '';
+  const rows = list.map(s => {
+    const live = s.id ? findShiftAnywhere(s.id) : null;
+    return `<div class="tt-shift-strip-row">
+      <span class="tt-shift-strip-txt">${escapeHtml(sopShiftLine(s, true))}${(live && live.cancelled) || s.cancelled ? ' <span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : ''}</span>
+      ${s.shift_date ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px;" onclick="event.stopPropagation();jumpToShiftFromTeamTask('${escapeAttr(String(s.id || ''))}','${escapeAttr(String(s.shift_date))}')" title="Open this day in Attendance">View day</button>` : ''}
+    </div>`;
+  }).join('');
   return `<div class="tt-shift-strip" onclick="event.stopPropagation();">
-    <span class="tt-shift-strip-ico">\u{1F4C5}</span>
-    <span class="tt-shift-strip-txt"><span class="tt-shift-strip-lbl">Shift</span>${escapeHtml(sopShiftLine(s, true))}${(live && live.cancelled) || s.cancelled ? ' <span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : ''}</span>
-    ${s.shift_date ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px;" onclick="event.stopPropagation();jumpToShiftFromTeamTask('${escapeAttr(String(t.shiftId || ''))}','${escapeAttr(String(s.shift_date))}')" title="Open this day in Attendance">View day</button>` : ''}
+    <div class="tt-shift-strip-lbl">\u{1F4C5} ${list.length === 1 ? 'Shift' : list.length + ' shifts'}</div>
+    ${rows}
   </div>`;
 }
 function jumpToShiftFromTeamTask(shiftId, dateStr) {
@@ -30556,12 +30619,22 @@ function mergeTaskChecklists(a, b) {
   border-radius:8px; background:var(--bg3); color:var(--text3); vertical-align:middle; font-family:var(--font); }
 .tt-shift-tag-x { background:rgba(232,64,64,0.15); color:var(--red); }
 .tt-shift-tag-today { background:var(--accent-dim); color:var(--accent); }
-.tt-shift-strip { display:flex; align-items:center; gap:8px; margin:9px 0 2px; padding:7px 10px;
-  border:1px solid var(--border); border-radius:var(--radius); background:var(--bg3); font-size:12px; color:var(--text); }
-.tt-shift-strip-ico { flex-shrink:0; }
-.tt-shift-strip-txt { flex:1; min-width:0; line-height:1.45; }
+.tt-shift-strip { margin:9px 0 2px; padding:7px 10px; border:1px solid var(--border);
+  border-radius:var(--radius); background:var(--bg3); font-size:12px; color:var(--text); }
 .tt-shift-strip-lbl { font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:0.05em;
-  color:var(--text3); margin-right:7px; }
+  color:var(--text3); margin-bottom:4px; }
+.tt-shift-strip-row { display:flex; align-items:center; gap:8px; padding:3px 0; }
+.tt-shift-strip-row + .tt-shift-strip-row { border-top:1px solid var(--border); }
+.tt-shift-strip-txt { flex:1; min-width:0; line-height:1.45; }
+.tt-shift-box { margin-top:2px; }
+.tt-shift-row.on .tt-shift-box { background:var(--green); border-color:var(--green); color:#06210f; }
+#tt-shift-selected { margin-top:8px; }
+.tt-shift-sel-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  font-weight:600; color:var(--text); margin-bottom:4px; }
+.tt-shift-sel-row { display:flex; align-items:center; gap:8px; padding:4px 0; border-top:1px solid rgba(40,180,99,0.22); }
+.tt-shift-x { flex-shrink:0; width:20px; height:20px; border-radius:50%; border:none; background:var(--bg3);
+  color:var(--text3); cursor:pointer; font-size:11px; }
+.tt-shift-x:hover { background:var(--border2); color:var(--text); }
 
 /* ── SOP-backed tasks: step tick-lists ── */
 .tt-prog { flex-shrink:0; font-family:var(--mono); font-size:10px; font-weight:700; padding:1px 6px;
