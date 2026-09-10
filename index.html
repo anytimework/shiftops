@@ -1,5 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
+<!-- Build patch: v117 (PERMANENT BAN ON A WORKER — PROFILE OR AI, LIFTABLE) — Ops request (Jon, 10 Sep): "add permanent ban feature on a worker. Can be tagged in the worker profile or said to the AI agent; we can also remove the ban." Stored team-wide in profileMeta.workers[key].perm_ban = {banned, reason, by, at} (app_settings 'profile_meta', merge-safe: the newest ban/unban stamp wins in mergeProfileMeta, so a lift on one device isn't undone by another's stale copy). No schema change. UI: Workers card + worker profile (View) show a ⛔ Permanently banned banner with reason/by/date and a Ban permanently / Lift ban button; the ban modal requires a reason, lists the worker's upcoming shifts (not cancelled automatically) and by default raises a high-priority task carrying those shifts so they can be cancelled in one go (v116c batch cancel). AI: new actions banWorkerPermanently / liftPermanentBan, bans listed in the AI's ASSIGNMENT RESTRICTIONS + worker list. ENFORCEMENT via two one-line hooks: assignmentRestriction() returns "X is permanently banned" for every outlet (Add Shift block, AI createShift/forceCreateShift/batchCreateSlots, slot offers), and isWorkerSuspended() treats a banned worker as blocked (reminders, replacement picker, offer lists). Attendance status badge shows ⛔ Banned. -->
+<!-- Build patch: v116c (CANCEL THE TASK'S SHIFTS FROM THE TASK — ONE PENALTY, ONE STRIKE PER WORKER PER BATCH) — Ops request (Jon, 10 Sep): "can you actually cancel the shift via task when we select the shift? … when we cancel 2 shifts at one time for the same worker with the $15 penalty, it only applies $15 instead of $30." A task carrying shifts now has a "🚫 Cancel shifts" button. It re-reads the shifts from the DB (skips any already deleted / already Available), then opens the STANDARD cancel modal in batch mode — same cancellation types, custom-penalty box, Malaysia notice and pre-cancellation checklist gate — listing every shift. On confirm each shift goes through the same writes as confirmCancel (worker types: slot → Available, reminder reset, replacement-needed, completed-task log, paid-shift alert; outlet type: hard delete + resurrection-proof ignore). PER WORKER, the batch counts ONCE: one cancellation_log row (so one strike toward the 2-in-30-days suspension — confirmed with Jon), one suspension check, one penalty prompt/charge (e.g. $15, not $30), and one checklist follow-up task per batch. The task records which shifts were cancelled (by whom, type, penalty) and ticks its "delete/cancel … ops panel" step. Code touch on existing functions is limited to: one early-return hook in confirmCancel (after the checklist gate), closeCancelModal also resetting batch mode, and findShiftAnywhere also resolving the batch's shifts. The single-shift cancel flow is otherwise unchanged. -->
 <!-- Build patch: v116b (SOP SHIFT PICKER — MULTI-SELECT, TODAY + UPCOMING ONLY) — Ops feedback (Jon, 10 Sep): "it doesn't allow me to select multiple shifts; cancellation is only for current day and future shifts, not past shifts." (1) The picker is now a tick-list: tick as many shifts as needed, across dates/searches (selections persist while you change the date or member); each can be removed from the summary. Task stores shifts:[snapshots] + shiftIds; card + WhatsApp list every shift; title summarises ("3 shifts, Thu 10 – Sat 12 Sep"). (2) Past shifts are never offered: member view lists today onward, the date box has min=today and refuses earlier dates. Tasks saved by v116 with a single `shift` still render. -->
 <!-- Build patch: v116 (SOP → TASK: PICK THE SHIFT) — Ops request (Jon, 10 Sep): "for PT cancelling a shift, we can select the shift that was cancelled." SOPs gain an opt-in "Ask which shift" flag (linksShift). Existing SOPs whose title mentions cancel + shift (e.g. "Cancellation of Shift by PT") get it automatically until someone edits the flag. When such an SOP is used as a task, Assign a task shows a shift picker: pick a member → their shifts from 14 days ago onward; or pick a date → every shift that day, filterable by name/outlet (cancelled + open slots shown and flagged). Picking a shift fills in the member if blank. The task stores a SNAPSHOT of the shift (id, worker, outlet, date, times) so it survives step 2 deleting the shift from the ops panel, shows it on the card with a View shift jump, includes it in the WhatsApp to the assignee, and title templates accept {outlet} {date} {time}. Additive only: no schema change, tasks/SOPs without a shift behave exactly as before. -->
 <!-- Build patch: v115 / fix-17 (VIEW ANCHOR v2 — NOW COVERS THE CLASS-ONLY SCROLLERS AND THE WINDOW; CLAMP ECHOES NO LONGER MISTAKEN FOR USER SCROLLS) — Ops report (Jon, 28 Aug): still auto-scrolling to top every ~5s after fix-16. ROOT CAUSE, twofold: (1) fix-16 only recorded elements WITH an id — but the Attendance log scrolls inside .attendance-scroll, a CLASS-ONLY div that renderTable() destroys and recreates at position 0 inside #table-body-wrap on every repaint (innerHTML = …), so the main scroller was never anchored; same gap for .week-grid-wrap, class-only .modal bodies, and — on mobile, where .main > div becomes overflow:visible — the window itself (document.scrollingElement, no id). (2) LOGIC FLAW: the rebuild’s clamp-to-top fires a scroll event within fix-16’s 2.5s “recent user input” window, so the jump was RECORDED as the user’s position (wiping the memory), and the restore pass stood down for 2.5s after any user scroll — precisely when the 5s refreshes land. FIX — fix-16 module replaced wholesale: stable keys that survive element recreation (__doc__ for the window; #id; else nearest-id-ancestor|TAG|className|index, so the recreated .attendance-scroll resolves to the same key); recording accepts ALL scrolls except our own restores and scrolls within 150ms of a DOM mutation (the MutationObserver microtask runs BEFORE the clamp’s scroll event reaches the rendering step, so clamp echoes are reliably filtered with no input heuristics); restore always runs after mutations (rAF-coalesced + one 150ms follow-up for late layout) and puts back BOTH scrollTop and scrollLeft (the attendance table is 1280px wide), clamped to the new content size. Stick-to-bottom feeds (#chat-messages, #ai-messages) stay excluded; switchPage’s viewAnchorForget now also clears the window anchor and any class-only keys under the opened page, so an explicit page open still starts at the top. No schema change; no timer cadence changed; fix-14 untouched. node --check passes on all inline script blocks. Surgical diff: the fix-16 module block replaced by the fix-17 module, build stamp, this header; the two viewAnchorForget call sites from fix-16 are unchanged (same signature); zero function removals or renames elsewhere; nothing else touched. -->
@@ -1738,6 +1740,26 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
   </div>
 </div>
 
+<!-- v117 PERMANENT BAN MODAL -->
+<div class="modal-overlay" id="perm-ban-modal">
+  <div class="modal" style="max-width:460px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <h3 style="margin:0;">⛔ Permanently ban <span id="perm-ban-who"></span></h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('perm-ban-modal')">✕</button>
+    </div>
+    <div class="alert alert-red" style="margin-bottom:12px;"><span class="alert-icon">⛔</span><div>They can't be assigned to <strong>any outlet</strong>, won't be offered slots and won't get shift reminders. The whole team sees the ban. You can lift it later from the worker's card or profile.</div></div>
+    <div class="form-row"><label>Reason</label><textarea id="perm-ban-reason" placeholder="e.g. No-show twice, abusive to outlet staff"></textarea></div>
+    <div id="perm-ban-upcoming" class="perm-ban-upcoming"></div>
+    <div class="form-row" id="perm-ban-task-row" style="margin-top:10px;">
+      <label class="sop-link-toggle"><input type="checkbox" id="perm-ban-task" checked> <span>Raise a task to cancel these shifts together</span></label>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('perm-ban-modal')">Cancel</button>
+      <button class="btn btn-danger btn-sm" id="perm-ban-save" onclick="submitPermBan()">⛔ Ban permanently</button>
+    </div>
+  </div>
+</div>
+
 <!-- TASKS PANEL MODAL -->
 <div class="modal-overlay" id="tasks-modal">
   <div class="modal modal-wide">
@@ -2881,6 +2903,11 @@ function mergeProfileMeta(primary, secondary) {
           });
           merged.passed_requirements = passed;
         }
+        // v117 PERMANENT BAN: the newest ban/lift stamp wins, whichever side it's on.
+        {
+          const pb = pe.perm_ban, sb = se.perm_ban;
+          if (pb || sb) merged.perm_ban = (!sb || (pb && String(pb.at || '') >= String(sb.at || ''))) ? pb : sb;
+        }
         // UNAVAILABLE ranges: [{from,to,note?}]. Union by from|to key so neither
         // device loses an entry the other added. (A removal on one device can be
         // re-introduced by the other's stale copy — acceptable: ops just re-removes;
@@ -3674,12 +3701,175 @@ function workerPhoneLine(workerName) {
   const phone = workerPhone(workerName);
   return phone ? `<div class="sub-text">☎ ${escapeHtml(phone)}</div>` : '';
 }
+// ════════════════════════════════════════════════════════════════════════════
+// v117 — PERMANENT BAN (team-wide, liftable)
+// ════════════════════════════════════════════════════════════════════════════
+// profileMeta.workers[key].perm_ban = { banned, reason, by, at, liftReason? }
+function workerPermBan(name) {
+  const n = String(name || '').trim();
+  if (!n || n.toLowerCase() === 'available') return null;
+  const pb = (profileMeta && profileMeta.workers && profileMeta.workers[normProfileKey(n)] || {}).perm_ban;
+  return (pb && pb.banned) ? pb : null;
+}
+function isWorkerPermBanned(name) { return !!workerPermBan(name); }
+
+function permBanWhen(iso) {
+  try { const d = new Date(iso); return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`; } catch (e) { return ''; }
+}
+// Red banner used on the worker card and in the worker profile.
+function permBanBannerHtml(name, compact) {
+  const pb = workerPermBan(name);
+  if (!pb) return '';
+  const nA = escapeAttr(name);
+  return `<div class="perm-ban-banner" onclick="event.stopPropagation();">
+    <div class="perm-ban-head">⛔ Permanently banned</div>
+    ${pb.reason ? `<div class="perm-ban-reason">${escapeHtml(pb.reason)}</div>` : ''}
+    <div class="perm-ban-meta">by ${escapeHtml(pb.by || '—')}${pb.at ? ' · ' + permBanWhen(pb.at) : ''}</div>
+    ${compact ? '' : `<button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="event.stopPropagation();liftPermBanPrompt('${nA}')">Lift permanent ban</button>`}
+  </div>`;
+}
+
+// Upcoming (today onward), not-cancelled shifts still booked to this worker.
+async function permBanUpcomingShifts(name) {
+  if (!supabaseClient || !name) return [];
+  try {
+    const { data, error } = await supabaseClient.from('shifts').select('*')
+      .ilike('worker_name', String(name).replace(/[%_\\]/g, m => '\\' + m))
+      .gte('shift_date', formatDate(new Date()))
+      .order('shift_date', { ascending: true }).order('scheduled_start', { ascending: true }).limit(200);
+    if (error) throw error;
+    return (data || []).filter(s => !s.cancelled);
+  } catch (e) { console.warn('[perm ban] upcoming shifts lookup failed:', e); return []; }
+}
+
+// Shared by the Workers UI and the AI. Returns { ok, message, worker, upcoming, task }.
+async function setWorkerPermBan(name, banned, reason, opts) {
+  const o = opts || {};
+  const w = (allWorkers || []).find(x => normProfileKey(x.name) === normProfileKey(name));
+  if (!w) return { ok: false, message: `Worker "${name}" not found.` };
+  const wk = normProfileKey(w.name);
+  const existing = profileMeta.workers[wk] || {};
+  const cur = existing.perm_ban && existing.perm_ban.banned ? existing.perm_ban : null;
+  if (banned && cur) return { ok: false, info: true, worker: w, message: `${w.name} is already permanently banned.` };
+  if (!banned && !cur) return { ok: false, info: true, worker: w, message: `${w.name} is not permanently banned.` };
+  const me = currentInternalUser || (o.via === 'ai' ? 'AI assistant' : '—');
+  const at = new Date().toISOString();
+  const rec = banned
+    ? { banned: true, reason: String(reason || '').trim(), by: me, at }
+    : Object.assign({}, cur, { banned: false, liftedBy: me, liftReason: String(reason || '').trim(), at });
+  profileMeta.workers[wk] = Object.assign({}, existing, { perm_ban: rec });
+  await saveProfileMeta();
+  try {
+    await logActivity(banned ? 'Worker permanently banned' : 'Permanent ban lifted',
+      banned ? `${w.name} permanently banned by ${me}${rec.reason ? ' — ' + rec.reason : ''}`
+             : `Permanent ban on ${w.name} lifted by ${me}${rec.liftReason ? ' — ' + rec.liftReason : ''}`,
+      'worker', w.id || w.name, { worker_name: w.name });
+  } catch (e) {}
+  let upcoming = [], task = null;
+  if (banned) {
+    upcoming = await permBanUpcomingShifts(w.name);
+    if (upcoming.length && o.raiseTask !== false) {
+      try { task = await raisePermBanShiftTask(w, upcoming, rec.reason); } catch (e) { console.warn('[perm ban] task failed:', e); }
+    }
+  }
+  try { if (typeof loadWorkerCards === 'function' && document.getElementById('worker-cards')) await loadWorkerCards(); } catch (e) {}
+  try { if (typeof renderTable === 'function') renderTable(); } catch (e) {}
+  return { ok: true, worker: w, upcoming, task, message: banned ? `${w.name} is now permanently banned.` : `Permanent ban lifted for ${w.name}.` };
+}
+
+// A high-priority task carrying the banned worker's upcoming shifts, so they can
+// be cancelled together from the task (v116c batch cancel). Uses a "ban" SOP's
+// steps when the library has one.
+async function raisePermBanShiftTask(w, shifts, reason) {
+  const me = currentInternalUser || (INTERNAL_USERS || [])[0] || '—';
+  const sop = (typeof sopList === 'function' ? sopList() : []).find(d => /\bban/i.test(d.title || '')) || null;
+  const id = `tt-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const snaps = shifts.map(sopShiftSnapshot);
+  const task = {
+    id, title: `Cancel ${w.name}'s ${snaps.length} upcoming shift${snaps.length === 1 ? '' : 's'} — permanently banned`,
+    detail: `${w.name} has been permanently banned${reason ? ' (' + reason + ')' : ''}. These shifts are still booked to them — use "Cancel shifts" on this task to cancel them together, then re-fill the slots.`,
+    assignee: me, assignedBy: me, assignedAt: new Date().toISOString(),
+    due: snaps[0] ? snaps[0].shift_date : '', priority: 'high',
+    completed: false, completedAt: '', completedBy: '', notifiedAt: '',
+    source: 'perm_ban', subject: w.name, subjectPhone: workerRowPhone(w), subjectId: w.id || '',
+    shifts: snaps, shiftIds: snaps.map(x => x.id), shiftId: snaps[0] ? snaps[0].id : '',
+    transferHistory: []
+  };
+  if (sop && Array.isArray(sop.steps) && sop.steps.length) {
+    task.sopId = sop.id; task.sopTitle = sop.title || '';
+    task.checklist = sop.steps.map(txt => ({ text: String(txt), done: false, doneBy: '', doneAt: '' }));
+  }
+  teamTasks[id] = task;
+  await saveTeamTasks();
+  try { logActivity('Task assigned', `${task.title} → ${me} (raised by permanent ban)`, 'team_task', id); } catch (e) {}
+  try {
+    const phone = TEAM_WHATSAPP[me];
+    if (phone && await sendPeriskopeMessage(phone, buildTaskAssignedMessage(task))) { task.notifiedAt = new Date().toISOString(); await saveTeamTasks(); }
+  } catch (e) {}
+  try { renderTeamTasksPage(); updateTeamTasksNavBadge(); } catch (e) {}
+  return task;
+}
+
+// ── Ban modal (Workers page / profile) ──
+let _permBanName = '';
+async function openPermBanModal(name) {
+  _permBanName = name;
+  const m = document.getElementById('perm-ban-modal');
+  if (!m) return;
+  document.getElementById('perm-ban-who').textContent = name;
+  document.getElementById('perm-ban-reason').value = '';
+  document.getElementById('perm-ban-task').checked = true;
+  const box = document.getElementById('perm-ban-upcoming');
+  box.innerHTML = '<div class="sub-text">Checking upcoming shifts…</div>';
+  m.classList.add('open');
+  setTimeout(() => document.getElementById('perm-ban-reason')?.focus(), 50);
+  const up = await permBanUpcomingShifts(name);
+  if (_permBanName !== name) return;
+  const taskRow = document.getElementById('perm-ban-task-row');
+  if (!up.length) {
+    box.innerHTML = '<div class="sub-text">No upcoming shifts booked — nothing to cancel.</div>';
+    if (taskRow) taskRow.style.display = 'none';
+    return;
+  }
+  if (taskRow) taskRow.style.display = '';
+  box.innerHTML = `<div class="perm-ban-up-head">${up.length} upcoming shift${up.length === 1 ? '' : 's'} still booked — the ban does NOT cancel ${up.length === 1 ? 'it' : 'them'}</div>`
+    + up.slice(0, 8).map(x => `<div class="sop-bc-row">${escapeHtml(sopShiftLine(x, false))}</div>`).join('')
+    + (up.length > 8 ? `<div class="sub-text" style="margin-top:4px;">+${up.length - 8} more</div>` : '');
+}
+async function submitPermBan() {
+  const name = _permBanName;
+  const reason = String(document.getElementById('perm-ban-reason')?.value || '').trim();
+  if (!name) return;
+  if (!reason) { toast('Add the reason for the ban', 'error'); document.getElementById('perm-ban-reason')?.focus(); return; }
+  const raiseTask = !!document.getElementById('perm-ban-task')?.checked;
+  const btn = document.getElementById('perm-ban-save');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Banning…'; }
+  const res = await setWorkerPermBan(name, true, reason, { raiseTask });
+  if (btn) { btn.disabled = false; btn.textContent = '⛔ Ban permanently'; }
+  if (!res.ok) { toast(res.message, res.info ? undefined : 'error'); return; }
+  closeModal('perm-ban-modal');
+  _permBanName = '';
+  toast(`⛔ ${res.worker.name} permanently banned${res.task ? ` — task raised to cancel ${res.upcoming.length} upcoming shift${res.upcoming.length === 1 ? '' : 's'}` : (res.upcoming.length ? ` — ${res.upcoming.length} upcoming shift${res.upcoming.length === 1 ? '' : 's'} still need cancelling` : '')}`);
+  try { if (document.getElementById('worker-detail-modal')?.classList.contains('open')) openWorkerDetail(res.worker.name); } catch (e) {}
+}
+async function liftPermBanPrompt(name) {
+  const pb = workerPermBan(name);
+  if (!pb) { toast(`${name} is not permanently banned`); return; }
+  const why = prompt(`Lift the permanent ban on ${name}?\n\nBanned${pb.by ? ' by ' + pb.by : ''}${pb.at ? ' on ' + permBanWhen(pb.at) : ''}${pb.reason ? ':\n“' + pb.reason + '”' : ''}\n\nThey'll be assignable again. Reason for lifting (optional):`, '');
+  if (why === null) return;
+  const res = await setWorkerPermBan(name, false, why);
+  if (!res.ok) { toast(res.message, res.info ? undefined : 'error'); return; }
+  toast(`✅ Permanent ban lifted — ${res.worker.name} can be assigned again`);
+  try { if (document.getElementById('worker-detail-modal')?.classList.contains('open')) openWorkerDetail(res.worker.name); } catch (e) {}
+}
+
 function assignmentRestriction(workerName, outletName) {
   const worker = String(workerName || '').trim();
   const outlet = String(outletName || '').trim();
   if (!worker || !outlet || worker.toLowerCase() === 'available') return null;
   const wk = normProfileKey(worker);
   const ok = normProfileKey(outlet);
+  if (isWorkerPermBanned(worker)) return `${worker} is permanently banned and can't be assigned to any outlet.`;
   if ((workerProfile(worker).disliked_outlets || []).map(normProfileKey).includes(ok)) {
     return `${worker} is marked as not wanting shifts at ${outlet}.`;
   }
@@ -6365,6 +6555,8 @@ function getRecentCancellations(workerName) {
 }
 
 function isWorkerSuspended(workerName) {
+  // v117: a permanently banned worker is blocked everywhere a suspension is.
+  if (typeof isWorkerPermBanned === 'function' && isWorkerPermBanned(workerName)) return true;
   const w = allWorkers.find(x => x.name === workerName);
   if (!w || !w.suspended) return false;
   if (w.suspended_until) {
@@ -8302,6 +8494,7 @@ function _syncDot_unused_old(s) {
 }
 
 function statusBadge(s) {
+  if (isWorkerPermBanned(s.worker_name)) return '<span class="badge badge-red" title="Permanently banned — cancel this shift">⛔ Banned</span>';
   if (isWorkerSuspended(s.worker_name)) return '<span class="badge badge-red">🚫 Suspended</span>';
   if (s.cancelled && s.mc_url) return '<span class="badge badge-amber">MC waived</span>';
   if (s.cancelled) return '<span class="badge badge-red">✕ Cancelled</span>';
@@ -13996,6 +14189,8 @@ function findShiftAnywhere(id) {
   // Upcoming open slots surfaced in the attendance log come from availableSlots
   // (future-dated, not in the day-scoped allShifts), so resolve them here too.
   s = (Array.isArray(availableSlots) ? availableSlots : []).find(x => String(x.id) === sid);
+  // v116c: shifts being cancelled from a team task may be on any date.
+  if (!s && typeof _sopBatchCancel !== 'undefined' && _sopBatchCancel) s = (_sopBatchCancel.rows || []).find(x => String(x.id) === sid);
   return s || null;
 }
 function openCancelModal(id, workerName, outlet, sched) {
@@ -14027,7 +14222,7 @@ function openCancelModal(id, workerName, outlet, sched) {
   document.getElementById('cancel-modal').classList.add('open');
   maybeShowMalaysiaNotice();
 }
-function closeCancelModal() { document.getElementById('cancel-modal').classList.remove('open'); pendingCancelId = null; mcDataUrl = null; _pendingCancelImportRowKey = null; }
+function closeCancelModal() { document.getElementById('cancel-modal').classList.remove('open'); pendingCancelId = null; mcDataUrl = null; _pendingCancelImportRowKey = null; try { endSopBatchCancelUI(); } catch (e) {} }
 // Open the cancellation modal directly from a dispute banner using only the shift id
 function openCancelFromDispute(shiftId) {
   const s = allShifts.find(x => String(x.id) === String(shiftId));
@@ -14100,6 +14295,8 @@ async function confirmCancel() {
   }
   let _checklistSnapshot = null;
   try { _checklistSnapshot = cancelChecklistSnapshot(); } catch (e) { console.warn('[cancel checklist] snapshot failed:', e); }
+  // v116c: several shifts from a team task — one penalty / one strike per worker.
+  if (_sopBatchCancel) return confirmSopBatchCancel(_checklistSnapshot);
   // v67-fix: the Pending-Approval card can now list bookings from OTHER dates
   // (via pendingApprovalAll), but allShifts only holds the viewed day — so a
   // cross-date cancel used to fail with "Shift not found". Resolve from allShifts
@@ -14508,20 +14705,24 @@ async function loadWorkerCards() {
   const filteredWorkers = q ? allWorkers.filter(w => [w.name, w.phone, w.bank_method, w.bank_details, normaliseCountry(w.country)].some(v => String(v || '').toLowerCase().includes(q))) : allWorkers;
   if (!filteredWorkers.length) { container.innerHTML = `<div class="empty-state"><div class="empty-icon">👥</div><p>${q ? 'No workers match your search.' : 'No workers yet.'}</p></div>`; return; }
   container.innerHTML = filteredWorkers.map(w => {
-    const suspended = isWorkerSuspended(w.name);
+    const permBanned = isWorkerPermBanned(w.name);
+    const suspended = !permBanned && isWorkerSuspended(w.name);
+    const _nA = escapeAttr(w.name);
     const initials = w.name.split(/[\s.]+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();
     const until = suspended && w.suspended_until ? new Date(w.suspended_until) : null;
     const recent = w._recent_cancellations || 0;
     const meta = workerProfile(w.name);
     const disliked = (meta.disliked_outlets || []).length ? `<div class="sub-text" style="margin-top:6px;color:var(--amber);">Avoid: ${escapeHtml(meta.disliked_outlets.join(', '))}</div>` : '';
-    return `<div class="worker-card ${suspended?'suspended':''}">
+    return `<div class="worker-card ${(suspended || permBanned)?'suspended':''}">
       <div class="worker-card-top" onclick="openWorkerDetail('${escapeAttr(w.name)}')" style="cursor:pointer;" title="View work history & analytics">
         <div class="worker-avatar">${initials}</div>
         <div class="worker-info">
           <h4>${w.name} <span style="font-size:11px;color:var(--accent);font-weight:600;">↗ View</span></h4>
           <p>${w.bank_method || 'PayNow'} ${w.bank_details ? '· '+w.bank_details : ''}</p>
         </div>
-        ${suspended
+        ${permBanned
+          ? `<span class="badge badge-red">⛔ Banned</span>`
+          : suspended
           ? `<span class="badge badge-red">🚫 Suspended</span>`
           : recent >= 1
             ? `<span class="badge badge-amber">⚠️ ${recent}/2</span>`
@@ -14533,11 +14734,15 @@ async function loadWorkerCards() {
         <div class="worker-stat"><div class="worker-stat-label">Cancellations (30d)</div><div class="worker-stat-val" style="color:${recent>=1?'var(--red)':'var(--green)'};">${recent}/2</div></div>
       </div>
       ${suspended && until ? `<div style="margin-top:10px;padding:8px 10px;background:var(--red-dim);border-radius:var(--radius);font-size:11px;color:var(--red);">Suspended until ${until.getDate()} ${MONTHS[until.getMonth()]} ${until.getFullYear()}</div>` : ''}
+      ${permBanned ? permBanBannerHtml(w.name, true) : ''}
       ${profileNoteBlock(meta.notes)}
       ${disliked}
       ${suspended ? `<button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;justify-content:center;" onclick="liftSuspension('${w.name.replace(/'/g,"\\'")}')">Lift suspension</button>` : ''}
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;" onclick="editWorker('${w.id}')">Edit</button>
+        ${permBanned
+          ? `<button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;color:var(--green);" onclick="liftPermBanPrompt('${_nA}')" title="Lift the permanent ban">Lift ban</button>`
+          : `<button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;color:var(--red);" onclick="openPermBanModal('${_nA}')" title="Permanently ban this worker from all shifts">⛔ Ban</button>`}
         ${recent > 0 ? `<button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center;color:var(--amber);" onclick="openCancelLogModal('${w.name.replace(/'/g,"\\'")}')">📋 ${recent} cancel${recent!==1?'s':''}</button>` : ''}
         <button class="btn btn-danger btn-sm" style="flex:1;justify-content:center;" onclick="deleteWorker('${w.id}')">Delete</button>
       </div>
@@ -15007,8 +15212,12 @@ async function openWorkerDetail(name) {
   const dowBars = DOW.map((lbl,i)=>_miniBar(lbl, dowCounts[i], dowMax)).join('');
   const periodBars = ['Morning','Lunch','Dinner','Midnight'].map(p=>_miniBar(p, periods[p], periodMax)).join('');
   const _wRow = allWorkers.find(w => String(w.name||'').toLowerCase() === String(name||'').toLowerCase());
+  const _pbName = (_wRow && _wRow.name) || name;
+  const _pbA = escapeAttr(_pbName);
   document.getElementById('worker-detail-body').innerHTML = `
     ${_profileAuthorByline(_wRow, 'worker', name)}
+    ${isWorkerPermBanned(_pbName) ? permBanBannerHtml(_pbName, false)
+      : (_wRow ? `<div style="margin:8px 0 4px;"><button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="openPermBanModal('${_pbA}')" title="Permanently ban this worker from all shifts">⛔ Ban permanently</button></div>` : '')}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px;">
       ${_statCard('Times worked', worked.length, 'var(--green)')}
       ${_statCard('Times late', lateCount, lateCount>0?'var(--amber)':'var(--text)')}
@@ -23282,7 +23491,7 @@ function buildSystemContext() {
   ).join('\n');
 
   const workerList = allWorkers.map(w =>
-    `${w.name} | phone:${w.phone||w.contact||'N/A'} | (${normaliseCountry(w.country)}) ${w.suspended?'[SUSPENDED]':''} pay:${w.bank_method||'?'}`
+    `${w.name} | phone:${w.phone||w.contact||'N/A'} | (${normaliseCountry(w.country)}) ${isWorkerPermBanned(w.name)?'[PERMANENTLY BANNED]':''}${w.suspended?'[SUSPENDED]':''} pay:${w.bank_method||'?'}`
   ).join('\n');
 
   // Build available slot counts for next 14 days
@@ -23309,6 +23518,7 @@ function buildSystemContext() {
   Object.entries(profileMeta.workers || {}).forEach(([key, meta]) => {
     const wName = (allWorkers.find(w => normProfileKey(w.name) === key) || {}).name || key;
     (meta.disliked_outlets || []).forEach(on => restrictionLines.push(`${wName} — should NOT be assigned to ${on}`));
+    if (meta.perm_ban && meta.perm_ban.banned) restrictionLines.push(`${wName} — PERMANENTLY BANNED from ALL outlets${meta.perm_ban.reason ? ' (' + meta.perm_ban.reason + ')' : ''}`);
   });
   const restrictionList = restrictionLines.length ? restrictionLines.join('\n') : 'None on record.';
 
@@ -23413,6 +23623,8 @@ ACTIONS YOU CAN PERFORM — output ONLY a JSON block like this when taking actio
 {"type": "updateWorkerProfile", "workerName": "<exact name>", "field": "phone|bank_method|country|notes", "value": "<new value>"}
 {"type": "banWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
 {"type": "unbanWorkerFromOutlet", "workerName": "<exact worker name from DB>", "outlet": "<exact outlet name from DB>"}
+{"type": "banWorkerPermanently", "workerName": "<exact worker name from DB>", "reason": "<why they are banned>"}
+{"type": "liftPermanentBan", "workerName": "<exact worker name from DB>", "reason": "<optional reason for lifting>"}
 {"type": "searchOutlet", "query": "<partial or full outlet/client name>"}
 {"type": "saveKnowledge", "topic": "<topic>", "content": "<full content>", "category": "General|Attire|SOP|Outlet|Payroll", "outlet": "<outlet name or null>", "existingId": "<id if updating existing entry or null>"}
 {"type": "addOutletRequirement", "outlet": "<exact outlet name from DB>", "label": "<requirement text, e.g. Is the worker 18 years old and above?>"}
@@ -23508,6 +23720,7 @@ RULES:
 - When a user tells you a fact, rule, policy or requirement (e.g. attire, SOPs, outlet info), AUTOMATICALLY save it using saveKnowledge WITHOUT asking for confirmation — just do it and confirm you saved it.
 - IMPORTANT: saveKnowledge is ONLY for general business knowledge (SOPs, rules, policies). For updating a specific worker's phone, payment method, country, or notes, ALWAYS use updateWorkerProfile instead — never save personal worker data to business knowledge.
 - BANNING: When the user says a worker is banned, barred, blacklisted, or "should not / cannot be assigned" to a specific outlet (e.g. "Ahn Duc is banned from Les Bouchons"), use the banWorkerFromOutlet action with the exact worker and outlet names. To lift a ban ("unban", "allow again", "remove the ban"), use unbanWorkerFromOutlet. This is NOT business knowledge — do not use saveKnowledge for bans. If either the worker or the outlet name is ambiguous or not in context, look them up first (searchWorker / searchOutlet) before banning.
+- PERMANENT BAN: When the user says a worker is permanently banned / blacklisted from ALL shifts (not just one outlet) — e.g. "permanently ban Jayden", "Jayden is banned from working with us" — use banWorkerPermanently with the exact worker name and the reason given (ask for the reason if none is given). To remove it ("lift the ban", "unban Jayden", "allow Jayden again" with no outlet mentioned), use liftPermanentBan. If an outlet is named, use the outlet ban actions instead. If the worker name is ambiguous, searchWorker first. A permanently banned worker cannot be assigned anywhere.
 - ENFORCING BANS: NEVER create or offer to create a shift (createShift, forceCreateShift, batchCreateSlots) that assigns a worker to an outlet they're banned from or marked do-not-assign for — check ASSIGNMENT RESTRICTIONS above first. If asked to do so, refuse and explain the worker is restricted there, and offer to lift the restriction if that's what they want. The system will also hard-block it, but you should catch it before proposing the booking.
 - If the topic already exists in BUSINESS KNOWLEDGE, use the existingId to UPDATE it instead of creating a duplicate.
 - CLIENT BOOKING REQUIREMENTS: Some outlets require workers to meet conditions before booking (e.g. "Is the worker 18 years old and above?"). To add one, use addOutletRequirement; to remove, use removeOutletRequirement; to see an outlet's list, use listOutletRequirements. When you try to createShift for a worker who hasn't passed an outlet's requirements, the system returns a requirements list and blocks. You cannot tick the checklist yourself. If the user explicitly confirms the worker meets ALL listed requirements (e.g. replies "confirm requirements", "yes she's 18+", "they meet all"), use forceCreateShift — it records the worker as having passed and creates the shift. Otherwise tell them to book via the Add Shift form to use the checklist.
@@ -24046,11 +24259,23 @@ async function executeAIAction(a) {
         if (error) throw error;
         if (!data?.length) return `❌ No workers found matching "${a.query}"`;
         return data.map(w =>
-          `**${w.name}** | 📞 ${w.phone||w.contact||'N/A'} | ${normaliseCountry(w.country)} | ${w.suspended?'🚫 SUSPENDED':'✅ Active'} | Pay: ${w.bank_method||'?'}`
+          `**${w.name}** | 📞 ${w.phone||w.contact||'N/A'} | ${normaliseCountry(w.country)} | ${isWorkerPermBanned(w.name)?'⛔ PERMANENTLY BANNED':(w.suspended?'🚫 SUSPENDED':'✅ Active')} | Pay: ${w.bank_method||'?'}`
         ).join('\n');
       } catch(e) {
         return `❌ Search failed: ${e.message}`;
       }
+    }
+
+    case 'banWorkerPermanently':
+    case 'liftPermanentBan': {
+      const banning = a.type === 'banWorkerPermanently';
+      if (!a.workerName) return '❌ Tell me which worker.';
+      const res = await setWorkerPermBan(a.workerName, banning, a.reason || '', { via: 'ai' });
+      if (!res.ok) return (res.info ? 'ℹ️ ' : '❌ ') + res.message + (res.info ? '' : ' Try searching first.');
+      if (!banning) return `✅ Permanent ban lifted — **${res.worker.name}** can be assigned shifts again.`;
+      const n = res.upcoming.length;
+      return `⛔ **${res.worker.name}** is now permanently banned${a.reason ? ` (${a.reason})` : ''} — they can't be assigned to any outlet, and won't get shift offers or reminders.`
+        + (n ? `\n\n⚠️ They still have **${n} upcoming shift${n === 1 ? '' : 's'}** booked. ${res.task ? `I've raised a high-priority task (**${res.task.title}**) — open it in Team Task / Notes and use **Cancel shifts** to cancel them together.` : 'Cancel them from Attendance.'}` : '');
     }
 
     case 'banWorkerFromOutlet':
@@ -29666,7 +29891,7 @@ function onSubjectSearch() {
     const dup = nameCount[String(w.name || '').trim().toLowerCase()] > 1;
     return `<div class="tt-pick-row" data-i="${i}" onmousedown="event.preventDefault();pickSubject(${i})">
       <span class="tt-pick-name">${escapeHtml(w.name)}${dup ? '<span class="tt-pick-dup" title="More than one member has this name">same name</span>' : ''}</span>
-      <span class="tt-pick-meta">${ph ? escapeHtml(ph) : '<em>no phone on file</em>'}${w.country ? ' · ' + escapeHtml(normaliseCountry(w.country)) : ''}${w.suspended ? ' · <span style="color:var(--red);">suspended</span>' : ''}</span>
+      <span class="tt-pick-meta">${ph ? escapeHtml(ph) : '<em>no phone on file</em>'}${w.country ? ' · ' + escapeHtml(normaliseCountry(w.country)) : ''}${isWorkerPermBanned(w.name) ? ' · <span style="color:var(--red);">⛔ banned</span>' : (w.suspended ? ' · <span style="color:var(--red);">suspended</span>' : '')}</span>
     </div>`;
   }).join('') + (all.length > TT_PICK_LIMIT
       ? `<div class="tt-pick-empty">Showing ${TT_PICK_LIMIT} of ${all.length} — keep typing to narrow it down.</div>` : '');
@@ -30000,21 +30225,301 @@ function renderSopShiftSelected() {
 function taskShiftHtml(t) {
   const list = taskShiftList(t);
   if (!list.length) return '';
+  const done = (t && t.shiftCancels) || {};
+  const pending = list.filter(s => !done[String(s.id)]);
   const rows = list.map(s => {
     const live = s.id ? findShiftAnywhere(s.id) : null;
+    const c = done[String(s.id)];
+    const doneTag = c ? ` <span class="tt-shift-tag tt-shift-tag-done" title="${escapeAttr(`${c.label || 'Cancelled'} by ${c.by || '—'} · ${fmtTaskWhen(c.at)}`)}">✓ ${escapeHtml(c.short || 'cancelled')}</span>` : '';
     return `<div class="tt-shift-strip-row">
-      <span class="tt-shift-strip-txt">${escapeHtml(sopShiftLine(s, true))}${(live && live.cancelled) || s.cancelled ? ' <span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : ''}</span>
+      <span class="tt-shift-strip-txt">${escapeHtml(sopShiftLine(s, true))}${!c && ((live && live.cancelled) || s.cancelled) ? ' <span class="tt-shift-tag tt-shift-tag-x">cancelled</span>' : ''}${doneTag}</span>
       ${s.shift_date ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px;" onclick="event.stopPropagation();jumpToShiftFromTeamTask('${escapeAttr(String(s.id || ''))}','${escapeAttr(String(s.shift_date))}')" title="Open this day in Attendance">View day</button>` : ''}
     </div>`;
   }).join('');
+  const canCancel = !t.completed && pending.length;
   return `<div class="tt-shift-strip" onclick="event.stopPropagation();">
-    <div class="tt-shift-strip-lbl">\u{1F4C5} ${list.length === 1 ? 'Shift' : list.length + ' shifts'}</div>
+    <div class="tt-shift-strip-head"><span class="tt-shift-strip-lbl">\u{1F4C5} ${list.length === 1 ? 'Shift' : list.length + ' shifts'}</span>
+      ${canCancel ? `<button class="btn btn-danger btn-sm" style="padding:3px 10px;" onclick="event.stopPropagation();openSopBatchCancel('${escapeAttr(String(t.id))}')" title="Cancel ${pending.length === 1 ? 'this shift' : 'these shifts'} — one penalty per worker">\u{1F6AB} Cancel ${pending.length === 1 ? 'shift' : pending.length + ' shifts'}</button>` : ''}</div>
     ${rows}
   </div>`;
 }
 function jumpToShiftFromTeamTask(shiftId, dateStr) {
   try { if (teamTasksOpen) toggleTeamTasks(); } catch (e) {}
   if (typeof jumpToShift === 'function' && dateStr) jumpToShift(dateStr, shiftId || '__none__');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v116c — CANCEL A TASK'S SHIFTS IN ONE GO (one penalty + one strike per worker)
+// ════════════════════════════════════════════════════════════════════════════
+// Opens the standard cancel modal in "batch" mode. confirmCancel() hands off to
+// confirmSopBatchCancel() right after its checklist gate. Per shift the DB writes
+// mirror confirmCancel exactly; per WORKER the batch counts once — one
+// cancellation_log row, one suspension check, one penalty, one follow-up task.
+let _sopBatchCancel = null;   // { taskId, rows:[shift rows], skipped:[labels] }
+
+async function openSopBatchCancel(taskId) {
+  const t = teamTasks[taskId];
+  if (!t) { toast('Task not found', 'error'); return; }
+  if (t.completed) { toast('Reopen the task before cancelling its shifts', 'error'); return; }
+  const done = t.shiftCancels || {};
+  const want = taskShiftList(t).filter(x => x && x.id && !done[String(x.id)]);
+  if (!want.length) { toast('Every shift on this task has already been cancelled'); return; }
+  if (!supabaseClient) { toast('Not connected — can\'t cancel shifts', 'error'); return; }
+  // Always work from the CURRENT database rows, never the task's snapshot.
+  let data = [];
+  try {
+    const res = await supabaseClient.from('shifts').select('*').in('id', want.map(x => x.id));
+    if (res.error) throw res.error;
+    data = res.data || [];
+  } catch (e) { toast('Couldn\'t load the shifts: ' + ((e && e.message) || 'network error'), 'error'); return; }
+  const byId = {}; data.forEach(r => { byId[String(r.id)] = r; });
+  const rows = [], skipped = [];
+  want.forEach(x => {
+    const r = byId[String(x.id)];
+    if (!r) { skipped.push(`${sopShiftLine(x, true)} — no longer in the panel`); return; }
+    if (r.cancelled) { skipped.push(`${sopShiftLine(r, true)} — already cancelled`); return; }
+    if (sopShiftWorker(x) && !sopShiftWorker(r)) { skipped.push(`${sopShiftLine(x, true)} — already returned to Available`); return; }
+    if (sopShiftWorker(x) && sopShiftWorker(r) && sopShiftWorker(x).toLowerCase() !== sopShiftWorker(r).toLowerCase()) {
+      skipped.push(`${sopShiftLine(x, false)} — now booked to ${sopShiftWorker(r)}, not ${sopShiftWorker(x)}`); return;
+    }
+    rows.push(r);
+  });
+  rows.sort((a, b) => String(a.shift_date || '').localeCompare(String(b.shift_date || ''))
+    || String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')));
+  if (!rows.length) {
+    toast('Nothing left to cancel: ' + skipped.join('; '), 'error');
+    return;
+  }
+  _sopBatchCancel = { taskId, rows, skipped };
+  const f = rows[0];
+  openCancelModal(f.id, f.worker_name, f.outlet, f.scheduled_start);
+  renderSopBatchCancelInfo();
+}
+
+// Per-worker groups, in first-shift order.
+function sopBatchGroups(rows) {
+  const order = [], map = {};
+  (rows || []).forEach(r => {
+    const w = sopShiftWorker(r);
+    const k = w ? w.toLowerCase() : '__open__';
+    if (!map[k]) { map[k] = { worker: w, rows: [] }; order.push(k); }
+    map[k].rows.push(r);
+  });
+  return order.map(k => map[k]);
+}
+
+function renderSopBatchCancelInfo() {
+  const B = _sopBatchCancel;
+  if (!B) return;
+  const h = document.querySelector('#cancel-modal h3');
+  if (h) h.textContent = `Cancel ${B.rows.length} shift${B.rows.length === 1 ? '' : 's'}`;
+  const btn = document.getElementById('cancel-confirm-btn');
+  if (btn) btn.textContent = `Confirm cancellation (${B.rows.length})`;
+  const info = document.getElementById('cancel-info');
+  if (!info) return;
+  const groups = sopBatchGroups(B.rows);
+  info.innerHTML = groups.map(g => {
+    const recent = g.worker ? getRecentCancellations(g.worker) : 0;
+    return `<div class="sop-bc-group">
+      <div style="font-weight:600;font-size:14px;">${g.worker ? escapeHtml(g.worker) : '<em>Open slots</em>'}
+        <span style="font-weight:400;color:var(--text2);font-size:12px;"> · ${g.rows.length} shift${g.rows.length === 1 ? '' : 's'}</span></div>
+      ${g.rows.map(r => `<div class="sop-bc-row">${escapeHtml(sopShiftLine(r, false))}</div>`).join('')}
+      ${g.worker ? `<div style="margin-top:6px;font-size:12px;">Cancellations (last 30 days): <strong style="color:${recent >= 1 ? '#e84040' : 'var(--text)'};">${recent}/2</strong>
+        ${g.rows.length > 1 ? ' · <span class="sop-bc-once">counted once · penalty charged once</span>' : ''}</div>` : ''}
+    </div>`;
+  }).join('')
+  + (B.skipped.length ? `<div class="sop-bc-skip">Skipped — ${B.skipped.map(escapeHtml).join('<br>')}</div>` : '');
+  // The suspension warning in openCancelModal only knows the first worker; with
+  // several workers, rebuild it for anyone this batch would suspend.
+  const warn = document.getElementById('cancel-susp-warn');
+  if (warn && groups.filter(g => g.worker).length > 1) {
+    const hit = groups.filter(g => g.worker && getRecentCancellations(g.worker) >= 1).map(g => g.worker);
+    if (hit.length) {
+      warn.className = 'alert alert-red';
+      warn.innerHTML = `<span class="alert-icon">\u{1F6AB}</span><div>For a worker cancellation, <strong>${hit.map(escapeHtml).join(', ')}</strong> will reach 2 cancellations in 30 days and be <strong>suspended for 1 month</strong>.</div>`;
+      warn.style.display = 'flex';
+    } else { warn.style.display = 'none'; }
+  }
+}
+
+function endSopBatchCancelUI() {
+  if (!_sopBatchCancel) return;
+  _sopBatchCancel = null;
+  const h = document.querySelector('#cancel-modal h3'); if (h) h.textContent = 'Cancel shift';
+  const btn = document.getElementById('cancel-confirm-btn'); if (btn) btn.textContent = 'Confirm cancellation';
+}
+
+async function confirmSopBatchCancel(checklistSnapshot) {
+  const B = _sopBatchCancel;
+  if (!B || !B.rows.length) return;
+  const btn = document.getElementById('cancel-confirm-btn');
+  if (btn && btn.dataset.busy === '1') return;           // no double-submit
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = '⏳ Cancelling…'; }
+
+  const type = document.getElementById('cancel-type')?.value || 'worker_penalty';
+  const isOutletBypass = type === 'outlet_bypass';
+  const isMcWaiver = type === 'worker_mc';
+  const isGoodwill = type === 'worker_goodwill';
+  const isPenalty  = type === 'worker_penalty';
+  const mcPending = isMcWaiver && !mcDataUrl;
+  const penaltyOverrideRaw = document.getElementById('cancel-penalty-override')?.value;
+  const basePenalty = (isPenalty && penaltyOverrideRaw && parseFloat(penaltyOverrideRaw) >= 0) ? parseFloat(penaltyOverrideRaw) : 15;
+  const me = currentInternalUser || '—';
+  const nowIso = new Date().toISOString();
+  const results = [];         // { id, ok, error }
+  const penaltiesToOffer = [];// { worker, amount }
+  let followUpRaised = false;
+
+  for (const g of sopBatchGroups(B.rows)) {
+    const worker = g.worker;
+    const n = g.rows.length;
+    const exempt = worker ? isPenaltyExempt(worker, g.rows[0]) : false;
+    const penaltyAmount = exempt ? 0 : basePenalty;
+    let counted = false;      // one cancellation_log row / suspension check per worker
+
+    for (let i = 0; i < g.rows.length; i++) {
+      const s = g.rows[i];
+      const id = s.id;
+      const wasPaid = !!s.is_paid;
+      const paidSnap = Object.assign({}, s);
+      const batchNote = n > 1
+        ? (i === 0 ? ` (1 of ${n} shifts cancelled together — counted once)` : ` (${i + 1} of ${n} shifts cancelled together — already counted on the first)`)
+        : '';
+      try {
+        if (isOutletBypass) {
+          const { error } = await hardDeleteShift(id);
+          if (error) throw error;
+          try { await writeDeleteIgnoreForShift(s, `${s.outlet || 'this outlet'} · ${s.worker_name || 'Available'} · ${scheduledRange(s)}`); } catch (e) { console.warn('[batch outlet-cancel] ignore-write failed:', e); }
+          const _d = new Date((s.shift_date || formatDate(currentDate)) + 'T00:00:00').toLocaleDateString('en-SG', { day: 'numeric', month: 'short', weekday: 'short' });
+          await logActivity('Outlet cancellation',
+            `Shift for ${s.worker_name || 'Available'} at ${s.outlet || '—'} on ${_d} was cancelled by outlet and removed from schedule.${batchNote}`,
+            'shift', id, { shift_date: s.shift_date, worker_name: s.worker_name, outlet: s.outlet });
+          try { await logCancelChecklist(checklistSnapshot, s, id); } catch (e) {}
+          if (!followUpRaised) { followUpRaised = true; try { await raiseChecklistFollowUp(checklistSnapshot, s, id); } catch (e) {} }
+          if (wasPaid) {
+            try { await notifyPayrollClockOut(buildPaidCancellationMessage(paidSnap, { cancelType: 'outlet_bypass', worker: paidSnap.worker_name, penaltyAmount: 0 })); } catch (e) {}
+          }
+          results.push({ id, ok: true });
+          continue;
+        }
+
+        // Worker cancellation types: an open slot has nobody to cancel.
+        if (!worker) { results.push({ id, ok: false, skipped: true, error: 'open slot (use Outlet cancellation to delete it)' }); continue; }
+
+        const shouldCount = !isGoodwill;
+        if (shouldCount && !counted) {
+          counted = true;
+          await supabaseClient.from('cancellation_log').insert({
+            worker_name: worker, shift_id: id, cancelled_at: formatDate(currentDate), has_mc: isMcWaiver
+          });
+          const recent = getRecentCancellations(worker) + 1;
+          if (recent >= 2) {
+            const until = new Date(); until.setDate(until.getDate() + 30);
+            await supabaseClient.from('workers').update({ suspended: true, suspended_until: formatDate(until) }).eq('name', worker);
+            toast(`${worker} has been suspended for 1 month`, 'error');
+          }
+        }
+
+        const { error } = await supabaseClient.from('shifts').update({
+          worker_name: 'Available', cancelled: false, clock_in: null, clock_out: null,
+          late_penalty: 0, cancellation_penalty: 0, mc_url: null,
+          sr_worker: null, sr_rate: null, sr_absorbed: null,
+          updated_at: new Date().toISOString()
+        }).eq('id', id);
+        if (error) throw error;
+
+        const _d = new Date((s.shift_date || formatDate(currentDate)) + 'T00:00:00').toLocaleDateString('en-SG', { day: 'numeric', month: 'short', weekday: 'short' });
+        const tail = exempt
+          ? ` — Malaysia member: NO penalty charged (${MY_GIG_ACT_LABEL})`
+          : (isGoodwill ? ' — good-will cancellation, NO penalty, not counted toward suspension'
+          : (isMcWaiver ? (mcPending ? ' — MC waiver (MC pending upload), no penalty' : ' — MC uploaded, no penalty')
+          : (i === 0 ? ` — $${penaltyAmount.toFixed(2)} penalty applied (once for this batch)` : ' — penalty already charged once for this batch')));
+        await logActivity('Shift cancelled',
+          `${worker} cancelled shift at ${s.outlet || '—'} on ${_d} ${s.scheduled_start?.slice(0,5) || ''}${tail}. Slot returned to Available.${batchNote}`,
+          'shift', id, { shift_date: s.shift_date, worker_name: worker, outlet: s.outlet });
+        try { await logCancelChecklist(checklistSnapshot, s, id); } catch (e) {}
+        if (!followUpRaised) { followUpRaised = true; try { await raiseChecklistFollowUp(checklistSnapshot, s, id); } catch (e) {} }
+        if (wasPaid) {
+          try { await notifyPayrollClockOut(buildPaidCancellationMessage(paidSnap, { cancelType: type, worker, penaltyAmount: (isPenalty && i === 0) ? penaltyAmount : 0 })); } catch (e) {}
+        }
+        await resetReminderLifecycleForRefill(id);
+        shiftReminders[id].needsReplacement = true;
+        shiftReminders[id].replacementAt = new Date().toISOString();
+        shiftReminders[id].replacedWorker = worker;
+        await persistReminder(id);
+        await logCompletedTask({
+          id, type: 'dispute', stage: 'acknowledged',
+          worker, outlet: s.outlet || '', role: s.role || '', date: s.shift_date || '',
+          start: s.scheduled_start ? s.scheduled_start.slice(0,5) : '',
+          end: s.scheduled_end ? s.scheduled_end.slice(0,5) : '',
+          reason: `${worker} cancelled`, outcome: 'Cancellation processed' + tail,
+          completedAt: new Date().toISOString()
+        });
+        if (taskShiftCache) taskShiftCache[String(id)] = Object.assign({}, s, { worker_name: 'Available', cancelled: false });
+        results.push({ id, ok: true });
+        if (i === 0 && isPenalty && penaltyAmount > 0) penaltiesToOffer.push({ worker, amount: penaltyAmount, n });
+      } catch (e) {
+        console.error('[batch cancel] shift', id, 'failed:', e);
+        results.push({ id, ok: false, error: (e && e.message) || 'failed' });
+      }
+    }
+  }
+
+  // Record the outcome on the task and tick its "delete/cancel … ops panel" step.
+  const typeLabel = { worker_penalty: 'Worker cancellation', worker_mc: 'Worker cancellation (MC)',
+    worker_goodwill: 'Good-will cancellation', outlet_bypass: 'Outlet cancellation' }[type] || 'Cancelled';
+  const typeShort = { worker_penalty: 'cancelled', worker_mc: 'cancelled · MC', worker_goodwill: 'cancelled · good will', outlet_bypass: 'outlet cancelled' }[type] || 'cancelled';
+  const t = teamTasks[B.taskId];
+  const okN = results.filter(r => r.ok).length;
+  let completeNow = false;
+  if (t && okN) {
+    t.shiftCancels = Object.assign({}, t.shiftCancels || {});
+    results.filter(r => r.ok).forEach(r => {
+      t.shiftCancels[String(r.id)] = { at: nowIso, by: me, type, label: typeLabel, short: typeShort };
+    });
+    const allDone = taskShiftList(t).every(x => t.shiftCancels[String(x.id)]);
+    if (allDone && Array.isArray(t.checklist)) {
+      t.checklist.forEach(c => {
+        if (c && !c.done && /ops\s*panel/i.test(c.text || '') && /(delete|cancel|remove)/i.test(c.text || '')) {
+          c.done = true; c.doneBy = me; c.doneAt = nowIso;
+        }
+      });
+      completeNow = t.checklist.every(c => c && c.done) && !t.completed;
+    }
+    try { await saveTeamTasks(); } catch (e) {}
+    try { logActivity('Task shifts cancelled', `${t.title}: ${okN} shift${okN === 1 ? '' : 's'} — ${typeLabel}`, 'team_task', t.id); } catch (e) {}
+  }
+
+  try { await loadWorkers(); } catch (e) {}
+  if (btn) { delete btn.dataset.busy; }
+  closeCancelModal();
+  try { await loadShifts(); } catch (e) {}
+  if (completeNow) { try { await completeTeamTask(t.id, { skipStepCheck: true }); } catch (e) {} }
+  try { renderTeamTasksPage(); updateTeamTasksNavBadge(); } catch (e) {}
+
+  const failed = results.filter(r => !r.ok && !r.skipped);
+  const skippedN = results.filter(r => r.skipped).length;
+  const skipTail = skippedN ? ` · ${skippedN} open slot${skippedN === 1 ? '' : 's'} left as is (use Outlet cancellation to delete)` : '';
+  if (failed.length) {
+    toast(`${okN} of ${results.length} shifts cancelled — ${failed.length} failed: ${failed.map(f => f.error).join('; ')}${skipTail}`, 'error');
+  } else {
+    toast(`${okN} shift${okN === 1 ? '' : 's'} cancelled${penaltiesToOffer.length ? ' — penalty counted once per worker' : ''}${skipTail}`);
+  }
+
+  // Same prompt as a single cancellation — but ONE per worker for the whole batch.
+  if (penaltiesToOffer.length) {
+    setTimeout(async () => {
+      for (const p of penaltiesToOffer) {
+        const n = p.n || 1;
+        const apply = confirm(
+          `Apply $${p.amount.toFixed(2)} cancellation penalty to ${p.worker}'s next upcoming shift?` +
+          (n > 1 ? `\n\nThis covers all ${n} shifts cancelled together — charged once, not ${n} times.` : '') +
+          `\n\nClick OK to deduct from their next shift payout.\nClick Cancel to skip (you can add it manually later via the penalty column).`
+        );
+        if (apply) await applyPenaltyToNextShift(p.worker, p.amount);
+      }
+    }, 600);
+  }
 }
 
 // ── Tick-list on the task card ─────────────────────────────────────────────
@@ -30622,7 +31127,21 @@ function mergeTaskChecklists(a, b) {
 .tt-shift-strip { margin:9px 0 2px; padding:7px 10px; border:1px solid var(--border);
   border-radius:var(--radius); background:var(--bg3); font-size:12px; color:var(--text); }
 .tt-shift-strip-lbl { font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:0.05em;
-  color:var(--text3); margin-bottom:4px; }
+  color:var(--text3); }
+.tt-shift-strip-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px; min-height:24px; }
+.tt-shift-tag-done { background:rgba(40,180,99,0.16); color:var(--green); }
+.sop-bc-group + .sop-bc-group { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+.sop-bc-row { color:var(--text2); font-size:12px; margin-top:3px; padding-left:10px; border-left:2px solid var(--border2); }
+.sop-bc-once { color:var(--green); font-weight:600; }
+/* v117 permanent ban */
+.perm-ban-banner { margin-top:10px; padding:9px 11px; border-radius:var(--radius); background:var(--red-dim);
+  border:1px solid rgba(232,64,64,0.35); color:var(--text); font-size:12px; line-height:1.45; }
+.perm-ban-head { font-weight:700; color:var(--red); font-size:12.5px; }
+.perm-ban-reason { margin-top:3px; color:var(--text); }
+.perm-ban-meta { margin-top:3px; font-size:11px; color:var(--text3); font-family:var(--mono); }
+.perm-ban-upcoming { background:var(--bg3); border:1px solid var(--border); border-radius:var(--radius); padding:9px 11px; }
+.perm-ban-up-head { font-size:12px; font-weight:600; color:var(--amber); margin-bottom:4px; }
+.sop-bc-skip { margin-top:10px; font-size:11.5px; color:var(--amber); line-height:1.5; }
 .tt-shift-strip-row { display:flex; align-items:center; gap:8px; padding:3px 0; }
 .tt-shift-strip-row + .tt-shift-strip-row { border-top:1px solid var(--border); }
 .tt-shift-strip-txt { flex:1; min-width:0; line-height:1.45; }
