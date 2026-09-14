@@ -5,6 +5,7 @@
 <!-- Build patch: v116c (CANCEL THE TASK'S SHIFTS FROM THE TASK — ONE PENALTY, ONE STRIKE PER WORKER PER BATCH) — Ops request (Jon, 10 Sep): "can you actually cancel the shift via task when we select the shift? … when we cancel 2 shifts at one time for the same worker with the $15 penalty, it only applies $15 instead of $30." A task carrying shifts now has a "🚫 Cancel shifts" button. It re-reads the shifts from the DB (skips any already deleted / already Available), then opens the STANDARD cancel modal in batch mode — same cancellation types, custom-penalty box, Malaysia notice and pre-cancellation checklist gate — listing every shift. On confirm each shift goes through the same writes as confirmCancel (worker types: slot → Available, reminder reset, replacement-needed, completed-task log, paid-shift alert; outlet type: hard delete + resurrection-proof ignore). PER WORKER, the batch counts ONCE: one cancellation_log row (so one strike toward the 2-in-30-days suspension — confirmed with Jon), one suspension check, one penalty prompt/charge (e.g. $15, not $30), and one checklist follow-up task per batch. The task records which shifts were cancelled (by whom, type, penalty) and ticks its "delete/cancel … ops panel" step. Code touch on existing functions is limited to: one early-return hook in confirmCancel (after the checklist gate), closeCancelModal also resetting batch mode, and findShiftAnywhere also resolving the batch's shifts. The single-shift cancel flow is otherwise unchanged. -->
 <!-- Build patch: v116b (SOP SHIFT PICKER — MULTI-SELECT, TODAY + UPCOMING ONLY) — Ops feedback (Jon, 10 Sep): "it doesn't allow me to select multiple shifts; cancellation is only for current day and future shifts, not past shifts." (1) The picker is now a tick-list: tick as many shifts as needed, across dates/searches (selections persist while you change the date or member); each can be removed from the summary. Task stores shifts:[snapshots] + shiftIds; card + WhatsApp list every shift; title summarises ("3 shifts, Thu 10 – Sat 12 Sep"). (2) Past shifts are never offered: member view lists today onward, the date box has min=today and refuses earlier dates. Tasks saved by v116 with a single `shift` still render. -->
 <!-- Build patch: v116 (SOP → TASK: PICK THE SHIFT) — Ops request (Jon, 10 Sep): "for PT cancelling a shift, we can select the shift that was cancelled." SOPs gain an opt-in "Ask which shift" flag (linksShift). Existing SOPs whose title mentions cancel + shift (e.g. "Cancellation of Shift by PT") get it automatically until someone edits the flag. When such an SOP is used as a task, Assign a task shows a shift picker: pick a member → their shifts from 14 days ago onward; or pick a date → every shift that day, filterable by name/outlet (cancelled + open slots shown and flagged). Picking a shift fills in the member if blank. The task stores a SNAPSHOT of the shift (id, worker, outlet, date, times) so it survives step 2 deleting the shift from the ops panel, shows it on the card with a View shift jump, includes it in the WhatsApp to the assignee, and title templates accept {outlet} {date} {time}. Additive only: no schema change, tasks/SOPs without a shift behave exactly as before. -->
+<!-- Build patch: v119 (PER-SHIFT INVOICED LEDGER + WEEKLY BILLING CYCLE) — Worked from the supplied Sep 14 v118 build. Ops report (Jon, 14 Sep): "for Lucent Dining I charged them on Mon 7 Sep for their usage 2–6 Sep, but today I can't see which ones I've charged already — the system shows all are charged." ROOT CAUSE: billingSentLog is keyed CLIENT + MONTH only (billingSentKey -> `Name__2026-09`), so the 7 Sep invoice marked the WHOLE of September sent; the 10–13 Sep shifts worked afterwards inherited the ✅ and the Send button disappeared. FIX (1) — PER-SHIFT LEDGER: new team-synced store billing_invoiced_shifts (app_settings, localStorage cache, per-shift-id newest-wins merge with tombstones exactly like the sent log, 400-day tombstone prune, live-synced through the existing app_settings realtime channel) records the EXACT shift IDs each invoice covered. billingSplitShifts() resolves every shift in precedence order: explicit ledger record -> explicit tombstone (you un-billed it) -> stripe_charge_id (a charged card shift is money collected) -> LEGACY BACK-FILL -> to bill. The back-fill reads the newest non-deleted sent mark whose period contains the shift's date and treats shifts worked on or before that invoice date as having been on it (_billingLegacySentOnFor reads BOTH month and week sent keys, so the two views always agree) — Lucent's 2/9, 4/9, 6/9, 7/9 come back billed and 10/9–13/9 come back as new, labelled "inferred" in the UI. Preview and Send now default to the un-billed shifts ONLY (a scope toggle in the modal switches to the whole period for a deliberate re-issue, with an amber re-bill warning); confirmSendInvoice rebuilds that scope from FRESH data before sending, so a shift invoiced on another device is never billed twice, then records the shift IDs against the invoice. The usage Excel attached to the invoice is scoped to the same shifts, so the breakdown always adds up to the invoice total. Unsend releases the shift marks raised under that period. Each row gains a Billed / To Bill column, a shift-level "🧾 Shifts" panel (per-shift ✅ Billed / 🟡 To bill with manual mark / un-bill and bulk actions for reconciling history), and honest status badges (✅ All billed / 🟡 N to bill / ⏳ Not billed). The nav badge now counts clients with UN-BILLED shifts across the current AND previous month, so a client invoiced mid-month reappears the moment their staff work again. FIX (2) — WEEKLY CYCLE: new 🗓 Weekly (Mon–Sun) view alongside 📅 Monthly, with ◀ ▶ week navigation, a date picker that snaps to that week's Monday, and a "This week" button defaulting to the completed Mon–Sun you would invoice today. One invoice per client per week covering every shift in it, exactly as the monthly flow works. Every existing (year, month) call site is untouched — billingPeriodStart/End, billingSentKey (-> `Name__W2026-09-07`) and the shift cache key all resolve to the week on screen when the weekly view is active, so month and week caches, sent marks and currencies can never cross-contaminate. Per-client Billing Cycle setting in Client Settings (card-payment/Stripe clients default to WEEKLY per ops, everyone else monthly — nothing changes for existing clients until set); each view lists the clients on that cycle, with a header tickbox to show all. VALIDATION: node --check passes (2/2 inline script blocks); a 43-assertion Node harness running the patched build's own extracted functions covers the week maths (month/year rollovers, leap February), the Lucent back-fill end to end, invoice -> record -> new shift -> un-bill, month/week agreement, Stripe-charged shifts, cycle defaults, order-independent two-device merges and the shift-panel HTML. Surgical diff: 37 hunks, 85 lines removed, 574 added; ZERO function removals or renames (1119 -> 1150 functions, all 1119 originals intact); the payroll, attendance, import, WhatsApp, Aspire and Stripe-relay regions, the Xero proxy payload and the database schema are all untouched — the only new persistence is one app_settings key. -->
 <!-- Build patch: v115 / fix-17 (VIEW ANCHOR v2 — NOW COVERS THE CLASS-ONLY SCROLLERS AND THE WINDOW; CLAMP ECHOES NO LONGER MISTAKEN FOR USER SCROLLS) — Ops report (Jon, 28 Aug): still auto-scrolling to top every ~5s after fix-16. ROOT CAUSE, twofold: (1) fix-16 only recorded elements WITH an id — but the Attendance log scrolls inside .attendance-scroll, a CLASS-ONLY div that renderTable() destroys and recreates at position 0 inside #table-body-wrap on every repaint (innerHTML = …), so the main scroller was never anchored; same gap for .week-grid-wrap, class-only .modal bodies, and — on mobile, where .main > div becomes overflow:visible — the window itself (document.scrollingElement, no id). (2) LOGIC FLAW: the rebuild’s clamp-to-top fires a scroll event within fix-16’s 2.5s “recent user input” window, so the jump was RECORDED as the user’s position (wiping the memory), and the restore pass stood down for 2.5s after any user scroll — precisely when the 5s refreshes land. FIX — fix-16 module replaced wholesale: stable keys that survive element recreation (__doc__ for the window; #id; else nearest-id-ancestor|TAG|className|index, so the recreated .attendance-scroll resolves to the same key); recording accepts ALL scrolls except our own restores and scrolls within 150ms of a DOM mutation (the MutationObserver microtask runs BEFORE the clamp’s scroll event reaches the rendering step, so clamp echoes are reliably filtered with no input heuristics); restore always runs after mutations (rAF-coalesced + one 150ms follow-up for late layout) and puts back BOTH scrollTop and scrollLeft (the attendance table is 1280px wide), clamped to the new content size. Stick-to-bottom feeds (#chat-messages, #ai-messages) stay excluded; switchPage’s viewAnchorForget now also clears the window anchor and any class-only keys under the opened page, so an explicit page open still starts at the top. No schema change; no timer cadence changed; fix-14 untouched. node --check passes on all inline script blocks. Surgical diff: the fix-16 module block replaced by the fix-17 module, build stamp, this header; the two viewAnchorForget call sites from fix-16 are unchanged (same signature); zero function removals or renames elsewhere; nothing else touched. -->
 <!-- Build patch: v114 / fix-16 (GLOBAL VIEW ANCHOR — EVERY PAGE KEEPS ITS SCROLL POSITION ACROSS BACKGROUND REFRESHES) — Ops report (Jon, 28 Aug): "it keeps switching my view every ~5 seconds — I'm viewing the bottom of the page and it auto-scrolls up. Anchor the current view on ALL pages even though the system refreshes." ROOT CAUSE: the background timers (5s team-chat poll re-rendering Chat History, 30s auto-import + silentSync passes, 30s activity-banner refresh, realtime shift events calling loadShifts…) rebuild the visible page with innerHTML = …; during the rebuild the container's content momentarily shrinks, so the browser clamps its scrollTop to 0 — the jump to top. fix-14 protected Import Bookings only. FIX (one additive module, zero render-function changes): (1) RECORD — a capture-phase scroll listener stores scrollTop/scrollLeft per element id, but ONLY for user-initiated scrolls (recent wheel/key/touch input within 2.5s, or a held pointer for scrollbar drags), so the programmatic clamp-to-top a rebuild causes is never mistaken for the user's position. (2) RESTORE — a single MutationObserver on body (coalesced to one pass per animation frame) puts every visible id'd scroller back to its remembered position after any DOM rebuild, clamped to the new content height, flagged so restores are not re-recorded, and skipped while the user is mid-gesture so the anchor never fights live scrolling. (3) INTENTIONAL scroll-to-top still wins — switchPage (and the import-save direct-attendance fallback) now forget the target page's anchor so a fresh page open still starts at the top, and the stick-to-bottom feeds (team chat #chat-messages, AI chat #ai-messages) are excluded so they keep following new messages. No schema change; no timer cadence changed; fix-14's Import Bookings snapshot/restore untouched and simply reinforced by this. node --check passes on all inline script blocks. Surgical diff: one additive fix-16 module before the Start section, one forget line in switchPage, one forget line in the import-save attendance fallback, build stamp; zero function removals or renames; nothing else touched. -->
 <!-- Build patch: v113 / fix-15 (NO WHATSAPP FOR PAST-DATED IMPORTED BOOKINGS — DATA-MIGRATION SAFE) — Ops report (Jon, 15 Aug): migrating January bookings from the old Google Sheets via Import Bookings paste → Confirm & Save caused workers to receive WhatsApp messages for shifts months in the past. ROOT CAUSE: the v80 per-worker booking-confirmation batches (enqueueConfirmBatch on every 'created'/'filled' row at Confirm, flushed by flushConfirmBatches every 30s) carried NO shift-date check, so historical rows queued worker confirmations like any new booking. (Night/clock-in reminders were never at risk — they are hard-gated to tomorrow/today; payment follow-ups are gated to today + a 6h staleness cap; portal clock-out alerts only fire on a genuinely new clock-out from the live portal feed, which a pasted historical row is not.) TWO GUARDS, both keyed on a LOCAL-date comparison (confirmShiftIsPast, mirroring the v77b timezone fix): (1) ENQUEUE — enqueueConfirmBatch now refuses any shift dated before today, on BOTH tracks ('confirmed' and 'approved'), so migrations and backfills never queue a message; today-or-future bookings confirm exactly as before. (2) SEND-SIDE — flushConfirmBatches drops past-dated shifts from every not-yet-sent batch before sending (critical: batches from an ALREADY-SAVED migration pass sit in the team-synced confirm_batches ledger and would otherwise flush from any teammate's open tab even after this fix deploys); dropped ids are folded into sentShiftIds so they can never re-queue, and a batch left empty is retired silently with no message. A mixed batch (past + future shifts) still sends — listing only the current shifts. No schema change. node --check passes on all inline script blocks. Surgical diff: one new helper (confirmShiftIsPast), one early-return in enqueueConfirmBatch, one filter block at the top of the flushConfirmBatches entry loop (const shiftIds → let); zero function removals or renames; nothing else touched. -->
@@ -1378,15 +1379,30 @@ tr.row-pending-approval > td:first-child { box-shadow: inset 3px 0 0 #ff8a00; }
       <div class="topbar">
         <div class="topbar-left">
           <h2>Xero Billing</h2>
-          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices to clients via Xero for the selected billing period &amp; country</p>
+          <p style="font-size:12px;color:var(--text2);margin-top:3px;">Create &amp; send invoices via Xero. Each shift is tracked individually — an invoice only ever covers work that hasn't been billed yet.</p>
         </div>
         <div class="topbar-right" style="gap:8px;flex-wrap:wrap;">
           <select id="billing-country" onchange="setBillingCountry(this.value)" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
             <option value="Singapore">🇸🇬 Singapore (SGD)</option>
             <option value="Malaysia">🇲🇾 Malaysia (MYR)</option>
           </select>
+          <select id="billing-viewmode" onchange="setBillingViewMode(this.value)" title="Monthly invoicing, or one invoice per Mon–Sun week" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+            <option value="month">📅 Monthly</option>
+            <option value="week">🗓 Weekly (Mon–Sun)</option>
+          </select>
           <select id="billing-year" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
           <select id="billing-month" onchange="loadBillingPage()" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--border2);border:1px solid var(--border2);background:var(--bg3);color:var(--text);"></select>
+          <span id="billing-week-nav" style="display:none;align-items:center;gap:6px;">
+            <button class="btn btn-ghost btn-sm" onclick="billingWeekShift(-1)" title="Previous week">◀</button>
+            <input type="date" id="billing-week-date" onchange="billingWeekPick(this.value)" title="Any date in the week you want to bill — it snaps to that week's Monday" style="font-family:var(--font);font-size:13px;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border2);background:var(--bg3);color:var(--text);">
+            <span id="billing-week-label" style="font-size:12px;color:var(--text2);white-space:nowrap;min-width:150px;"></span>
+            <button class="btn btn-ghost btn-sm" onclick="billingWeekShift(1)" title="Next week">▶</button>
+            <button class="btn btn-ghost btn-sm" onclick="billingWeekPick('')" title="Jump to the completed Mon–Sun week you would invoice today">This week</button>
+          </span>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);white-space:nowrap;cursor:pointer;" title="Each client has its own billing cycle in Client Settings. Untick to list every client in this view.">
+            <input type="checkbox" id="billing-cycle-only" checked onchange="setBillingCycleOnly(this.checked)" style="cursor:pointer;">
+            Only <span id="billing-cycle-word">monthly</span> clients
+          </label>
           <button class="btn btn-ghost btn-sm" onclick="openBillingSettingsModal()">⚙️ Client Settings</button>
           <button class="btn btn-primary btn-sm" onclick="refreshBillingData()">↻ Refresh</button>
         </div>
@@ -4501,7 +4517,7 @@ function subscribeToReminderChanges() {
         }
         // v82: Billing stores — sync live so a teammate's grouping edit or
         // "sent" mark shows on this device without a reload.
-        if (row.key === 'billing_client_settings' || row.key === 'billing_sent_log' || row.key === 'billing_hidden_outlets') {
+        if (row.key === 'billing_client_settings' || row.key === 'billing_sent_log' || row.key === 'billing_hidden_outlets' || row.key === 'billing_invoiced_shifts') {
           const bv = (payload.new && payload.new.value);
           if (bv === undefined || bv === null) return;
           if (row.key === 'billing_client_settings' && typeof bv === 'object' && !Array.isArray(bv)) {
@@ -4518,6 +4534,13 @@ function subscribeToReminderChanges() {
             if (canonicalJSON([...next].sort()) === canonicalJSON([...billingHiddenOutlets].sort())) return;
             billingHiddenOutlets = next;
             localStorage.setItem(BILLING_HIDDEN_KEY, JSON.stringify([...billingHiddenOutlets]));
+          } else if (row.key === 'billing_invoiced_shifts' && typeof bv === 'object' && !Array.isArray(bv)) {
+            // v119: a teammate marking shifts billed must land here immediately —
+            // a stale "to bill" on this device is a double-invoice risk.
+            const merged = _mergeBillingInvoiced(billingInvoicedShifts, bv);
+            if (canonicalJSON(merged) === canonicalJSON(billingInvoicedShifts)) return;
+            billingInvoicedShifts = merged;
+            localStorage.setItem(BILLING_INVOICED_KEY, JSON.stringify(billingInvoicedShifts));
           } else return;
           try {
             if (document.getElementById('page-billing')?.style.display !== 'none') {
@@ -24732,6 +24755,228 @@ let billingSentLog = {};
 let billingCurrentClient = null;
 let billingHiddenOutlets = new Set(); // outlet names permanently hidden from billing table
 
+// ═══ v119: PER-SHIFT INVOICED LEDGER + WEEKLY BILLING CYCLE ═══════════════════
+// WHY: the sent log is keyed per CLIENT + MONTH only. Invoicing Lucent Dining on
+// 7 Sep for 2–6 Sep therefore marked the WHOLE of September "sent", so every
+// shift worked after the 7th looked already charged. The ledger below records
+// the exact shift IDs that went onto each invoice, so "billed" / "to bill" is a
+// fact about individual shifts, not about a calendar month.
+const BILLING_INVOICED_KEY = 'billing_invoiced_shifts_v1';
+
+// shiftId -> { at, invoiceId, client, periodKey, by } | { deleted, deletedAt, by }
+// Same tombstone discipline as the sent log: an "un-bill" must WIN the merge
+// against a stale "billed" copy on another device, and vice versa.
+let billingInvoicedShifts = {};
+
+// Period view: 'month' (unchanged behaviour) or 'week' (Mon–Sun).
+let billingViewMode  = 'month';
+let billingWeekStart = '';     // 'YYYY-MM-DD' — Monday of the week on screen
+let billingCycleOnly = true;   // list only clients whose own cycle matches the view
+
+// ── Plain date helpers (local time — never Date.toISOString, which is UTC) ──
+function _blIso(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function _blToday() { return _blIso(new Date()); }
+function _blDateAdd(iso, days) {
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  return _blIso(d);
+}
+function _blMonday(iso) {
+  const dow = new Date(iso + 'T00:00:00').getDay();   // 0 Sun … 6 Sat
+  return _blDateAdd(iso, -(dow === 0 ? 6 : dow - 1));
+}
+function _blPretty(iso) {
+  try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-SG', { weekday:'short', day:'numeric', month:'short' }); }
+  catch(e) { return iso; }
+}
+function _blMonthEnd(y, m) {
+  return `${y}-${String(m).padStart(2,'0')}-${String(new Date(y, m, 0).getDate()).padStart(2,'0')}`;
+}
+
+// The week we default to: the completed Mon–Sun that has just ended. Standing on
+// Monday 14 Sep that is Mon 7 – Sun 13 Sep — exactly the week you invoice today.
+function billingDefaultWeekStart() { return _blDateAdd(_blMonday(_blToday()), -7); }
+function billingWeekEnd()   { return _blDateAdd(billingWeekStart || billingDefaultWeekStart(), 6); }
+function billingIsWeekView(){ return billingViewMode === 'week'; }
+function billingPeriodLabel(year, month) {
+  return billingIsWeekView()
+    ? `${_blPretty(billingWeekStart)} – ${_blPretty(billingWeekEnd())}`
+    : `${BILLING_MONTHS[month-1]} ${year}`;
+}
+
+// ── Per-client billing cycle ──────────────────────────────────────────────────
+// Card-payment (Stripe) clients default to WEEKLY; everyone else stays monthly,
+// so nothing changes for existing clients until the cycle is set explicitly.
+function clientBillingCycle(name) {
+  const cfg = billingClientSettings[name] || {};
+  if (cfg.billingCycle === 'weekly' || cfg.billingCycle === 'monthly') return cfg.billingCycle;
+  return cfg.billingMode === 'card' ? 'weekly' : 'monthly';
+}
+
+// ── Invoiced-shift ledger: load / merge / save ────────────────────────────────
+function _billingInvTime(e) {
+  if (!e || typeof e !== 'object') return 0;
+  const t = Date.parse(e.deletedAt || e.at || 0);
+  return isNaN(t) ? 0 : t;
+}
+function _mergeBillingInvoiced(a, b) {
+  const out = { ...(a || {}) };
+  Object.entries(b || {}).forEach(([k, v]) => {
+    if (!out[k] || _billingInvTime(v) > _billingInvTime(out[k])) out[k] = v;
+  });
+  // Prune tombstones older than ~13 months (a full billing year of history).
+  const cutoff = Date.now() - 400 * 24 * 60 * 60 * 1000;
+  Object.keys(out).forEach(k => {
+    if (out[k] && out[k].deleted && _billingInvTime(out[k]) < cutoff) delete out[k];
+  });
+  return out;
+}
+function loadBillingInvoiced() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(BILLING_INVOICED_KEY) || '{}');
+    billingInvoicedShifts = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  } catch(e) { billingInvoicedShifts = {}; }
+}
+async function _loadBillingInvoicedRemote() {
+  try {
+    const { data, error } = await supabaseClient
+      .from('app_settings').select('value').eq('key', 'billing_invoiced_shifts').maybeSingle();
+    if (error) { console.warn('billing invoiced-shift ledger remote load failed:', error.message); return; }
+    loadBillingInvoiced();                              // local cache first
+    const remote = (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) ? data.value : {};
+    const merged = _mergeBillingInvoiced(billingInvoicedShifts, remote);
+    const remoteMissedSomething = canonicalJSON(merged) !== canonicalJSON(remote);
+    billingInvoicedShifts = merged;
+    localStorage.setItem(BILLING_INVOICED_KEY, JSON.stringify(billingInvoicedShifts));
+    if (remoteMissedSomething && Object.keys(merged).length) {
+      await _upsertBillingSetting('billing_invoiced_shifts', billingInvoicedShifts);
+    }
+  } catch(e) { console.warn('billing invoiced-shift ledger remote load error:', e); }
+}
+// Merge-union push — a "billed" mark from this device must never clobber another
+// device's newer mark (that is a DOUBLE-INVOICE risk), and vice versa.
+function saveBillingInvoicedShifts() {
+  localStorage.setItem(BILLING_INVOICED_KEY, JSON.stringify(billingInvoicedShifts));
+  (async () => {
+    if (!supabaseClient) return;
+    try {
+      const { data } = await supabaseClient
+        .from('app_settings').select('value').eq('key', 'billing_invoiced_shifts').maybeSingle();
+      const remote = (data && data.value && typeof data.value === 'object' && !Array.isArray(data.value)) ? data.value : {};
+      billingInvoicedShifts = _mergeBillingInvoiced(billingInvoicedShifts, remote);
+      localStorage.setItem(BILLING_INVOICED_KEY, JSON.stringify(billingInvoicedShifts));
+      await _upsertBillingSetting('billing_invoiced_shifts', billingInvoicedShifts);
+    } catch(e) { console.warn('billing invoiced-shift ledger sync error:', e); }
+  })();
+}
+
+function shiftInvoiceMark(s) {
+  const e = billingInvoicedShifts[String(s && s.id)];
+  return (e && !e.deleted) ? e : null;
+}
+function isShiftInvoiced(s) { return !!shiftInvoiceMark(s); }
+
+function markShiftsInvoiced(shifts, client, invoiceId, periodKey) {
+  const at = new Date().toISOString();
+  let n = 0;
+  (shifts || []).forEach(s => {
+    if (!s || s.id === undefined || s.id === null) return;
+    billingInvoicedShifts[String(s.id)] = {
+      at, invoiceId: invoiceId || '', client: client || '',
+      periodKey: periodKey || '', by: currentInternalUser || 'System'
+    };
+    n++;
+  });
+  if (n) saveBillingInvoicedShifts();
+  return n;
+}
+function unmarkShiftsInvoiced(shifts) {
+  const deletedAt = new Date().toISOString();
+  let n = 0;
+  (shifts || []).forEach(s => {
+    if (!s || s.id === undefined || s.id === null) return;
+    billingInvoicedShifts[String(s.id)] = { deleted: true, deletedAt, by: currentInternalUser || 'System' };
+    n++;
+  });
+  if (n) saveBillingInvoicedShifts();
+  return n;
+}
+
+// ── Legacy back-fill ──────────────────────────────────────────────────────────
+// Invoices raised BEFORE this build recorded no shift IDs. For a shift with no
+// ledger record, find the newest non-deleted "sent" mark for this client whose
+// period contains the shift's date: if the shift was worked on or before that
+// invoice went out, it was on that invoice. Lucent Dining, sent 7 Sep for
+// September → 2/9, 4/9, 6/9, 7/9 are billed; 10/9–13/9 are genuinely new.
+// Works from month AND week sent keys, so both views agree.
+function _billingLegacySentOnFor(clientName, isoDate) {
+  if (!isoDate) return null;
+  let best = null;
+  Object.entries(billingSentLog || {}).forEach(([k, e]) => {
+    if (!e || e.deleted || !e.sentAt) return;
+    const sep = k.lastIndexOf('__');
+    if (sep < 0 || k.slice(0, sep) !== clientName) return;
+    const tok = k.slice(sep + 2);
+    let start, end;
+    if (tok.charAt(0) === 'W') { start = tok.slice(1); end = _blDateAdd(start, 6); }
+    else {
+      const y = parseInt(tok.slice(0, 4), 10), m = parseInt(tok.slice(5, 7), 10);
+      if (!y || !m) return;
+      start = `${y}-${String(m).padStart(2,'0')}-01`;
+      end   = _blMonthEnd(y, m);
+    }
+    if (isoDate < start || isoDate > end) return;
+    const on = String(e.sentAt).slice(0, 10);
+    if (!best || on > best) best = on;
+  });
+  return best;
+}
+
+// Split one client's period shifts into already-billed and still-to-bill.
+// Precedence: explicit ledger record → explicit tombstone (you un-billed it) →
+// legacy inference from the invoice date → not billed.
+function billingSplitShifts(d) {
+  const shifts = (d && Array.isArray(d.shifts)) ? d.shifts : [];
+  const billed = [], unbilled = [];
+  let inferred = 0;
+  shifts.forEach(s => {
+    const rec = billingInvoicedShifts[String(s.id)];
+    if (rec && !rec.deleted) { billed.push(s); return; }
+    if (rec && rec.deleted)  { unbilled.push(s); return; }   // you un-billed it — that wins
+    // A card shift already charged on Stripe is money collected: it is billed,
+    // with no extra bookkeeping — stripe_charge_id is the record.
+    if (s.stripe_charge_id) { billed.push(s); return; }
+    const sentOn = _billingLegacySentOnFor(d.billingName, String(s.shift_date || ''));
+    if (sentOn && String(s.shift_date) <= sentOn) { inferred++; billed.push(s); return; }
+    unbilled.push(s);
+  });
+  return { billed, unbilled, inferred };
+}
+
+// ── Period view controls ──────────────────────────────────────────────────────
+function setBillingViewMode(mode) {
+  billingViewMode = (mode === 'week') ? 'week' : 'month';
+  if (billingIsWeekView() && !billingWeekStart) billingWeekStart = billingDefaultWeekStart();
+  clearBillingCache();           // month and week ranges must never share a cache
+  loadBillingPage();
+}
+function billingWeekShift(n) {
+  billingWeekStart = _blDateAdd(billingWeekStart || billingDefaultWeekStart(), 7 * n);
+  clearBillingCache();
+  loadBillingPage();
+}
+function billingWeekPick(iso) {
+  billingWeekStart = iso ? _blMonday(iso) : billingDefaultWeekStart();
+  clearBillingCache();
+  loadBillingPage();
+}
+function setBillingCycleOnly(on) {
+  billingCycleOnly = !!on;
+  loadBillingPage();
+}
+
 // ── v82: Team sync (app_settings) ─────────────────────────────────────────────
 // All three billing stores used to be localStorage-ONLY — which is exactly why a
 // different computer showed different billing info. They now live in the shared
@@ -24780,7 +25025,8 @@ async function loadBillingRemote() {
   await Promise.all([
     _loadBillingSettingsRemote(),
     _loadBillingSentLogRemote(),
-    _loadBillingHiddenRemote()
+    _loadBillingHiddenRemote(),
+    _loadBillingInvoicedRemote()   // v119: per-shift invoiced ledger
   ]);
 }
 
@@ -24954,6 +25200,9 @@ function saveBillingSentLog() {
   })();
 }
 function billingSentKey(clientName, year, month) {
+  // v119: in the weekly view the period IS the week, so the sent mark is keyed
+  // by the Monday — a week invoice can never mark a whole month as sent.
+  if (billingIsWeekView()) return `${clientName}__W${billingWeekStart || billingDefaultWeekStart()}`;
   return `${clientName}__${year}-${String(month).padStart(2,'0')}`;
 }
 function isBillingSent(clientName, year, month) {
@@ -25063,6 +25312,7 @@ async function _billingChargeRemaining(idx, year, month) {
     toast(`No shifts charged for ${name} — ${failed} failed.`, 'error');
   }
   if (failures.length) { try { console.warn('[stripe batch] failures:', failures); } catch (e) {} _showStripeDecline(failures.slice(0, 6).join('\n')); }
+  clearBillingCache();   // v119: re-read so the charged shifts show as billed
   await loadBillingPage();
 }
 
@@ -25089,14 +25339,37 @@ function billingInitPeriodSelectors() {
     yearSel.value  = prev.getFullYear();
     monthSel.value = prev.getMonth() + 1;
   }
+  // v119: weekly view controls
+  if (!billingWeekStart) billingWeekStart = billingDefaultWeekStart();
+  const wk = billingIsWeekView();
+  const modeSel = document.getElementById('billing-viewmode');
+  if (modeSel) modeSel.value = billingViewMode;
+  yearSel.style.display  = wk ? 'none' : '';
+  monthSel.style.display = wk ? 'none' : '';
+  const nav = document.getElementById('billing-week-nav');
+  if (nav) nav.style.display = wk ? 'inline-flex' : 'none';
+  const wkDate = document.getElementById('billing-week-date');
+  if (wkDate) wkDate.value = billingWeekStart;
+  const wkLabel = document.getElementById('billing-week-label');
+  if (wkLabel) wkLabel.textContent = `${_blPretty(billingWeekStart)} – ${_blPretty(billingWeekEnd())}`;
+  const cycleWord = document.getElementById('billing-cycle-word');
+  if (cycleWord) cycleWord.textContent = wk ? 'weekly' : 'monthly';
+  const cycleBox = document.getElementById('billing-cycle-only');
+  if (cycleBox) cycleBox.checked = billingCycleOnly;
 }
 function getBillingPeriod() {
   const y = parseInt(document.getElementById('billing-year')?.value)  || new Date().getFullYear();
   const m = parseInt(document.getElementById('billing-month')?.value) || new Date().getMonth();
   return { year: y, month: m };
 }
-function billingPeriodStart(y, m) { return `${y}-${String(m).padStart(2,'0')}-01`; }
+// v119: in the weekly view every range resolves to the Mon–Sun on screen, so
+// every existing (year, month) call site keeps working untouched.
+function billingPeriodStart(y, m) {
+  if (billingIsWeekView()) return billingWeekStart || billingDefaultWeekStart();
+  return `${y}-${String(m).padStart(2,'0')}-01`;
+}
 function billingPeriodEnd(y, m)   {
+  if (billingIsWeekView()) return billingWeekEnd();
   const last = new Date(y, m, 0).getDate();
   return `${y}-${String(m).padStart(2,'0')}-${String(last).padStart(2,'0')}`;
 }
@@ -25181,7 +25454,10 @@ function setBillingCountry(v) {
 
 async function fetchPayableShiftsForPeriod(year, month) {
   // v86: country-scoped cache key — an SG month cache must never serve MY.
-  const cacheKey = `${billingCountry}:${year}-${String(month).padStart(2,'0')}`;
+  // v119: period-scoped too — a month cache must never serve the weekly view.
+  const cacheKey = billingIsWeekView()
+    ? `${billingCountry}:W${billingWeekStart || billingDefaultWeekStart()}`
+    : `${billingCountry}:${year}-${String(month).padStart(2,'0')}`;
   if (Array.isArray(billingPeriodShiftsCache[cacheKey])) {
     return billingPeriodShiftsCache[cacheKey];
   }
@@ -25382,7 +25658,8 @@ function computeClientBilling(billingName, periodShifts) {
     incompleteCount:  0,
     paymentTermsDays: cfg.paymentTermsDays || 30,
     emails:           cfg.emails || [],
-    xeroContactId:    cfg.xeroContactId || ''
+    xeroContactId:    cfg.xeroContactId || '',
+    billingCycle:     clientBillingCycle(billingName)   // v119: 'weekly' | 'monthly'
   };
 }
 
@@ -25419,13 +25696,14 @@ function getBillingClients(periodShifts) {
 async function loadBillingPage() {
   loadBillingSettings();
   loadBillingSentLog();
+  loadBillingInvoiced();          // v119: per-shift invoiced ledger (local cache)
   // v82: pull the shared billing stores so this device renders the SAME config,
   // groupings and sent-marks as every other device (fixes per-computer drift).
   try { await loadBillingRemote(); } catch(e) {}
   billingInitPeriodSelectors();
 
   const { year, month } = getBillingPeriod();
-  const periodLabel = `${BILLING_MONTHS[month-1]} ${year}`;
+  const periodLabel = billingPeriodLabel(year, month);
 
   // Show loading state
   const tableEl = document.getElementById('billing-table-body');
@@ -25437,15 +25715,36 @@ async function loadBillingPage() {
   const billingData  = clients.map(c => computeClientBilling(c, periodShifts));
 
   // Only show clients with shifts in table (settings modal shows all)
-  const visibleData = billingData.filter(d => d.shiftCount > 0 || isBillingSent(d.billingName, year, month));
+  let visibleData = billingData.filter(d => d.shiftCount > 0 || isBillingSent(d.billingName, year, month));
 
-  const totalRevenue      = visibleData.reduce((s, d) => s + d.subtotal, 0);
-  const totalWorkerPayout = visibleData.reduce((s, d) => s + d.workerPayout, 0);
-  const totalCommission   = visibleData.reduce((s, d) => s + d.commissionAmt, 0);
-  // A client is "billed" when its Xero invoice is sent OR all its card shifts are
-  // charged on Stripe (fully charged), so the counts reflect Stripe billing too.
-  const sentCount    = visibleData.filter(d => billingClientIsSettled(d, year, month)).length;
-  const pendingCount = visibleData.filter(d => d.shiftCount > 0 && !billingClientIsSettled(d, year, month)).length;
+  // v119: each view lists the clients that are actually billed on that cycle.
+  // Card-payment clients default to weekly; everyone else to monthly. Untick the
+  // box in the header to see every client in either view.
+  const cycleWord = billingIsWeekView() ? 'weekly' : 'monthly';
+  const offCycleCount = visibleData.filter(d => d.billingCycle !== cycleWord).length;
+  if (billingCycleOnly && offCycleCount) {
+    visibleData = visibleData.filter(d => d.billingCycle === cycleWord);
+  }
+
+  // v119: split every client's shifts into already-billed and still-to-bill, and
+  // build the "what would I invoice right now" figures from the unbilled ones.
+  const splits = {}, newData = {};
+  visibleData.forEach(d => {
+    const sp = billingSplitShifts(d);
+    splits[d.billingName]  = sp;
+    newData[d.billingName] = sp.unbilled.length === d.shiftCount
+      ? d                                                        // nothing billed yet — reuse
+      : computeClientBilling(d.billingName, sp.unbilled);
+  });
+
+  const totalRevenue      = visibleData.reduce((s, d) => s + newData[d.billingName].subtotal, 0);
+  const totalWorkerPayout = visibleData.reduce((s, d) => s + newData[d.billingName].workerPayout, 0);
+  const totalCommission   = visibleData.reduce((s, d) => s + newData[d.billingName].commissionAmt, 0);
+  const shiftsToBill      = visibleData.reduce((s, d) => s + splits[d.billingName].unbilled.length, 0);
+  // v119: "billed" now means every shift in the period is on an invoice (or all
+  // its card shifts are charged on Stripe) — not merely that the month was ticked.
+  const sentCount    = visibleData.filter(d => d.shiftCount > 0 && (splits[d.billingName].unbilled.length === 0 || clientStripeChargeStatus(d).state === 'full')).length;
+  const pendingCount = visibleData.filter(d => splits[d.billingName].unbilled.length > 0 && clientStripeChargeStatus(d).state !== 'full').length;
 
   // Metrics
   const metricsEl = document.getElementById('billing-metrics');
@@ -25455,23 +25754,27 @@ async function loadBillingPage() {
       <div class="metric-val" style="font-size:17px;">${periodLabel}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Total Billed (incl. commission)</div>
-      <div class="metric-val green">$${totalRevenue.toFixed(2)}</div>
+      <div class="metric-label">Still To Invoice (incl. commission)</div>
+      <div class="metric-val green">${billingCurrencySymbol()}${totalRevenue.toFixed(2)}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Base Amount (SG only)</div>
-      <div class="metric-val blue">$${totalWorkerPayout.toFixed(2)}</div>
+      <div class="metric-label">Base Amount (to bill)</div>
+      <div class="metric-val blue">${billingCurrencySymbol()}${totalWorkerPayout.toFixed(2)}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Commission Income</div>
-      <div class="metric-val amber">$${totalCommission.toFixed(2)}</div>
+      <div class="metric-label">Commission (to bill)</div>
+      <div class="metric-val amber">${billingCurrencySymbol()}${totalCommission.toFixed(2)}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Clients Billed ✅</div>
+      <div class="metric-label">Shifts To Bill</div>
+      <div class="metric-val ${shiftsToBill > 0 ? 'amber' : 'green'}">${shiftsToBill}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Clients Fully Billed ✅</div>
       <div class="metric-val green">${sentCount}</div>
     </div>
     <div class="metric-card">
-      <div class="metric-label">Pending Billing</div>
+      <div class="metric-label">Clients Pending</div>
       <div class="metric-val ${pendingCount > 0 ? 'amber' : 'green'}">${pendingCount}</div>
     </div>`;
 
@@ -25488,8 +25791,8 @@ async function loadBillingPage() {
   if (!visibleData.length) {
     tableEl.innerHTML = `<div class="empty-state">
       <div class="empty-icon">🧾</div>
-      <p>No clients with completed shifts in ${periodLabel}.</p>
-      <p style="font-size:12px;color:var(--text3);margin-top:6px;">Shifts need both clock-in and clock-out to appear here. Use ⚙️ Client Settings to group outlets.</p>
+      <p>No ${billingCycleOnly ? cycleWord + ' ' : ''}clients with completed shifts in ${periodLabel}.</p>
+      <p style="font-size:12px;color:var(--text3);margin-top:6px;">${billingCycleOnly && offCycleCount ? `${offCycleCount} client${offCycleCount!==1?'s are':' is'} on the other cycle — untick “Only ${cycleWord} clients” in the header to see ${offCycleCount!==1?'them':'it'}. ` : ''}Shifts need both clock-in and clock-out to appear here. Use ⚙️ Client Settings to group outlets and set each client's billing cycle.</p>
     </div>`;
     return;
   }
@@ -25499,6 +25802,7 @@ async function loadBillingPage() {
       <th>Billing Client</th>
       <th>Outlets</th>
       <th>Shifts</th>
+      <th>Billed / To Bill</th>
       <th>Base Amount</th>
       <th>Taxi/PTC</th>
       <th>Comp.</th>
@@ -25510,6 +25814,7 @@ async function loadBillingPage() {
     </tr></thead><tbody>`;
 
   _billingClientIndex = visibleData.map(d => d.billingName);
+  _billingRowState = {};   // v119: per-row shift data for the expandable detail
 
   visibleData.forEach((d, idx) => {
     const sent     = isBillingSent(d.billingName, year, month);
@@ -25518,17 +25823,30 @@ async function loadBillingPage() {
     // An "unclaimed" outlet is one that has shifts but no billingClientSettings entry
     const isUnclaimed = !billingClientSettings[d.billingName];
 
+    // v119: what is actually on an invoice vs what still needs one.
+    const sp        = splits[d.billingName];
+    const dNew      = newData[d.billingName];
+    const billedN   = sp.billed.length;
+    const toBillN   = sp.unbilled.length;
+    _billingRowState[idx] = { name: d.billingName, shifts: d.shifts, split: sp, year, month };
+
     // Stripe charge status (partial / full) derived live from the client's shifts.
     const stripe = clientStripeChargeStatus(d);
-    const statusBadge = sent
-      ? `<span class="badge badge-green" style="font-size:11px;">✅ Sent${sentInfo?.sentAt ? `<br><span style="font-size:10px;opacity:0.8;">${new Date(sentInfo.sentAt).toLocaleDateString('en-SG')}</span>` : ''}</span>`
-      : stripe.state === 'full'
-        ? `<span class="badge badge-green" style="font-size:11px;background:rgba(99,91,255,0.15);color:#8b83ff;border:1px solid rgba(99,91,255,0.4);" title="All ${stripe.chargeable} card shift${stripe.chargeable!==1?'s':''} charged on Stripe">💳 Fully charged</span>`
-        : stripe.state === 'partial'
-          ? `<span class="badge badge-amber" style="font-size:11px;" title="${stripe.charged} of ${stripe.chargeable} card shifts charged on Stripe — ${stripe.uncharged.length} still to charge">💳 Partially charged<br><span style="font-size:10px;opacity:0.85;">${stripe.charged}/${stripe.chargeable} shifts</span></span>`
-          : noShifts
-            ? `<span class="badge" style="background:var(--bg3);color:var(--text3);font-size:11px;">No shifts</span>`
-            : `<span class="badge badge-amber" style="font-size:11px;">⏳ Pending</span>`;
+    const stripeChip = stripe.state === 'full'
+      ? `<div style="margin-top:4px;"><span class="badge" style="font-size:10px;background:rgba(99,91,255,0.15);color:#8b83ff;border:1px solid rgba(99,91,255,0.4);" title="All ${stripe.chargeable} card shift${stripe.chargeable!==1?'s':''} charged on Stripe">💳 Card charged</span></div>`
+      : stripe.state === 'partial'
+        ? `<div style="margin-top:4px;"><span class="badge badge-amber" style="font-size:10px;" title="${stripe.charged} of ${stripe.chargeable} card shifts charged on Stripe">💳 ${stripe.charged}/${stripe.chargeable} charged</span></div>`
+        : '';
+
+    const statusBadge = (noShifts
+      ? (sent
+          ? `<span class="badge badge-green" style="font-size:11px;">✅ Sent${sentInfo?.sentAt ? `<br><span style="font-size:10px;opacity:0.8;">${new Date(sentInfo.sentAt).toLocaleDateString('en-SG')}</span>` : ''}</span>`
+          : `<span class="badge" style="background:var(--bg3);color:var(--text3);font-size:11px;">No shifts</span>`)
+      : toBillN === 0
+        ? `<span class="badge badge-green" style="font-size:11px;" title="Every shift in this period is on an invoice">✅ All billed<br><span style="font-size:10px;opacity:0.8;">${billedN} shift${billedN!==1?'s':''}${sp.inferred ? ' · inferred' : ''}</span></span>`
+        : billedN > 0
+          ? `<span class="badge badge-amber" style="font-size:11px;" title="${billedN} shift${billedN!==1?'s':''} already invoiced, ${toBillN} still to bill">🟡 ${toBillN} to bill<br><span style="font-size:10px;opacity:0.85;">${billedN} already billed${sp.inferred ? ' (inferred)' : ''}</span></span>`
+          : `<span class="badge badge-amber" style="font-size:11px;">⏳ Not billed<br><span style="font-size:10px;opacity:0.85;">${toBillN} shift${toBillN!==1?'s':''}</span></span>`) + stripeChip;
 
     const emailHint = d.emails.length
       ? `<div style="font-size:11px;color:var(--text3);">${escapeHtml(d.emails[0])}${d.emails.length > 1 ? ` +${d.emails.length-1} more` : ''}</div>`
@@ -25536,36 +25854,56 @@ async function loadBillingPage() {
         ? `<div style="font-size:11px;color:var(--text3);">⚠️ Unconfigured outlet</div>`
         : `<div style="font-size:11px;color:var(--amber);">⚠️ No email set</div>`;
 
+    // v119: the client's own billing cycle, so a weekly client is obvious in the
+    // monthly view (and vice versa) when the cycle filter is off.
+    const cycleChip = d.billingCycle === 'weekly'
+      ? `<span class="badge" style="font-size:9px;background:rgba(45,212,191,0.14);color:var(--teal);border:1px solid rgba(45,212,191,0.35);padding:1px 6px;" title="Billed weekly (Mon–Sun)">🗓 Weekly</span>`
+      : `<span class="badge" style="font-size:9px;background:var(--bg3);color:var(--text3);padding:1px 6px;" title="Billed monthly">📅 Monthly</span>`;
+
     const outletDisplay = d.outlets.length
       ? `<div style="font-size:11px;color:var(--text3);">${d.outlets.map(o => escapeHtml(o)).join(', ')}</div>`
       : `<div style="font-size:11px;color:var(--text3);">—</div>`;
 
+    // Money columns show WHAT YOU WOULD INVOICE NOW (the un-billed shifts). When
+    // part of the period is already on an invoice, the full-period figure is kept
+    // underneath in grey so nothing looks like it went missing.
+    const sub = (nowVal, allVal) => (billedN > 0 && Math.abs(nowVal - allVal) > 0.005)
+      ? `<div style="font-size:10px;color:var(--text3);">period ${billingCurrencySymbol()}${allVal.toFixed(2)}</div>` : '';
+
     html += `<tr${isUnclaimed ? ' style="opacity:0.7;"' : ''}>
       <td>
         <div class="worker-name">${escapeHtml(d.billingName)}</div>
+        <div style="margin:3px 0 2px;">${cycleChip}</div>
         ${emailHint}
       </td>
       <td>${outletDisplay}</td>
       <td><span style="font-family:var(--mono);">${d.shiftCount}</span></td>
-      <td style="font-family:var(--mono);color:var(--accent);">$${d.workerPayout.toFixed(2)}</td>
-      <td style="font-family:var(--mono);color:${d.taxiTotal > 0 ? 'var(--purple)' : 'var(--text3)'};">${d.taxiTotal > 0 ? '$'+d.taxiTotal.toFixed(2) : '—'}</td>
-      <td style="font-family:var(--mono);color:${d.compTotal > 0 ? 'var(--teal)' : 'var(--text3)'};">${d.compTotal > 0 ? '$'+d.compTotal.toFixed(2) : '—'}</td>
-      <td style="font-family:var(--mono);color:var(--amber);">$${d.commissionAmt.toFixed(2)} <span style="font-size:10px;color:var(--text3);">(${d.commissionLabel})</span></td>
-      <td style="font-family:var(--mono);font-weight:700;color:var(--green);">$${d.subtotal.toFixed(2)}</td>
+      <td>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <span style="font-family:var(--mono);font-size:12px;color:${billedN ? 'var(--green)' : 'var(--text3)'};" title="Shifts already on an invoice">✅ ${billedN}</span>
+          <span style="font-family:var(--mono);font-size:12px;color:${toBillN ? 'var(--amber)' : 'var(--text3)'};font-weight:${toBillN ? '700' : '400'};" title="Shifts not yet invoiced">🟡 ${toBillN}</span>
+        </div>
+        ${d.shiftCount ? `<button class="btn btn-ghost btn-sm" style="padding:1px 7px;font-size:10px;margin-top:4px;" onclick="_billingToggleDetail(${idx})">🧾 Shifts</button>` : ''}
+      </td>
+      <td style="font-family:var(--mono);color:var(--accent);">${billingCurrencySymbol()}${dNew.workerPayout.toFixed(2)}${sub(dNew.workerPayout, d.workerPayout)}</td>
+      <td style="font-family:var(--mono);color:${dNew.taxiTotal > 0 ? 'var(--purple)' : 'var(--text3)'};">${dNew.taxiTotal > 0 ? billingCurrencySymbol()+dNew.taxiTotal.toFixed(2) : '—'}</td>
+      <td style="font-family:var(--mono);color:${dNew.compTotal > 0 ? 'var(--teal)' : 'var(--text3)'};">${dNew.compTotal > 0 ? billingCurrencySymbol()+dNew.compTotal.toFixed(2) : '—'}</td>
+      <td style="font-family:var(--mono);color:var(--amber);">${billingCurrencySymbol()}${dNew.commissionAmt.toFixed(2)} <span style="font-size:10px;color:var(--text3);">(${d.commissionLabel})</span></td>
+      <td style="font-family:var(--mono);font-weight:700;color:${toBillN ? 'var(--green)' : 'var(--text3)'};">${billingCurrencySymbol()}${dNew.subtotal.toFixed(2)}${sub(dNew.subtotal, d.subtotal)}</td>
       <td style="font-size:12px;color:var(--text2);">${d.paymentTermsDays}d</td>
       <td>${statusBadge}</td>
       <td style="text-align:right;">
         <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;">
           ${!noShifts ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('preview',${idx},${year},${month})">👁 Preview</button>` : ''}
-          ${!sent && stripe.uncharged.length ? `<button class="btn btn-sm" style="background:#635bff;border-color:#635bff;color:#fff;white-space:nowrap;" onclick="_billingChargeRemaining(${idx},${year},${month})" title="Charge the ${stripe.uncharged.length} not-yet-charged card shift${stripe.uncharged.length!==1?'s':''} on ${escapeAttr(d.billingName)}'s saved card (15% commission). Auto-marks the client fully charged when done.">💳 Charge remaining (${stripe.uncharged.length})</button>` : ''}
-          ${!sent && !noShifts && !isUnclaimed ? `<button class="btn btn-primary btn-sm" onclick="_billingAction('send',${idx},${year},${month})">📤 Send Invoice</button>` : ''}
-          ${sent ? `<button class="btn btn-ghost btn-sm" style="color:var(--text3);" onclick="_billingAction('unsend',${idx},${year},${month})">↩ Unsend</button>` : ''}
+          ${toBillN && stripe.uncharged.length ? `<button class="btn btn-sm" style="background:#635bff;border-color:#635bff;color:#fff;white-space:nowrap;" onclick="_billingChargeRemaining(${idx},${year},${month})" title="Charge the ${stripe.uncharged.length} not-yet-charged card shift${stripe.uncharged.length!==1?'s':''} on ${escapeAttr(d.billingName)}'s saved card (15% commission).">💳 Charge remaining (${stripe.uncharged.length})</button>` : ''}
+          ${toBillN && !isUnclaimed ? `<button class="btn btn-primary btn-sm" onclick="_billingAction('send',${idx},${year},${month})" title="One invoice covering the ${toBillN} shift${toBillN!==1?'s':''} that haven't been billed yet">📤 Invoice ${toBillN} shift${toBillN!==1?'s':''}</button>` : ''}
+          ${sent ? `<button class="btn btn-ghost btn-sm" style="color:var(--text3);" onclick="_billingAction('unsend',${idx},${year},${month})" title="Clear the sent mark for this period and put its shifts back to 'to bill'">↩ Unsend</button>` : ''}
           ${!noShifts && !isUnclaimed ? `<button class="btn btn-ghost btn-sm" onclick="_billingAction('excel',${idx},${year},${month})">⬇️ Excel</button>` : ''}
           ${isUnclaimed ? `<button class="btn btn-danger btn-sm" onclick="hideBillingOutlet(${JSON.stringify(d.billingName)})" title="Permanently hide this outlet from billing">🙈 Hide</button>` : ''}
         </div>
       </td>
-
-    </tr>`;
+    </tr>
+    <tr id="bl-detail-${idx}" style="display:none;"><td colspan="12" style="background:var(--bg3);padding:0;">${_billingShiftDetailHtml(idx)}</td></tr>`;
   });
 
   html += '</tbody></table></div>';
@@ -25574,10 +25912,113 @@ async function loadBillingPage() {
 async function _billingAction(action, idx, year, month) {
   const name = _bcName(idx);
   if (!name) { toast('Client not found', 'error'); return; }
-  if (action === 'preview') await openSendBillingModal(name, year, month, true);
-  else if (action === 'send')   await openSendBillingModal(name, year, month, false);
+  // v119: Preview and Send default to the UN-BILLED shifts only — an invoice
+  // never re-bills work that is already on one. The modal has a toggle to
+  // switch to the whole period when you deliberately want to re-issue.
+  const sp = _billingRowState[idx]?.split;
+  const scope = (sp && sp.unbilled.length === 0) ? 'all' : 'new';
+  if (action === 'preview') await openSendBillingModal(name, year, month, true, scope);
+  else if (action === 'send')   await openSendBillingModal(name, year, month, false, scope);
   else if (action === 'unsend') undoBillingSent(name, year, month);
   else if (action === 'excel')  await downloadClientExcel(name, year, month);
+}
+
+// ── v119: per-row shift ledger detail ─────────────────────────────────────────
+// Per-row shift data for the expandable "🧾 Shifts" panel. Rebuilt on every
+// render, so it can never point at a stale shift list.
+let _billingRowState = {};
+
+function _billingToggleDetail(idx) {
+  const row = document.getElementById('bl-detail-' + idx);
+  if (!row) return;
+  row.style.display = (row.style.display === 'none' || !row.style.display) ? 'table-row' : 'none';
+}
+
+function _billingShiftDetailHtml(idx) {
+  const st = _billingRowState[idx];
+  if (!st) return '';
+  const sym = billingCurrencySymbol();
+  const rows = (st.shifts || [])
+    .slice()
+    .sort((a, b) => String(a.shift_date).localeCompare(String(b.shift_date))
+                 || String(a.scheduled_start || '').localeCompare(String(b.scheduled_start || '')))
+    .map(s => {
+      const mark   = shiftInvoiceMark(s);
+      const billed = st.split.billed.some(b => String(b.id) === String(s.id));
+      // "Inferred" = no ledger record, but the period carries an older sent mark
+      // dated on/after this shift, so it was on that pre-v119 invoice.
+      const inferred = billed && !mark;
+      const amt = payoutForShift(s) + compensationBillable(s) + parseFloat(s.transport_claim || 0);
+      const when = mark && mark.at ? new Date(mark.at).toLocaleDateString('en-SG') : '';
+      const pill = billed
+        ? `<span class="badge badge-green" style="font-size:10px;" title="${inferred ? 'No shift-level record — inferred from the invoice sent for this period' : 'Invoiced' + (when ? ' on ' + when : '') + (mark && mark.invoiceId ? ' · ' + escapeAttr(String(mark.invoiceId).slice(0,12)) : '')}">✅ Billed${inferred ? ' (inferred)' : when ? ' ' + when : ''}</span>`
+        : `<span class="badge badge-amber" style="font-size:10px;">🟡 To bill</span>`;
+      return `<tr>
+        <td style="padding:5px 8px;font-family:var(--mono);font-size:11px;white-space:nowrap;">${escapeHtml(String(s.shift_date || ''))}</td>
+        <td style="padding:5px 8px;font-size:12px;">${escapeHtml(s.worker_name || '—')}</td>
+        <td style="padding:5px 8px;font-size:11px;color:var(--text3);">${escapeHtml(s.outlet || '')}</td>
+        <td style="padding:5px 8px;font-family:var(--mono);font-size:11px;text-align:right;">${parseFloat(calcShiftHours(s) || 0).toFixed(2)}h</td>
+        <td style="padding:5px 8px;font-family:var(--mono);font-size:11px;text-align:right;color:var(--accent);">${sym}${amt.toFixed(2)}</td>
+        <td style="padding:5px 8px;">${pill}</td>
+        <td style="padding:5px 8px;text-align:right;">
+          <button class="btn btn-ghost btn-sm" style="padding:1px 7px;font-size:10px;" onclick="_billingToggleShiftBilled(${idx},'${escapeAttr(String(s.id))}')"
+            title="${billed ? 'Put this shift back on the to-bill list' : 'Mark this shift as already invoiced (e.g. billed outside ShiftOps)'}">${billed ? '↩ Un-bill' : '✓ Mark billed'}</button>
+        </td>
+      </tr>`;
+    }).join('');
+
+  const toBill = st.split.unbilled.length, billed = st.split.billed.length;
+  return `<div style="padding:10px 14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+      <div style="font-size:11px;color:var(--text3);">
+        <b style="color:var(--text2);">${escapeHtml(st.name)}</b> — ${billed} billed · ${toBill} to bill${st.split.inferred ? ` · ${st.split.inferred} inferred from an invoice sent before shift-level tracking existed` : ''}
+      </div>
+      <div style="display:flex;gap:6px;">
+        ${toBill ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:10px;" onclick="_billingBulkMark(${idx},true)" title="Mark every remaining shift as already invoiced without creating anything in Xero">✓ Mark all ${toBill} billed</button>` : ''}
+        ${billed ? `<button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:10px;" onclick="_billingBulkMark(${idx},false)" title="Put every shift in this period back on the to-bill list">↩ Un-bill all ${billed}</button>` : ''}
+      </div>
+    </div>
+    <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">
+      <thead><tr style="color:var(--text3);font-size:10px;text-transform:uppercase;">
+        <th style="text-align:left;padding:4px 8px;">Date</th>
+        <th style="text-align:left;padding:4px 8px;">Worker</th>
+        <th style="text-align:left;padding:4px 8px;">Outlet</th>
+        <th style="text-align:right;padding:4px 8px;">Hours</th>
+        <th style="text-align:right;padding:4px 8px;">Amount</th>
+        <th style="text-align:left;padding:4px 8px;">Status</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function _billingToggleShiftBilled(idx, shiftId) {
+  const st = _billingRowState[idx];
+  if (!st) return;
+  const s = (st.shifts || []).find(x => String(x.id) === String(shiftId));
+  if (!s) { toast('Shift not found', 'error'); return; }
+  const billed = st.split.billed.some(b => String(b.id) === String(s.id));
+  if (billed) unmarkShiftsInvoiced([s]); else markShiftsInvoiced([s], st.name, 'manual', billingSentKey(st.name, st.year, st.month));
+  try { logActivity(billed ? 'Billing: shift un-billed' : 'Billing: shift marked billed',
+    `${st.name} — ${s.worker_name} ${s.shift_date} @ ${s.outlet}`, 'billing', s.id, {}); } catch(e){}
+  loadBillingPage();
+}
+
+function _billingBulkMark(idx, billed) {
+  const st = _billingRowState[idx];
+  if (!st) return;
+  const targets = billed ? st.split.unbilled : st.split.billed;
+  if (!targets.length) return;
+  if (!confirm(billed
+    ? `Mark all ${targets.length} remaining shift${targets.length!==1?'s':''} for ${st.name} as ALREADY INVOICED?\n\nNothing is created in Xero — this only records that they have been billed, so they stop showing as "to bill".`
+    : `Put all ${targets.length} billed shift${targets.length!==1?'s':''} for ${st.name} back on the to-bill list?\n\nThe Xero invoice itself is not touched.`)) return;
+  if (billed) markShiftsInvoiced(targets, st.name, 'manual-bulk', billingSentKey(st.name, st.year, st.month));
+  else unmarkShiftsInvoiced(targets);
+  try { logActivity(billed ? 'Billing: shifts marked billed' : 'Billing: shifts un-billed',
+    `${st.name} — ${targets.length} shift(s)`, 'billing', null, {}); } catch(e){}
+  toast(billed ? `✅ ${targets.length} shift(s) marked billed` : `↩ ${targets.length} shift(s) back on the to-bill list`);
+  loadBillingPage();
 }
 
 // Global index for settings modal rows (avoids apostrophe issues)
@@ -25757,6 +26198,10 @@ function _billingToggleMode(idx, mode) {
   }
   const stripeRow = row.querySelector('.bs-stripecid')?.closest('.form-row');
   if (stripeRow) stripeRow.style.display = (mode === 'card') ? '' : 'none';
+  // v119: card-payment clients are billed weekly by default — switch the cycle
+  // with the method (still freely overridable before saving).
+  const cycleSel = row.querySelector('.bs-cycle');
+  if (cycleSel && mode === 'card' && cycleSel.value === 'monthly') cycleSel.value = 'weekly';
 }
 
 async function openBillingSettingsModal() {
@@ -25801,6 +26246,7 @@ function _renderBillingSettingsModal() {
     ${clients.map((client, idx) => {
       const cfg  = billingClientSettings[client] || {};
       const mode = cfg.billingMode === 'flat' ? 'flat' : (cfg.billingMode === 'card' ? 'card' : 'pct');
+      const cycle = clientBillingCycle(client);   // v119: card clients default to weekly
       const pct  = cfg.commissionPct !== undefined ? cfg.commissionPct : 20;
       const flat = cfg.flatPerShift !== undefined ? (parseFloat(cfg.flatPerShift) || 0) : 0;
       const days = cfg.paymentTermsDays || 30;
@@ -25827,13 +26273,22 @@ function _renderBillingSettingsModal() {
             </select>` : `<span style="font-size:11px;color:var(--text3);">No saved groups yet — create them in Reports → “Manage outlet groups”.</span>`}
           </div>
         </div>
-        <div class="form-row" style="margin-bottom:8px;">
-          <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Billing Method</label>
-          <select class="form-input bs-mode" onchange="_billingToggleMode(${idx}, this.value)">
-            <option value="pct"  ${mode==='pct'?'selected':''}>Commission % of worker pay</option>
-            <option value="flat" ${mode==='flat'?'selected':''}>Flat fee per shift ($)</option>
-            <option value="card" ${mode==='card'?'selected':''}>💳 Card payment via Stripe (always 15%)</option>
-          </select>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
+          <div class="form-row" style="margin:0;">
+            <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Billing Method</label>
+            <select class="form-input bs-mode" onchange="_billingToggleMode(${idx}, this.value)">
+              <option value="pct"  ${mode==='pct'?'selected':''}>Commission % of worker pay</option>
+              <option value="flat" ${mode==='flat'?'selected':''}>Flat fee per shift ($)</option>
+              <option value="card" ${mode==='card'?'selected':''}>💳 Card payment via Stripe (always 15%)</option>
+            </select>
+          </div>
+          <div class="form-row" style="margin:0;">
+            <label style="font-size:11px;color:var(--text3);margin-bottom:4px;display:block;">Billing Cycle <span style="opacity:0.6;">(which view this client appears in)</span></label>
+            <select class="form-input bs-cycle">
+              <option value="monthly" ${cycle==='monthly'?'selected':''}>📅 Monthly — one invoice per calendar month</option>
+              <option value="weekly"  ${cycle==='weekly'?'selected':''}>🗓 Weekly — one invoice per Mon–Sun week</option>
+            </select>
+          </div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
           <div class="form-row bs-pct-field" style="margin:0;${mode==='flat'?'display:none;':''}">
@@ -25908,6 +26363,8 @@ function saveBillingSettings() {
       commissionPct:    billingMode === 'card' ? 15 : (parseFloat(row.querySelector('.bs-commission')?.value) || 20),
       flatPerShift:     parseFloat(row.querySelector('.bs-flat')?.value) || 0,
       paymentTermsDays: parseInt(row.querySelector('.bs-terms')?.value) || 30,
+      // v119: 'weekly' clients are invoiced once per Mon–Sun week.
+      billingCycle:     row.querySelector('.bs-cycle')?.value === 'weekly' ? 'weekly' : 'monthly',
       emails:    (row.querySelector('.bs-emails')?.value || '').split(/[\n,]/).map(e => e.trim()).filter(Boolean),
       xeroContactId:    (row.querySelector('.bs-xeroid')?.value || '').trim(),
       stripeCustomerId: (row.querySelector('.bs-stripecid')?.value || '').trim(),
@@ -25958,7 +26415,7 @@ function addNewBillingClient() {
   const _newKey = name.replace(/\s+/g, ' ').trim().toLowerCase();
   const _clash = Object.keys(billingClientSettings).find(n => n.replace(/\s+/g, ' ').trim().toLowerCase() === _newKey);
   if (_clash) { toast(`A client named "${_clash}" already exists — names must be unique`, 'error'); return; }
-  billingClientSettings[name] = { billingMode: 'pct', commissionPct: 20, flatPerShift: 0, paymentTermsDays: 30, emails: [], xeroContactId: '', stripeCustomerId: '', outlets: [] };
+  billingClientSettings[name] = { billingMode: 'pct', billingCycle: 'monthly', commissionPct: 20, flatPerShift: 0, paymentTermsDays: 30, emails: [], xeroContactId: '', stripeCustomerId: '', outlets: [] };
   saveBillingSettingsAll();
   input.value = '';
   openBillingSettingsModal();
@@ -25990,14 +26447,23 @@ function clearAllBillingGroupings() {
 }
 
 // ── Send / Preview Modal ───────────────────────────────────────
-async function openSendBillingModal(billingName, year, month, previewOnly) {
+async function openSendBillingModal(billingName, year, month, previewOnly, scope) {
   loadBillingSettings();
-  billingCurrentClient = { billingName, year, month };
+  loadBillingInvoiced();
+  // v119: an invoice covers the shifts that have NOT been billed yet ('new').
+  // 'all' re-bills the whole period and is only reachable from the toggle.
+  scope = (scope === 'all') ? 'all' : 'new';
 
   // Fetch period shifts fresh (uses cache if already loaded)
   const periodShifts = await fetchPayableShiftsForPeriod(year, month);
-  const d = computeClientBilling(billingName, periodShifts);
-  const periodLabel = `${BILLING_MONTHS[month-1]} ${year}`;
+  const dAll  = computeClientBilling(billingName, periodShifts);
+  const spAll = billingSplitShifts(dAll);
+  const invShifts = (scope === 'all') ? dAll.shifts : spAll.unbilled;
+  const d = (scope === 'all') ? dAll : computeClientBilling(billingName, spAll.unbilled);
+  const periodLabel = billingPeriodLabel(year, month);
+
+  billingCurrentClient = { billingName, year, month, scope, previewOnly: !!previewOnly,
+                           shiftIds: invShifts.map(x => String(x.id)) };
 
   document.getElementById('billing-send-title').textContent =
     `${previewOnly ? '👁 Preview' : '📤 Send'} Invoice — ${billingName} (${periodLabel})`;
@@ -26037,7 +26503,18 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
     </tr>` : ''}
   `).join('');
 
-  let previewHtml = `
+  // v119: which shifts this invoice covers — and what it is leaving out.
+  const scopeBar = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;padding:9px 11px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);">
+      <span style="font-size:10px;color:var(--text3);text-transform:uppercase;font-family:var(--mono);">Invoice covers</span>
+      <button class="btn btn-sm ${scope === 'new' ? 'btn-primary' : 'btn-ghost'}" ${spAll.unbilled.length ? '' : 'disabled'} onclick="_billingSetScope('new')">🟡 Not yet billed (${spAll.unbilled.length})</button>
+      <button class="btn btn-sm ${scope === 'all' ? 'btn-primary' : 'btn-ghost'}" onclick="_billingSetScope('all')">📋 Whole period (${dAll.shiftCount})</button>
+      ${scope === 'new' && spAll.billed.length ? `<span style="font-size:11px;color:var(--text3);">${spAll.billed.length} already-invoiced shift${spAll.billed.length!==1?'s':''}${spAll.inferred ? ' (inferred from an earlier invoice)' : ''} excluded</span>` : ''}
+      ${scope === 'all' && spAll.billed.length ? `<span style="font-size:11px;color:var(--amber);">⚠️ this re-bills ${spAll.billed.length} shift${spAll.billed.length!==1?'s':''} that are already on an invoice</span>` : ''}
+      ${!d.shiftCount ? `<span style="font-size:11px;color:var(--amber);">Nothing to invoice — every shift in this period is already billed.</span>` : ''}
+    </div>`;
+
+  let previewHtml = scopeBar + `
     <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px;font-size:13px;">
       <div style="display:flex;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
         <div><div style="font-size:10px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;margin-bottom:3px;">Send to</div>
@@ -26067,7 +26544,7 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
         <span style="font-family:var(--mono);color:var(--green);font-size:16px;">${billingCurrencySymbol()}${d.subtotal.toFixed(2)}</span>
       </div>
       <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--text3);">
-        <span>📋 ${d.shiftCount} shifts across ${d.outletLineItems.length} outlet${d.outletLineItems.length !== 1 ? 's' : ''}</span>
+        <span>📋 ${d.shiftCount} shift${d.shiftCount !== 1 ? 's' : ''} across ${d.outletLineItems.length} outlet${d.outletLineItems.length !== 1 ? 's' : ''}</span>
         <span>•</span>
         <span>📅 Net ${d.paymentTermsDays} days</span>
       </div>
@@ -26075,6 +26552,14 @@ async function openSendBillingModal(billingName, year, month, previewOnly) {
 
   document.getElementById('billing-send-preview').innerHTML = previewHtml;
   document.getElementById('billing-send-modal').classList.add('open');
+}
+
+// v119: flip the open invoice between "only the un-billed shifts" and "the whole
+// period" — re-renders the modal from the same data, nothing is sent.
+function _billingSetScope(sc) {
+  if (!billingCurrentClient) return;
+  const { billingName, year, month, previewOnly } = billingCurrentClient;
+  openSendBillingModal(billingName, year, month, !!previewOnly, sc);
 }
 
 // ── Excel export ───────────────────────────────────────────────
@@ -26101,10 +26586,15 @@ function _xlsxSheetName(name, used) {
 
 // v83: builder shared by the download button AND the Xero attachment upload —
 // one source of truth, so the attached file is byte-identical to the download.
-async function buildClientUsageWorkbook(billingName, year, month) {
+async function buildClientUsageWorkbook(billingName, year, month, shiftIds) {
     const periodShifts = await fetchPayableShiftsForPeriod(year, month);
-    const d = computeClientBilling(billingName, periodShifts);
-    const periodLabel = `${BILLING_MONTHS[month-1]} ${year}`;
+    // v119: when the invoice covers only the un-billed shifts, the attachment has
+    // to cover exactly the same ones — otherwise the client's breakdown wouldn't
+    // add up to the invoice total.
+    const _idSet = (Array.isArray(shiftIds) && shiftIds.length) ? new Set(shiftIds.map(String)) : null;
+    const scoped = _idSet ? periodShifts.filter(x => _idSet.has(String(x.id))) : periodShifts;
+    const d = computeClientBilling(billingName, scoped);
+    const periodLabel = billingPeriodLabel(year, month);
     const wb = XLSX.utils.book_new();
 
     // Summary sheet - one row per outlet
@@ -26193,13 +26683,13 @@ async function buildClientUsageWorkbook(billingName, year, month) {
 
     const safe = billingName.replace(/[^a-zA-Z0-9]/g, '_');
     // v86: _MY suffix so a Malaysian report can't overwrite a same-name SG file.
-    const filename = `UsageReport_${safe}_${periodLabel.replace(' ','_')}${billingCountry === 'Malaysia' ? '_MY' : ''}.xlsx`;
+    const filename = `UsageReport_${safe}_${periodLabel.replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'')}${billingCountry === 'Malaysia' ? '_MY' : ''}.xlsx`;
     return { wb, filename };
 }
 
-async function downloadClientExcel(billingName, year, month) {
+async function downloadClientExcel(billingName, year, month, shiftIds) {
   try {
-    const { wb, filename } = await buildClientUsageWorkbook(billingName, year, month);
+    const { wb, filename } = await buildClientUsageWorkbook(billingName, year, month, shiftIds);
     XLSX.writeFile(wb, filename);
     toast(`Excel downloaded for ${billingName}`);
   } catch(e) {
@@ -26210,8 +26700,8 @@ async function downloadClientExcel(billingName, year, month) {
 // v83: upload the same usage workbook onto the freshly-created Xero invoice.
 // Base64 is built in 32KB chunks — String.fromCharCode on the whole buffer
 // blows the argument limit on large workbooks.
-async function uploadUsageAttachmentToXero(invoiceId, billingName, year, month) {
-  const { wb, filename } = await buildClientUsageWorkbook(billingName, year, month);
+async function uploadUsageAttachmentToXero(invoiceId, billingName, year, month, shiftIds) {
+  const { wb, filename } = await buildClientUsageWorkbook(billingName, year, month, shiftIds);
   const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const bytes = new Uint8Array(ab);
   let binary = '';
@@ -26239,8 +26729,9 @@ async function uploadUsageAttachmentToXero(invoiceId, billingName, year, month) 
 
 async function downloadBillingAttachment() {
   if (!billingCurrentClient) return;
-  const { billingName, year, month } = billingCurrentClient;
-  await downloadClientExcel(billingName, year, month);
+  // v119: matches the invoice on screen, not the whole period.
+  const { billingName, year, month, shiftIds } = billingCurrentClient;
+  await downloadClientExcel(billingName, year, month, shiftIds);
 }
 
 // ── Send invoice ───────────────────────────────────────────────
@@ -26255,8 +26746,14 @@ async function confirmSendInvoice() {
   if (!invoiceDate || !dueDate) { toast('Please set invoice and due dates', 'error'); return; }
 
   const periodShifts = await fetchPayableShiftsForPeriod(year, month);
-  const d = computeClientBilling(billingName, periodShifts);
-  if (!d.shiftCount) { toast('No shifts to invoice', 'error'); return; }
+  // v119: rebuild the exact scope the modal showed, from FRESH data — so a shift
+  // invoiced on another device in the meantime is never billed twice.
+  const dAll  = computeClientBilling(billingName, periodShifts);
+  const scope = (billingCurrentClient.scope === 'all') ? 'all' : 'new';
+  const spAll = billingSplitShifts(dAll);
+  const invShifts = (scope === 'all') ? dAll.shifts : spAll.unbilled;
+  const d = (scope === 'all') ? dAll : computeClientBilling(billingName, spAll.unbilled);
+  if (!d.shiftCount) { toast(scope === 'new' ? 'Nothing to invoice — every shift in this period is already billed.' : 'No shifts to invoice', 'error'); return; }
 
   // Save Xero contact ID back to settings
   if (xeroContactId) {
@@ -26278,7 +26775,7 @@ async function confirmSendInvoice() {
     if (invoiceId && !String(invoiceId).startsWith('MANUAL-')) {
       if (sendBtn) sendBtn.textContent = '📎 Attaching usage report…';
       try {
-        await uploadUsageAttachmentToXero(invoiceId, billingName, year, month);
+        await uploadUsageAttachmentToXero(invoiceId, billingName, year, month, invShifts.map(x => String(x.id)));
         toast('📎 Usage report attached to the Xero invoice');
       } catch(e) {
         console.warn('usage attachment upload failed:', e);
@@ -26286,8 +26783,11 @@ async function confirmSendInvoice() {
       }
     }
     markBillingSent(billingName, year, month, invoiceId);
-    try { await logActivity('Billing: Invoice sent', `${billingName} — ${BILLING_MONTHS[month-1]} ${year} — $${d.subtotal.toFixed(2)}`, 'billing', null, {}); } catch(e){}
-    toast(`✅ Invoice created for ${billingName} — $${d.subtotal.toFixed(2)}`);
+    // v119: record the EXACT shifts this invoice covered, so they can never be
+    // billed again and the next run shows only genuinely new work.
+    markShiftsInvoiced(invShifts, billingName, invoiceId, billingSentKey(billingName, year, month));
+    try { await logActivity('Billing: Invoice sent', `${billingName} — ${billingPeriodLabel(year, month)} — ${billingCurrencySymbol()}${d.subtotal.toFixed(2)} (${invShifts.length} shift${invShifts.length!==1?'s':''})`, 'billing', null, {}); } catch(e){}
+    toast(`✅ Invoice created for ${billingName} — ${billingCurrencySymbol()}${d.subtotal.toFixed(2)} · ${invShifts.length} shift${invShifts.length!==1?'s':''} marked billed`);
     document.getElementById('billing-send-modal').classList.remove('open');
     await loadBillingPage();
   } catch(e) {
@@ -26464,9 +26964,18 @@ function _showXeroManualModal(d, invoiceDate, dueDate, reference, lineItems, xer
 }
 
 function undoBillingSent(billingName, year, month) {
-  if (!confirm(`Remove "sent" status for ${billingName} (${BILLING_MONTHS[month-1]} ${year})?`)) return;
+  const key = billingSentKey(billingName, year, month);
+  // v119: every shift recorded under THIS period's invoice goes back to "to bill"
+  // — otherwise un-sending would leave the work permanently stuck as billed.
+  const ids = Object.keys(billingInvoicedShifts).filter(id => {
+    const e = billingInvoicedShifts[id];
+    return e && !e.deleted && e.client === billingName && e.periodKey === key;
+  });
+  if (!confirm(`Remove "sent" status for ${billingName} (${billingPeriodLabel(year, month)})?` +
+    (ids.length ? `\n\n${ids.length} shift${ids.length!==1?'s':''} invoiced under this period will go back to "to bill". The invoice in Xero is not touched.` : ''))) return;
   unmarkBillingSent(billingName, year, month);
-  toast(`Marked ${billingName} as unsent`);
+  if (ids.length) unmarkShiftsInvoiced(ids.map(id => ({ id })));
+  toast(`Marked ${billingName} as unsent${ids.length ? ` — ${ids.length} shift(s) back to bill` : ''}`);
   loadBillingPage();
 }
 
@@ -26475,16 +26984,26 @@ async function initBillingNavBadge() {
   try {
     loadBillingSettings();
     loadBillingSentLog();
+    loadBillingInvoiced();
     try { await loadBillingRemote(); } catch(e) {}
-    const now = new Date();
+    // v119: the badge counts clients with SHIFTS STILL TO BILL, across the
+    // current month as well as the previous one — a client invoiced mid-month
+    // whose staff worked again afterwards now shows up straight away.
+    const now  = new Date();
     const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const y = prev.getFullYear(), m = prev.getMonth() + 1;
-    const periodShifts = await fetchPayableShiftsForPeriod(y, m);
-    const clients = getBillingClients(periodShifts);
-    const pending = clients.filter(c => {
-      const d = computeClientBilling(c, periodShifts);
-      return d.shiftCount > 0 && !isBillingSent(c, y, m);
-    }).length;
+    const periods = [
+      { y: prev.getFullYear(),    m: prev.getMonth() + 1 },
+      { y: now.getFullYear(),     m: now.getMonth() + 1  }
+    ];
+    const pendingNames = new Set();
+    for (const p of periods) {
+      const periodShifts = await fetchPayableShiftsForPeriod(p.y, p.m);
+      getBillingClients(periodShifts).forEach(c => {
+        const d = computeClientBilling(c, periodShifts);
+        if (d.shiftCount > 0 && billingSplitShifts(d).unbilled.length > 0) pendingNames.add(c);
+      });
+    }
+    const pending = pendingNames.size;
     const badge = document.getElementById('billing-nav-badge');
     if (badge) { badge.textContent = pending; badge.style.display = pending > 0 ? 'inline-flex' : 'none'; }
   } catch(e) {}
@@ -30866,7 +31385,7 @@ function mergeTaskChecklists(a, b) {
           <button class="modal-close" onclick="document.getElementById('billing-settings-modal').classList.remove('open')">✕</button>
         </div>
         <div style="padding:0 18px 8px;">
-          <div class="alert alert-blue" style="margin-bottom:14px;"><span class="alert-icon">ℹ️</span><span>Configure commission %, payment terms, and billing email(s) per client. These settings are saved and remembered per client.</span></div>
+          <div class="alert alert-blue" style="margin-bottom:14px;"><span class="alert-icon">ℹ️</span><span>Configure commission %, <b>billing cycle</b>, payment terms, and billing email(s) per client. Weekly clients are invoiced once per Mon–Sun week from the 🗓 Weekly view; monthly clients from the 📅 Monthly view.</span></div>
           <div id="billing-settings-list"></div>
         </div>
         <div style="padding:14px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
